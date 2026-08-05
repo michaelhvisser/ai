@@ -2,7 +2,7 @@
 
 Loaded by `coverage-verification.md` Step B. This file owns the file-detection
 plumbing: the `CHANGED_FILES` collector, per-language source-file filters, the
-Go `get_pkg` comment-aware package extractor, and the gated/info partitioning.
+`is_entrypoint` path classifier, and the gated/info partitioning.
 
 ## Collect changed files
 
@@ -12,40 +12,42 @@ before the commit step:
 
 ```bash
 mkdir -p "$WORKTREE_PATH/.local/state"
-rm -f "$WORKTREE_PATH/.local/state/coverage.out" "$WORKTREE_PATH/.local/state/coverage.json" 2>/dev/null
+rm -f "$WORKTREE_PATH/coverage/coverage-summary.json" "$WORKTREE_PATH/coverage/coverage-final.json" "$WORKTREE_PATH/.local/state/coverage.json" "$WORKTREE_PATH/.local/state/coverage.out" 2>/dev/null
+# Monorepos write per-package coverage dirs; clear those too (never descend into node_modules).
+find "$WORKTREE_PATH" -maxdepth 4 -name node_modules -prune -o -name 'coverage-summary.json' -delete 2>/dev/null || true
 CHANGED_FILES=$( (git -C "$WORKTREE_PATH" diff --name-only "${BASE_BRANCH}...HEAD" 2>/dev/null; git -C "$WORKTREE_PATH" diff --name-only HEAD 2>/dev/null; git -C "$WORKTREE_PATH" diff --name-only --cached HEAD 2>/dev/null; git -C "$WORKTREE_PATH" ls-files --others --exclude-standard 2>/dev/null) | sort -u )
 ```
 
-The `rm -f` removes stale coverage artifacts from prior runs to prevent false
-results if the current coverage command fails.
+The `rm -f`/`find -delete` removes stale coverage artifacts from prior runs to
+prevent false results if the current coverage command fails.
 
 ## Per-language source filters
 
 Filter `CHANGED_FILES` to source files for the detected project type. Exclude
-test files, generated files, and vendored code.
+test files, type-only declarations, generated files, and build output.
 
-**Go** (`go.mod` exists):
+**Node/TypeScript** (`package.json` exists — the primary path):
 
 ```bash
-CHANGED_SRC=$(echo "$CHANGED_FILES" | grep '\.go$' \
-  | grep -v '_test\.go$' \
-  | grep -v '_templ\.go$' \
-  | grep -v '_mock\.go$' \
-  | grep -v '\.pb\.go$' \
-  | grep -v '_gen\.go$' \
-  | grep -v '^vendor/' \
+CHANGED_SRC=$(echo "$CHANGED_FILES" | grep -E '\.(ts|tsx|js|jsx|mjs|cjs|astro)$' \
+  | grep -v -E '\.(test|spec)\.[cm]?[jt]sx?$' \
+  | grep -v -E '(^|/)__(tests|mocks)__/' \
+  | grep -v -E '\.d\.ts$' \
+  | grep -v -E '\.stories\.[jt]sx?$' \
+  | grep -v -E '(^|/)(node_modules|dist|build|out|coverage|\.next|\.turbo|\.astro|\.svelte-kit|\.vercel)/' \
+  | grep -v -E '(^|/)convex/_generated/' \
+  | grep -v -E '(^|/)(generated|__generated__)/' \
   || true)
 ```
 
-**Node/TypeScript** (`package.json` exists):
+Notes on the exclusions:
 
-```bash
-CHANGED_SRC=$(echo "$CHANGED_FILES" | grep -E '\.(ts|tsx|js|jsx)$' \
-  | grep -v -E '\.(test|spec)\.' \
-  | grep -v '^node_modules/' \
-  | grep -v '^dist/' \
-  || true)
-```
+- `*.d.ts` carries no executable statements — coverage tools never report it.
+- `convex/_generated/` is machine-written by `npx convex codegen`; it is never
+  edited by hand and never gated. The same applies to any `generated/` or
+  `__generated__/` directory (GraphQL codegen, Prisma clients, route types).
+- `.next/`, `.turbo/`, `.astro/`, `.svelte-kit/`, `dist/`, `build/`, `out/` are
+  build output, not source.
 
 **Rust** (`Cargo.toml` exists):
 
@@ -63,65 +65,55 @@ CHANGED_SRC=$(echo "$CHANGED_FILES" | grep '\.py$' \
   || true)
 ```
 
+**Go** (fallback — `go.mod` exists and no `package.json`):
+
+```bash
+CHANGED_SRC=$(echo "$CHANGED_FILES" | grep '\.go$' \
+  | grep -v -E '(_test|_mock|_gen)\.go$' \
+  | grep -v -E '\.pb\.go$' \
+  | grep -v '^vendor/' \
+  || true)
+```
+
 If `CHANGED_SRC` is empty → return empty to Step A's "no source files" skip
 condition.
 
-## Go: partition into gated vs info files
+## Partition into gated vs info files
 
-Then partition `CHANGED_SRC` into **gated** files (counted toward the aggregate
-and the threshold) and **info** files (`package main` — shown in the report
-but excluded from the gate):
+Partition `CHANGED_SRC` into **gated** files (counted toward the aggregate and
+the threshold) and **info** files (framework entrypoint / wiring modules —
+shown in the report but excluded from the gate):
 
 ```bash
-# Comment-aware extractor: prints the actual Go package name (or empty).
-# Strips //-line-comments and /*..*/ block comments (handling unterminated
-# blocks across lines and inline blocks on the same line), then matches the
-# first non-blank `^package <name>` line. This avoids false positives from
-# `package main` text appearing inside doc comments.
-get_pkg() {
-  awk '
-    BEGIN { in_block=0 }
-    {
-      line = $0
-      if (in_block) { if (sub(/.*\*\//, "", line)) in_block=0; else next }
-      # Strip block comments BEFORE line comments — otherwise a one-line
-      # block comment containing a URL like `/* See https://example.com */`
-      # has its `//` stripped first, leaving `/* See https:` and opening an
-      # unterminated block that swallows the real package clause.
-      while (match(line, /\/\*/)) {
-        pre  = substr(line, 1, RSTART-1)
-        rest = substr(line, RSTART+RLENGTH)
-        if (match(rest, /\*\//)) {
-          line = pre substr(rest, RSTART+RLENGTH)
-        } else {
-          line = pre; in_block = 1; break
-        }
-      }
-      sub(/[[:space:]]*\/\/.*$/, "", line)
-      sub(/^[[:space:]]+/, "", line)
-      if (line == "") next
-      if (line ~ /^package[[:space:]]+[A-Za-z_]/) {
-        split(line, a, /[[:space:]]+/); print a[2]; exit
-      }
-    }
-  '
+# Path-based classifier: returns 0 for entrypoint/wiring modules that are
+# excluded from the gate. In JS/TS frameworks the *filename* is the framework
+# contract (Next.js routes by file name, config files are loaded by convention),
+# so path matching — not file content — is the correct signal. This also means
+# deleted files classify correctly with no `git show` round-trip.
+is_entrypoint() {
+  case "$1" in
+    # Build / framework / tooling config: next.config.*, vite.config.*,
+    # vitest.config.*, tailwind.config.*, astro.config.*, eslint.config.*,
+    # convex/convex.config.ts, convex/auth.config.ts, ...
+    *.config.ts|*.config.tsx|*.config.js|*.config.jsx|*.config.mjs|*.config.cjs) return 0 ;;
+    # Runtime entry shims registered by the framework, not called by app code.
+    middleware.ts|middleware.js|*/middleware.ts|*/middleware.js) return 0 ;;
+    instrumentation.ts|instrumentation.js|*/instrumentation.ts|*/instrumentation.js) return 0 ;;
+    instrumentation-client.ts|*/instrumentation-client.ts) return 0 ;;
+    main.ts|main.tsx|*/main.ts|*/main.tsx) return 0 ;;
+    # Next.js App Router shells: provider wiring and trivial fallback UI.
+    layout.tsx|*/layout.tsx|*/layout.jsx|*/template.tsx|*/template.jsx) return 0 ;;
+    */loading.tsx|*/loading.jsx|*/error.tsx|*/error.jsx|*/global-error.tsx|*/not-found.tsx|*/not-found.jsx) return 0 ;;
+    # Declarative Convex wiring — table/index and cron definitions, no logic.
+    convex/schema.ts|*/convex/schema.ts|convex/crons.ts|*/convex/crons.ts) return 0 ;;
+  esac
+  return 1
 }
 
 CHANGED_SRC_GATED=""
 CHANGED_SRC_INFO=""
 for f in $CHANGED_SRC; do
-  # Detection is by the file's package clause, NOT filename. Any .go file
-  # declaring `package main` (cmd/foo/main.go, cmd/foo/server.go, cmd/foo/wire.go,
-  # internal/tools/run.go, ...) is excluded from the gate. For deleted files
-  # (no longer on disk), read the blob from the base branch via `git show` so
-  # a diff that deletes only `cmd/foo/main.go` still triggers the all-main
-  # path in Step E.2 instead of producing a 0% gate prompt.
-  if [ -f "$WORKTREE_PATH/$f" ]; then
-    pkg=$(get_pkg < "$WORKTREE_PATH/$f" 2>/dev/null)
-  else
-    pkg=$(git -C "$WORKTREE_PATH" show "${BASE_BRANCH}:${f}" 2>/dev/null | get_pkg)
-  fi
-  if [ "$pkg" = "main" ]; then
+  if is_entrypoint "$f"; then
     CHANGED_SRC_INFO="${CHANGED_SRC_INFO}${f}
 "
   else
@@ -133,12 +125,20 @@ CHANGED_SRC_GATED=$(printf '%s' "$CHANGED_SRC_GATED" | sed '/^$/d')
 CHANGED_SRC_INFO=$(printf '%s'  "$CHANGED_SRC_INFO"  | sed '/^$/d')
 ```
 
-## Why exclude `package main`?
+On the Rust, Python, and Go fallback paths the carve-out does not apply: set
+`CHANGED_SRC_GATED="$CHANGED_SRC"` and leave `CHANGED_SRC_INFO` empty.
 
-Idiomatic Go keeps `func main()` to a thin shim — argument parsing, dependency
-wiring, and a call into a testable package. There's little to assert against,
-and what's left (e.g. `os.Exit` paths) is awkward to test without refactoring
-purely to satisfy the metric. This is a **`package main`-only** carve-out —
-touching a hard-to-test middleware or handler file still trips the gate (the
-"if you touch it, you own it" rule is unchanged). See [#143](https://github.com/gopherguides/gopher-ai/issues/143)
-for full rationale and external references.
+## Why exclude entrypoint/wiring modules?
+
+These modules are the JS/TS analogue of a thin `func main()` shim: config
+objects the bundler reads, a `middleware.ts` the framework mounts, a `layout.tsx`
+that only nests providers, a `schema.ts` that only declares tables. There is
+little to assert against, and what's left is awkward to test without refactoring
+purely to satisfy the metric.
+
+This is an **entrypoint-only** carve-out — touching a route handler, a Convex
+query/mutation, a hook, or a component with real logic still trips the gate (the
+"if you touch it, you own it" rule is unchanged). `page.tsx`, `route.ts`, and
+`convex/http.ts` are deliberately **not** carved out: they routinely hold real
+behavior. See [#143](https://github.com/gopherguides/gopher-ai/issues/143) for
+the full rationale and external references behind the carve-out.

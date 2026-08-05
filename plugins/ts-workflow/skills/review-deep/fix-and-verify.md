@@ -46,15 +46,15 @@ Apply the **minimal change** that addresses the finding. Follow existing pattern
 Record: finding number, title, file(s) changed, whether the fix is testable.
 
 A fix is **testable** if it changes observable behavior:
-- Return values, errors, side effects
-- HTTP responses, database writes
+- Return values, thrown/rejected errors, side effects
+- HTTP responses, database writes, rendered output
 - Function output for given input
-- Panic prevention
+- Crash prevention (unhandled rejection, `undefined` property access)
 
 A fix is **not testable** if it's purely cosmetic:
 - Comments, log messages, formatting
-- Variable renames (unless public API)
-- Import reordering, whitespace
+- Variable renames (unless part of an exported API)
+- Import reordering, whitespace, type-only annotations with no runtime effect
 
 ---
 
@@ -68,14 +68,25 @@ Findings in the same file must be handled by one subagent (sequential within fil
 
 ### 2. Group by Shared Test Files
 
-If two source files are in the same Go package, they may share `_test.go` files. Check:
+Two source files can resolve to the same test file — most often when a shared
+`__tests__/` sibling directory or a single suite covers a whole module. Resolve
+each source file's candidate test paths first:
 
 ```bash
-# For each pair of source files, check if they're in the same package
-dirname "file1.go" == dirname "file2.go"
+# Candidate test files for a given source file
+test_targets() {
+  local f="$1"
+  local base="${f%.*}"
+  local dir; dir=$(dirname "$f")
+  local name; name=$(basename "$base")
+  ls "$base".test.* "$base".spec.* \
+     "$dir/__tests__/$name".test.* "$dir/__tests__/$name".spec.* \
+     2>/dev/null
+}
 ```
 
-Files in the same package must be in the same group to avoid write conflicts on test files.
+Source files whose candidate test paths overlap must land in the same group to
+avoid write conflicts on the shared test file.
 
 ### 3. Dispatch Subagents
 
@@ -110,78 +121,129 @@ For each fix marked as **testable**, generate a corresponding test.
 
 ### Check for Existing Tests
 
+Tests are colocated (`foo.test.ts` beside `foo.ts`) or in a sibling `__tests__/`
+directory. Check both, for `.ts`/`.tsx`/`.js`/`.jsx`:
+
 ```bash
-# Check if a test file exists for the source file
-ls "${FILE%.*}_test.go" 2>/dev/null || ls "$(dirname "$FILE")"/*_test.go 2>/dev/null
+BASE="${FILE%.*}"
+DIR=$(dirname "$FILE")
+NAME=$(basename "$BASE")
+
+TEST_FILE=$(ls "$BASE".test.* "$BASE".spec.* \
+              "$DIR/__tests__/$NAME".test.* "$DIR/__tests__/$NAME".spec.* \
+              2>/dev/null | head -1)
+echo "Existing test file: ${TEST_FILE:-none}"
 ```
 
-### Check for Existing Table-Driven Tests
+### Check for Existing Case Tables
 
 ```bash
-# Look for table-driven tests for the affected function
-grep -n "func Test.*${FUNCTION_NAME}" "$(dirname "$FILE")"/*_test.go 2>/dev/null
+# Look for an existing suite covering the affected function
+[ -n "$TEST_FILE" ] && grep -nE "(describe|it|test)(\.each)?\(.*${FUNCTION_NAME}" "$TEST_FILE" 2>/dev/null
 ```
 
 ### Detect Testing Patterns
 
-Examine existing test files in the same package:
+Examine existing test files near the changed file:
 
-- **Test framework**: stdlib `testing` or `testify` (check for `github.com/stretchr/testify` imports)
-- **Table-driven pattern**: `tests := []struct` or `tt := []struct`
-- **Naming convention**: `Test_functionName` vs `TestFunctionName` vs `TestPackage_FunctionName`
-- **Helper patterns**: test fixtures, `testdata/`, setup/teardown
+- **Test runner**: `vitest` or `jest` (check `package.json` deps and whether the
+  test file imports from `vitest`; Jest suites usually rely on globals)
+- **Case tables**: `it.each([...])` / `test.each([...])`, or a `const cases = [...]`
+  array iterated with `it.each(cases)`
+- **File location**: colocated `*.test.ts` vs `__tests__/*.spec.ts` — match whichever
+  the surrounding code already uses
+- **Helper patterns**: fixtures, `__fixtures__/`, `beforeEach`/`afterEach`, custom
+  render helpers (`@testing-library/react`), mocking style (`vi.mock` vs `jest.mock`)
 
 Match these conventions.
 
 ### Write the Test
 
-**If existing table-driven test exists for the function:**
-- Add a new test case to the existing table
-- Name descriptively (e.g., `"returns error when input is nil"`)
+**If an existing case table covers the function:**
+- Add a new case to the existing `it.each`/`test.each` table
+- Name descriptively (e.g., `"returns an error when input is undefined"`)
 
 **If no existing test for the function:**
-- Create a new table-driven test function in the appropriate `_test.go` file
-- Follow the package's detected conventions
+- Create the test in the detected location (colocated `${FILE%.*}.test.ts` by
+  default, or the `__tests__/` sibling if that is the repo's convention)
+- Follow the detected runner and import conventions
+- Prefer an `it.each` case table when there is more than one input to cover
 - Include at least:
-  - A test case exercising the fixed behavior (the "green" case)
-  - A test case for the edge case the finding identified
+  - A case exercising the fixed behavior (the "green" case)
+  - A case for the edge case the finding identified
+- For async code, `await` the assertion (`await expect(fn()).rejects.toThrow(...)`)
+  so the test cannot pass on an unresolved promise
 
 ### Verify Test Passes
 
+Run only the affected test file, using the package manager detected earlier:
+
 ```bash
-go test ./path/to/package/... -run "TestFunctionName" -v
+# vitest
+$PMX vitest run "$TEST_FILE" -t "case name"
+
+# jest
+$PMX jest "$TEST_FILE" -t "case name"
 ```
 
-All new tests must pass. If any fail, fix until green.
+Drop `-t` to run the whole file. All new tests must pass. If any fail, fix until green.
 
 ---
 
 ## Verification
 
-After all fixes and tests are applied, run full verification:
+After all fixes and tests are applied, run full verification. Run every command
+from the repository root — in a monorepo (`turbo.json`, `nx.json`, or
+`pnpm-workspace.yaml`) the root scripts fan out to the workspaces.
 
-### Go Projects (go.mod exists)
+### Node/TypeScript Projects (package.json exists)
 
 ```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+if [ -f pnpm-lock.yaml ]; then PM=pnpm; PMX="pnpm exec"
+elif [ -f yarn.lock ]; then PM=yarn; PMX="yarn exec"
+elif [ -f bun.lock ] || [ -f bun.lockb ]; then PM=bun; PMX=bunx
+else PM=npm; PMX=npx
+fi
+
+has_script() { jq -e --arg s "$1" '.scripts[$s] // empty' package.json >/dev/null 2>&1; }
+
 echo "=== Build ==="
-go build ./...
+if has_script build; then
+  $PM run build
+fi
+
+echo "=== Type check ==="
+if has_script type-check; then
+  $PM run type-check
+elif has_script typecheck; then
+  $PM run typecheck
+elif [ -f tsconfig.json ]; then
+  $PMX tsc --noEmit
+fi
 
 echo "=== Tests ==="
-go test ./...
+if has_script test; then
+  $PM run test
+elif ls vitest.config.* >/dev/null 2>&1; then
+  $PMX vitest run
+elif ls jest.config.* >/dev/null 2>&1; then
+  $PMX jest
+fi
 
 echo "=== Lint ==="
-if command -v golangci-lint >/dev/null 2>&1; then
-  golangci-lint run
+if has_script lint; then
+  $PM run lint
 fi
 ```
 
-### Other Project Types
+A missing script is a skip, not a failure — but if the repository's CI runs a
+step (build, type-check, test, lint) that is absent or unavailable locally, that
+is a verification failure, not an optional-tool skip.
 
-**Node/TypeScript** (package.json exists):
-```bash
-npm run build && npm test
-npm run lint --if-present
-```
+### Other Project Types
 
 **Rust** (Cargo.toml exists):
 ```bash
@@ -194,6 +256,14 @@ fi
 If the repository explicitly configures Clippy in CI or its verification
 scripts, an unavailable Clippy component is a verification failure instead of
 an optional-tool skip.
+
+**Go** (go.mod exists):
+```bash
+go build ./... && go test ./...
+if command -v golangci-lint >/dev/null 2>&1; then
+  golangci-lint run
+fi
+```
 
 **Python** (pyproject.toml or setup.py exists):
 ```bash
@@ -236,8 +306,8 @@ refuses to commit when the index already contains changes.
 
 ```bash
 OWNED_FILES=(
-  "path/to/fixed-file.go"
-  "path/to/generated_test.go"
+  "src/lib/fixed-file.ts"
+  "src/lib/fixed-file.test.ts"
 )
 
 FIXES_APPLIED=false

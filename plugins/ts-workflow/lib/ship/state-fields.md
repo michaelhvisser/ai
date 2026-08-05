@@ -67,7 +67,7 @@ routing and subsequent steps depend on these exact names.
 | `skip_coverage` | string | Step 1 | Compatibility hint; never waives changed-source coverage |
 | `coverage_threshold` | string | Step 1 | Default `"60"` |
 | `coverage_result` | string | Step E.3 of coverage-verification.md | Aggregate percent, or empty when skipped |
-| `coverage_skip_reason` | string | Step E.3 of coverage-verification.md | Empty when computed; `"all-main"` when every changed file was `package main` |
+| `coverage_skip_reason` | string | Step E.3 of coverage-verification.md | Empty when computed; `"all-entrypoint"` when no changed file held coverable source (entrypoints, config, generated output, or type-only declarations). Value is the contract emitted by coverage-verification.md — do not rename |
 | `coverage_tests_generated` | int | Step F of coverage-verification.md | Count of new tests created |
 | `e2e_required` | string | Step 7.6 | `"true"` when the diff is UI-visible and browser E2E is required |
 | `e2e_attempted` | string | Step 7.6e | `"true"` after the first browser tool call is issued, even when that call fails |

@@ -179,7 +179,7 @@ else
 
   if [ -z "$EXISTING_PHASE" ]; then
     if [ ! -x "${CLAUDE_PLUGIN_ROOT}/scripts/setup-loop.sh" ]; then
-      echo "ERROR: Plugin cache stale. Run /gopher-ai-refresh (or refresh-plugins.sh) and restart Claude Code."
+      echo "ERROR: Plugin cache stale. Run "/plugin marketplace update michaelhvisser-ai" and restart Claude Code."
       exit 1
     fi
     "${CLAUDE_PLUGIN_ROOT}/scripts/setup-loop.sh" "ship" "SHIPPED" 50 "" \
@@ -394,7 +394,8 @@ fixed files (never `git add -A`).
 paths (codex exhaustive/quick, fable Claude-subagent, gemini, ollama,
 agent-based fallback), structured-JSON vs free-text parsing,
 `confidence_score < 0.3` filter, codegen-drift check
-(Make targets `generate`, `gen`, `codegen`, `sqlc`, `proto`, or `templ`), E2E skip conditions, and the
+(`package.json` scripts `generate`, `gen`, `codegen`, `prisma:generate`, or
+`build:types`), E2E skip conditions, and the
 staged-commit + pass-counter increment.
 
 ---
@@ -538,9 +539,13 @@ or merge. Non-UI diffs may record `e2e_result=skipped`.
 Before returning a shipped result, every claim MUST have FRESH evidence
 from THIS session — actual command output, not narrative:
 
-- **"Tests pass"** → `go -C "$WORKTREE_PATH" test` output with "ok" lines, zero failures
-- **"Build succeeds"** → `go -C "$WORKTREE_PATH" build ./...` exit 0
-- **"Generation is current"** → configured generation target exits 0 with generated changes included
+- **"Tests pass"** → the configured test command (`$PM run test`, `vitest run`,
+  or `jest`) output with a zero-failure summary
+- **"Build succeeds"** → `$PM run build` exit 0
+- **"Types check"** → `$PM run type-check` (or `tsc --noEmit`) exit 0 with no
+  reported errors
+- **"Generation is current"** → configured generation script exits 0 with
+  generated changes included
 - **"Lint passes"** → configured lint command exits 0
 - **"CI passes"** → an exact-head `github_check_snapshot` with all registered
   items terminal and successful
@@ -565,7 +570,8 @@ outputs `<done>SHIPPED</done>`:
    `session-boundary`/`headless-worker` and the exact current head passes CI.
    An unrecorded timeout, error, or early exit never satisfies this criterion.
 2. Coverage verified for changed source files (or not applicable because the
-   diff is source-free / all changed Go files are `package main`)
+   diff is source-free / every changed file is config, generated output, or an
+   entry-point script with no testable units)
 3. E2E smoke tests passed for UI-visible diffs (or skipped only because the
    diff is non-UI / no web components)
 4. Changes pushed to remote

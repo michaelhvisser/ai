@@ -16,9 +16,13 @@ Construct a structured markdown comment using the results from Steps 1-5:
 | Check | Result |
 |-------|--------|
 | Code generation | $GEN_RESULT (pass/fail/skipped) |
-| `go build` | $BUILD_RESULT (pass/fail) |
-| `go test` | $TEST_RESULT (pass/fail) |
-| `golangci-lint` | $LINT_RESULT (pass/fail/skipped) |
+| Build (`$PM run build`) | $BUILD_RESULT (pass/fail/skipped) |
+| Type check (`$PM run type-check` / `tsc --noEmit`) | $TYPECHECK_RESULT (pass/fail/skipped) |
+| Tests (`$PM run test`) | $TEST_RESULT (pass/fail/skipped) |
+| Lint (`$PM run lint`) | $LINT_RESULT (pass/fail/skipped) |
+
+*A check is `skipped` only when the repo declares no such script and no
+fallback applies. Name the concrete command that ran, not the placeholder.*
 
 ### E2E Visual Verification Results
 
@@ -96,6 +100,10 @@ The Verification Outcome section is **required for every comment**, regardless
 of mode. It makes the gate visible to humans reading the PR.
 
 **Conditional sections:**
+- If a Playwright suite ran (per `e2e-test-execution.md` §5e.1): add a
+  `### Playwright Suite` section with the pass/fail counts and the names of any
+  failing specs. It supplements — never replaces — the Visual Verification
+  Findings.
 - If E2E was skipped because there are no web components: replace the E2E Visual Verification Results section with: `*E2E tests skipped: $SKIP_REASON*`
 - If E2E was blocked by unavailable or failed MCP tooling: replace the E2E Visual Verification Results section with: `*E2E tests blocked: missing browser tooling. Pages tested: $PAGES_TESTED.*`
 - If build failed: add a prominent warning at the top: `> **Build failed — E2E tests were not run.**`

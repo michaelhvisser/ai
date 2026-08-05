@@ -39,20 +39,6 @@ check_tool_availability() {
   [ -z "$cmd_text" ] && return 0
   case "$TOOL_NAME" in
     Bash|bash)
-      if echo "$cmd_text" | grep -q 'golangci-lint' && ! command -v golangci-lint &>/dev/null; then
-        # Allow go install commands for the tool itself
-        if ! echo "$cmd_text" | grep -qE 'go install.*golangci-lint'; then
-          printf '{"decision":"block","reason":"golangci-lint is not installed. Install with: go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"}\n'
-          exit 0
-        fi
-      fi
-      if echo "$cmd_text" | grep -q 'templ ' && ! command -v templ &>/dev/null; then
-        # Allow go install commands for the tool itself
-        if ! echo "$cmd_text" | grep -qE 'go install.*templ'; then
-          printf '{"decision":"block","reason":"templ is not installed. Install with: go install github.com/a-h/templ/cmd/templ@latest"}\n'
-          exit 0
-        fi
-      fi
       if echo "$cmd_text" | grep -qE '^gh |[|&;] *gh ' && ! command -v gh &>/dev/null; then
         printf '{"decision":"block","reason":"GitHub CLI (gh) is not installed. Install from https://cli.github.com/"}\n'
         exit 0
@@ -70,12 +56,12 @@ check_git_state() {
   local cmd_text
   cmd_text=$(echo "$TOOL_INPUT" | jq -r '.command // .cmd // empty' 2>/dev/null)
   [ -z "$cmd_text" ] && return 0
-  if echo "$cmd_text" | grep -qE 'go test|golangci-lint run'; then
+  if echo "$cmd_text" | grep -qE 'vitest|jest|(npm|pnpm|yarn|bun) test|(npm|pnpm|yarn|bun) run test|eslint'; then
     if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       echo "Warning: Uncommitted changes detected. Test results may not reflect saved code." >&2
     fi
   fi
-  if echo "$cmd_text" | grep -qE 'git tag|goreleaser release|goreleaser build|gh release create|gh release upload'; then
+  if echo "$cmd_text" | grep -qE 'git tag|(npm|pnpm|yarn|bun) publish|(npm|pnpm|yarn) version|changeset publish|gh release create|gh release upload'; then
     if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
       printf '{"decision":"block","reason":"Uncommitted changes detected. Please commit or stash changes before releasing."}\n'
       exit 0

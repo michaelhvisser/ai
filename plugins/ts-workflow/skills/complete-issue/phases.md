@@ -14,7 +14,7 @@ The `start-issue` workflow runs with `$ISSUE_NUM $FLAGS` as its arguments:
 4. Explore codebase
 5. Design approach (features: driver selects from evidence; missing product intent stops)
 6. TDD implementation
-7. Verify (build, test, lint)
+7. Verify (build, type-check, test, lint)
 8. Coverage check
 9. Security review
 10. Commit, push, create PR
@@ -90,8 +90,8 @@ if ! git -C "$WORKTREE_PATH" diff --cached --quiet; then
 fi
 
 REVIEW_FILES=(
-  "path/to/reviewed-file.go"
-  "path/to/reviewed-file_test.go"
+  "path/to/reviewed-file.ts"
+  "path/to/reviewed-file.test.ts"
 )
 if [ "${#REVIEW_FILES[@]}" -gt 0 ]; then
   git -C "$WORKTREE_PATH" add -- "${REVIEW_FILES[@]}"

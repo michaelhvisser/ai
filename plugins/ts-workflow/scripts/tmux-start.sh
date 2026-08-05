@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-CLAUDE_CMD="${GOPHER_AI_TMUX_CLAUDE_CMD:-claude --dangerously-skip-permissions}"
+CLAUDE_CMD="${TS_WORKFLOW_TMUX_CLAUDE_CMD:-claude --dangerously-skip-permissions}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 usage() {
@@ -10,7 +10,7 @@ usage() {
 Usage:
   tmux-start.sh <issue-number> [--copy-env|--no-copy-env] [--claude-cmd <command>]
 
-Set GOPHER_AI_TMUX_CLAUDE_CMD to override the default Claude launch command.
+Set TS_WORKFLOW_TMUX_CLAUDE_CMD to override the default Claude launch command.
 USAGE
 }
 
@@ -80,7 +80,7 @@ wait_for_claude_ready() {
   return 1
 }
 
-if [ "${GOPHER_AI_TMUX_START_SOURCE_ONLY:-false}" = "true" ]; then
+if [ "${TS_WORKFLOW_TMUX_START_SOURCE_ONLY:-false}" = "true" ]; then
   return 0
 fi
 
@@ -131,7 +131,7 @@ gh auth status >/dev/null 2>&1 || die "gh not authenticated. Run: gh auth login"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "Not inside a git repository"
 
 SOURCE_DIR=$(pwd)
-METADATA_FILE=$(mktemp "${TMPDIR:-/tmp}/gopher-ai-tmux-start.XXXXXX")
+METADATA_FILE=$(mktemp "${TMPDIR:-/tmp}/ts-workflow-tmux-start.XXXXXX")
 trap 'rm -f "$METADATA_FILE"' EXIT
 
 if [ "$COPY_ENV" = "true" ]; then
@@ -171,7 +171,7 @@ if [ -n "$EXISTING_WINDOW" ]; then
   exit 0
 fi
 
-LAUNCH_MARKER="GOPHER_AI_CLAUDE_LAUNCHED_${ISSUE_NUM}"
+LAUNCH_MARKER="TS_WORKFLOW_CLAUDE_LAUNCHED_${ISSUE_NUM}"
 LAUNCH_COMMAND=$(printf 'cd %q && printf "\\n%s\\n" && %s' "$WORKTREE_ABS_PATH" "$LAUNCH_MARKER" "$CLAUDE_CMD")
 
 tmux new-window -n "$WINDOW_NAME"

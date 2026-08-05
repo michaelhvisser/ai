@@ -299,7 +299,7 @@ If the merge command fails (non-zero exit code):
 
 ## 13f. Display summary
 
-Read coverage and e2e results. Coverage may have skipped (e.g., all changed files were `package main`); in that case `coverage_skip_reason` is set and `coverage_result` is empty. Render a textual reason instead of `<COV_RESULT>%`:
+Read coverage and e2e results. Coverage may have skipped (e.g., no changed file held coverable source — all entrypoints, config, generated output, or type-only declarations); in that case `coverage_skip_reason` is set and `coverage_result` is empty. Render a textual reason instead of `<COV_RESULT>%`:
 
 ```bash
 COV_RESULT=$(get_loop_field "$STATE_FILE" "coverage_result" "$WORKFLOW_STATE_PATH")
@@ -320,7 +320,7 @@ E2E_REQUIRED="${E2E_REQUIRED:-false}"
 # Coverage line: prefer skip_reason when present, then numeric value, else "skipped".
 if [ -n "$COV_SKIP_REASON" ]; then
   case "$COV_SKIP_REASON" in
-    all-main) COV_LINE="skipped — all changed files are \`package main\`" ;;
+    all-main) COV_LINE="skipped — no changed file holds coverable source" ;;
     *)        COV_LINE="skipped — $COV_SKIP_REASON" ;;
   esac
 elif [ -n "$COV_RESULT" ]; then

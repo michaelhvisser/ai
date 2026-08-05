@@ -23,7 +23,7 @@ Defaults:
 | `explore-prompt.md` | `haiku` | Read-only codebase exploration |
 | `implementer-prompt.md` | `inherit` | TDD implementation keeps the parent session's model |
 | `spec-review-prompt.md` | `sonnet` | Mechanical requirements checklist |
-| `quality-review-prompt.md` | `sonnet` | Go idiom, complexity, security, and test review |
+| `quality-review-prompt.md` | `sonnet` | TypeScript/React idiom, complexity, security, and test review |
 
 To override all subagent models for a run, set `CLAUDE_CODE_SUBAGENT_MODEL`
 before invoking `$ts-workflow:start-issue` or `$ts-workflow:complete-issue`. To avoid subagents
@@ -85,7 +85,12 @@ Delegate through the active surface using the Explore prompt:
 <filled explore-prompt template>
 ```
 
-Store the results: `RELEVANT_FILES`, `PATTERNS`, `ROOT_CAUSE` (bugs) or `INTEGRATION_POINTS` (features), `PROPOSED_CHANGES`, `TASK_DECOMPOSITION`.
+Store the results: `STACK`, `RELEVANT_FILES`, `PATTERNS`, `ROOT_CAUSE` (bugs) or `INTEGRATION_POINTS` (features), `PROPOSED_CHANGES`, `TASK_DECOMPOSITION`.
+
+`STACK` reports the package manager (`$PM`), workspace layout, framework,
+backend, and test runner. Reconcile it with the `$PM` detected in the trunk's
+Context step and use it for every build, test, type-check, and lint command in
+Steps 9 through 12.
 
 ## Step 4: Design Approach (Features Only)
 
@@ -122,7 +127,7 @@ Using the Explore results and approved approach:
 - Lists `CONTEXT_FILES` (read-only reference files)
 - Notes dependencies on other tasks (empty = independent)
 
-**Parallel dispatch decision:** if ALL tasks have disjoint `TARGET_FILES` AND disjoint `TEST_FILES` (including shared test helpers in the same package) and no dependencies, they can run in parallel. Otherwise, sequential. Two tasks in the same Go package almost always share a `_test.go` file — default to sequential for same-package tasks.
+**Parallel dispatch decision:** if ALL tasks have disjoint `TARGET_FILES` AND disjoint `TEST_FILES` (including shared test helpers, fixtures, and setup files in the same workspace package) and no dependencies, they can run in parallel. Otherwise, sequential. Two tasks touching the same module almost always share a `*.test.ts` / `*.spec.ts` file, and two tasks in the same workspace package share its tsconfig — default to sequential for same-module or same-package tasks.
 
 ## Step 6: Implementation Phase
 
@@ -132,7 +137,7 @@ For each task, read `${CLAUDE_PLUGIN_ROOT}/agents/implementer-prompt.md` and fil
 - `{TARGET_FILES}` — files this agent may create/modify
 - `{TEST_FILES}` — test file(s) for this task
 - `{WORKTREE_PATH}` — absolute path to working directory
-- `{PATTERNS}` — from Explore results
+- `{PATTERNS}` — from Explore results, prefixed with the `STACK` section so the implementer knows the package manager, workspace layout, and test runner to invoke
 - `{CONTEXT_FILES}` — read-only reference files
 - `{ISSUE_TYPE}` — "bug" or "feature"
 
@@ -182,7 +187,7 @@ Delegate the filled spec-review prompt through the active surface.
 
 ## Step 8: Code Quality Review
 
-Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md` and fill in `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` (from Explore), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md).
+Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md` and fill in `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` (from Explore, prefixed with the `STACK` section), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md).
 
 Delegate the filled quality-review prompt through the active surface.
 
@@ -197,10 +202,16 @@ Delegate the filled quality-review prompt through the active surface.
 
 Run the full verification checklist. **All must pass before proceeding:**
 
-- **Build**: `go -C "$WORKTREE_PATH" build ./...`
-- **All tests**: `go -C "$WORKTREE_PATH" test ./...`
-- **Lint**: `(cd "$WORKTREE_PATH" && golangci-lint run)` (if available)
+- **Codegen** (Convex repos only): `(cd "$WORKTREE_PATH" && npx convex codegen)` to refresh `convex/_generated/` before type-checking. Never hand-edit `convex/_generated/`.
+- **Build**: `(cd "$WORKTREE_PATH" && $PM run build)` (if the `build` script exists)
+- **Type-check**: `(cd "$WORKTREE_PATH" && $PM run type-check)` if the script exists, else `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` exists. This is the repo-wide check the implementers deliberately skipped.
+- **All tests**: `(cd "$WORKTREE_PATH" && $PM test)`, or the runner reported in `STACK` (`npx vitest run`, `npx jest`)
+- **Lint**: `(cd "$WORKTREE_PATH" && $PM run lint)` (if the script exists)
 - **Build logs**: if a dev server is running, check its log output for errors
+
+In a monorepo (turbo/nx/pnpm workspaces), run the root scripts from the
+repository root so the task runner fans out across workspaces; do not
+verify only the package you happened to edit.
 
 If any step fails, fix the issue and re-run until all green.
 
@@ -223,13 +234,15 @@ the diff has no gated source files.
 
 Before submitting, scan for security issues in changed files:
 
-- **Dependency vulnerabilities**: `(cd "$WORKTREE_PATH" && govulncheck ./...)` (if available)
-- **Scan changed files** for common Go security issues:
-  - Hardcoded secrets or credentials
-  - SQL injection (string concatenation in queries instead of parameterized)
-  - Path traversal (`filepath.Join` with user input without `filepath.Clean`)
-  - Unsafe `exec.Command` with unsanitized user input
-  - Missing error checks on security-critical operations (crypto, auth, file permissions)
+- **Dependency vulnerabilities**: `(cd "$WORKTREE_PATH" && $PM audit)` (skip if the package manager does not support it)
+- **Scan changed files** for common JavaScript/TypeScript security issues:
+  - Hardcoded secrets or credentials, and server-only secrets leaked into the client bundle through `NEXT_PUBLIC_*` / `VITE_*` / `EXPO_PUBLIC_*` env vars
+  - Missing auth/authorization checks on server actions, API route handlers, and backend functions
+  - SQL injection (template-string interpolation into queries instead of parameterized/prepared statements)
+  - XSS (`dangerouslySetInnerHTML`, `innerHTML`, unsanitized user-supplied HTML or URLs)
+  - Path traversal (`path.join` with user input and no containment check after `path.resolve`)
+  - Unsafe `child_process.exec` / `eval` / dynamic `require` with unsanitized user input
+  - Unvalidated request input crossing a trust boundary (missing zod parsing, or Convex args without `v.*` validators)
 - **If changes touch auth, crypto, or data handling code**, suggest running `/codex review` with a security focus
 
 ## Step 11: Submit

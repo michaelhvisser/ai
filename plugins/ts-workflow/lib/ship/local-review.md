@@ -140,7 +140,7 @@ The review prompt includes:
 ```text
 You are reviewing a code change (diff) for a pull request. Your task is to identify ALL issues — do not limit yourself to a small number. Report every actionable finding you discover.
 
-Focus on: Correctness (bugs, logic errors, race conditions, nil dereference), Security (injection, auth bypass, data exposure), Performance (O(n²) loops, unnecessary allocations), Maintainability (dead code, excessive complexity), Developer Experience (missing error context, unclear APIs).
+Focus on: Correctness (bugs, logic errors, unhandled promise rejections, race conditions, null/undefined dereference), Security (injection, auth bypass, data exposure), Performance (O(n²) loops, unnecessary allocations, needless re-renders, request waterfalls), Maintainability (dead code, excessive complexity), Developer Experience (missing error context, unclear APIs, loose types).
 
 Rules:
 1. Only flag issues INTRODUCED by this diff.
@@ -348,7 +348,7 @@ This section runs only when the driver selected agent-based review for an
 unpinned backend or the user explicitly authorized replacing a pinned backend.
 
 1. Set `CODEX_EXEC_FALLBACK=true`
-2. Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md`. Adapt for the detected project language (replace Go-specific criteria when not a Go project).
+2. Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md`. Adapt for the detected project language (replace TypeScript/JavaScript-specific criteria when not a TS/JS project).
 3. Fill template variables: `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` ("Follow existing project conventions"), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md if present)
 4. Delegate synchronously through the active surface with the filled prompt,
    selecting sonnet when the surface supports model choice, and wait for the
@@ -388,7 +388,7 @@ For each finding from Step 5c:
 2. Evaluate validity
 3. Auto-skip `priority == 3` AND `confidence < 0.5`
 4. Apply minimal fix or record skip reason
-5. For testable fixes (changes observable behavior): generate a test (`_test.go`/`_test.ts`/`test_*.py`; add table-driven case if existing pattern)
+5. For testable fixes (changes observable behavior): generate a test (`*.test.ts`/`*.spec.ts` — or `.tsx`/`.js` matching the file under test; `_test.go`/`test_*.py` in mixed repos). Match the file's existing suite: add a case to an `it.each`/`test.each` case table when one exists, otherwise a new `it()`/`test()` in the nearest `describe` block.
 
 Track `FIXED`, `SKIPPED` (with reasons), and `REVIEW_FILES`, an array containing
 only paths modified while addressing findings or generating their tests.
@@ -399,22 +399,55 @@ only paths modified while addressing findings or generating their tests.
 set_loop_phase "$STATE_FILE" "verifying" "$WORKFLOW_STATE_PATH"
 ```
 
-### Codegen drift check (Go projects)
+### Package manager detection
+
+Resolve the package manager once, from `$WORKTREE_PATH`, and reuse `$PM` for
+every command in Steps 7, 7.5, and 7.6. In a monorepo (`turbo.json`, `nx.json`,
+or `pnpm-workspace.yaml` at the repo root), run root scripts from the repo root
+rather than from an individual package directory.
 
 ```bash
-if [ -f "$WORKTREE_PATH/Makefile" ]; then
+if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm
+elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn
+elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun
+else PM=npm
+fi
+
+# has_script <name> — true when package.json defines that script
+has_script() {
+  [ -f "$WORKTREE_PATH/package.json" ] || return 1
+  jq -e --arg s "$1" '.scripts[$s] // empty' "$WORKTREE_PATH/package.json" >/dev/null 2>&1
+}
+```
+
+`$PM run <script>` is valid for all four managers. Test runners are invoked as
+`$PM test` (npm/pnpm/yarn/bun all accept it) or, when no `test` script exists,
+via the detected runner (`npx vitest run`, `npx jest`).
+
+### Codegen drift check (projects with a generate/codegen step)
+
+```bash
+GEN_CMD=""
+if has_script generate; then GEN_CMD="$PM run generate"
+elif has_script gen; then GEN_CMD="$PM run gen"
+elif has_script codegen; then GEN_CMD="$PM run codegen"
+elif has_script prisma:generate; then GEN_CMD="$PM run prisma:generate"
+elif has_script build:types; then GEN_CMD="$PM run build:types"
+elif [ -f "$WORKTREE_PATH/Makefile" ]; then
   GEN_TARGET=$(cd "$WORKTREE_PATH" && make -qp 2>/dev/null | awk -F: '/^[a-zA-Z0-9_-]+:/ {print $1}' \
-    | grep -E '^(generate|gen|codegen|sqlc|proto|templ)$' | head -1 || true)
-  if [ -n "$GEN_TARGET" ]; then
-    GEN_SNAPSHOT=$(printf '%s\n%s' "$(git -C "$WORKTREE_PATH" diff --name-only)" "$(git -C "$WORKTREE_PATH" ls-files --others --exclude-standard)" | sed '/^$/d' | sort -u)
-    echo "Running make $GEN_TARGET..."
-    if ! (cd "$WORKTREE_PATH" && make "$GEN_TARGET" 2>&1); then
-      WORKFLOW_REASON="generation-failed"
-    fi
+    | grep -E '^(generate|gen|codegen|proto)$' | head -1 || true)
+  if [ -n "$GEN_TARGET" ]; then GEN_CMD="make $GEN_TARGET"; fi
+fi
+
+if [ -n "$GEN_CMD" ]; then
+  GEN_SNAPSHOT=$(printf '%s\n%s' "$(git -C "$WORKTREE_PATH" diff --name-only)" "$(git -C "$WORKTREE_PATH" ls-files --others --exclude-standard)" | sed '/^$/d' | sort -u)
+  echo "Running $GEN_CMD..."
+  if ! (cd "$WORKTREE_PATH" && $GEN_CMD 2>&1); then
+    WORKFLOW_REASON="generation-failed"
   fi
 fi
 
-if [ -n "$GEN_TARGET" ] && [ -z "${WORKFLOW_REASON:-}" ]; then
+if [ -n "$GEN_CMD" ] && [ -z "${WORKFLOW_REASON:-}" ]; then
   GEN_MODIFIED=$(git -C "$WORKTREE_PATH" diff --name-only)
   GEN_UNTRACKED=$(git -C "$WORKTREE_PATH" ls-files --others --exclude-standard)
   GEN_ALL=$(printf '%s\n%s' "$GEN_MODIFIED" "$GEN_UNTRACKED" | sed '/^$/d' | sort -u)
@@ -444,12 +477,17 @@ verification or commit.
 
 ### Per-language verification
 
-| Language | Build / Test / Lint |
+| Language | Build / Type-check / Test / Lint |
 |---|---|
+| **Node/TS** (`package.json`) | Run each step that applies, from `$WORKTREE_PATH`, using the detected `$PM`:<br>• **build** — `$PM run build` when `has_script build`<br>• **type-check** — `$PM run type-check` when that script exists (also accept `typecheck`); otherwise `npx tsc --noEmit` when `tsconfig.json` exists<br>• **test** — `$PM test` when `has_script test`; otherwise `npx vitest run` / `npx jest` per the detected runner; skip when neither a script nor a runner is configured<br>• **lint** — `$PM run lint` when `has_script lint`; otherwise `npx eslint .` only when an ESLint config is present |
 | **Go** (`go.mod`) | `go -C "$WORKTREE_PATH" build ./... && go -C "$WORKTREE_PATH" test ./...`; run `(cd "$WORKTREE_PATH" && golangci-lint run)` when installed |
-| **Node/TS** (`package.json`) | `(cd "$WORKTREE_PATH" && npm run build && npm test && npm run lint --if-present)` |
 | **Rust** (`Cargo.toml`) | `(cd "$WORKTREE_PATH" && cargo build && cargo test)`; run `(cd "$WORKTREE_PATH" && cargo clippy)` when `(cd "$WORKTREE_PATH" && cargo clippy --version)` succeeds or the repository explicitly configures Clippy |
 | **Python** (`pyproject.toml`/`setup.py`) | `(cd "$WORKTREE_PATH" && pytest)` or `(cd "$WORKTREE_PATH" && python -m pytest)`; run installed linters from the same worktree-scoped group |
+
+A missing script is not a failure — skip that step and record it as not
+configured. A script that exists and exits non-zero is a verification failure.
+In a monorepo, prefer the root task-runner scripts (`$PM run build`,
+`$PM run lint`) over per-package invocations so Turbo/Nx orchestrates the graph.
 
 If any verification fails: analyze, fix, and rerun until all pass. If a
 generation, build, test, or configured lint failure cannot be fixed in this
@@ -494,9 +532,12 @@ explicitly being reused.
 
 Skip to Step 8 only when ONE of:
 
-- Project has NO web components (none of: `.templ` files, Go HTTP handler
-  patterns `http.Handler|echo.Context|gin.Context|chi.Router|http.HandleFunc`,
-  `*.html` / `*.tsx` / `*.vue` files).
+- Project has NO web components (none of: `*.tsx` / `*.jsx` / `*.astro` /
+  `*.vue` / `*.svelte` / `*.html` files, framework route files
+  (`app/**/page.tsx`, `app/**/route.ts`, `pages/**/*.tsx`, `src/routes/**`), or
+  server route-handler patterns
+  `express()|Router()|fastify(|new Hono(|createServer(|httpRouter(` — plus, in a
+  mixed repo, `.templ` files or Go handler patterns).
 - No UI-visible files were changed in the diff.
 - The PR is already marked `e2e-verified` or the current loop state shows a
   prior passing E2E result. This is the deliberate reuse path used after
@@ -516,12 +557,12 @@ Block the workflow when the diff is UI-visible and E2E cannot run or fails:
 if [ -z "$CHANGED_FILES" ]; then
   CHANGED_FILES=$(git -C "$WORKTREE_PATH" diff --name-only "origin/${BASE_BRANCH}...HEAD")
 fi
-WEB_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(templ|html|css|tsx|vue|jsx)$' || true)
-JS_CHANGES=$(echo "$CHANGED_FILES" | grep -E '(^|/)(cmd|web|ui|assets|static|templates)/.*\.js$' || true)
-HANDLER_CHANGES=$(echo "$CHANGED_FILES" | grep '\.go$' | while IFS= read -r f; do
-  grep -l -E 'http\.Handler|echo\.Context|gin\.Context|chi\.Router|http\.HandleFunc|http\.ServeMux' "$WORKTREE_PATH/$f" 2>/dev/null
+WEB_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(tsx|jsx|astro|vue|svelte|html|css|scss|mdx|templ)$' || true)
+ROUTE_CHANGES=$(echo "$CHANGED_FILES" | grep -E '(^|/)(app|pages|routes|public|static|assets)/.*\.(ts|js|mjs)$|(^|/)middleware\.(ts|js)$' || true)
+HANDLER_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(ts|js|mts|mjs)$' | while IFS= read -r f; do
+  grep -l -E 'express\(|Router\(|fastify\(|new Hono\(|createServer\(|httpRouter\(|NextResponse|export (async )?function (GET|POST|PUT|PATCH|DELETE)\b' "$WORKTREE_PATH/$f" 2>/dev/null
 done || true)
-UI_VISIBLE_CHANGES=$(printf '%s\n%s\n%s\n' "$WEB_CHANGES" "$JS_CHANGES" "$HANDLER_CHANGES" | sed '/^$/d')
+UI_VISIBLE_CHANGES=$(printf '%s\n%s\n%s\n' "$WEB_CHANGES" "$ROUTE_CHANGES" "$HANDLER_CHANGES" | sed '/^$/d')
 ```
 
 If `UI_VISIBLE_CHANGES` is empty, persist:
@@ -567,11 +608,15 @@ set_loop_phase "$STATE_FILE" "e2e-testing" "$WORKFLOW_STATE_PATH"
 ```
 
 Detect command beneath `$WORKTREE_PATH` and store the raw executable command in
-`DEV_SERVER_CMD`: Air (`.air.toml`) → `air`; Makefile target
-`run`/`serve`/`dev` → `make <target>`; `package.json` script `dev`/`start` →
-`npm run dev` / `npm start`; Go fallback → `go run ./cmd/*/main.go` or `go run .`.
+`DEV_SERVER_CMD`, using the `$PM` resolved in Step 7: `package.json` script
+`dev` → `$PM run dev`; script `start` → `$PM start`; Makefile target
+`dev`/`run`/`serve` → `make <target>`; in a mixed repo, Air (`.air.toml`) →
+`air`. In a monorepo, run the root `dev` script so the task runner starts the
+web app and any backend it depends on.
 
-Detect port: Air config, `PORT` env var, `.env`/`.env.local`, defaults `8080` (Go) / `3000` (Node) / `5173` (Vite).
+Detect port: `PORT` env var, `.env`/`.env.local`, framework config
+(`next.config.*`, `astro.config.*`, `vite.config.*`), defaults `3000`
+(Next.js/Node) / `5173` (Vite) / `4321` (Astro) / `8080` (Go).
 
 ### Start server, wait for readiness
 
@@ -615,7 +660,7 @@ Display:
 
 ```
 E2E PREREQUISITE MISSING - local dev server is not responding at http://localhost:$PORT.
-Start it (`(cd "$WORKTREE_PATH" && make dev)` or the project equivalent), then re-run `$ts-workflow:ship`.
+Start it (`(cd "$WORKTREE_PATH" && $PM run dev)` or the project equivalent), then re-run `$ts-workflow:ship`.
 Pages tested: 0
 No merge.
 ```
@@ -679,7 +724,7 @@ set_loop_field "$STATE_FILE" "e2e_result" "$E2E_RESULT" "$WORKFLOW_STATE_PATH"
 set_loop_field "$STATE_FILE" "e2e_skip_reason" "${E2E_SKIP_REASON:-}" "$WORKFLOW_STATE_PATH"
 set_loop_json_field "$STATE_FILE" "e2e_pages_tested" "$PAGES_TESTED" "$WORKFLOW_STATE_PATH"
 
-rm -f "$WORKTREE_PATH/.local/state/coverage.out" "$WORKTREE_PATH/.local/state/coverage.json" 2>/dev/null || true
+rm -f "$WORKTREE_PATH/coverage/coverage-summary.json" "$WORKTREE_PATH/coverage/coverage-final.json" "$WORKTREE_PATH/.local/state/coverage.json" "$WORKTREE_PATH/.local/state/coverage.out" 2>/dev/null || true
 ```
 
 Display:

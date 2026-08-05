@@ -1,17 +1,39 @@
 # ts-workflow
 
-Issue-to-PR workflow automation with git worktree management.
+Issue-to-PR workflow automation for TypeScript and JavaScript projects, with git
+worktree management.
+
+Works with Next.js, Astro, Remix, Convex, Express/Hono APIs, and any other Node
+repo — the skills detect the package manager and read `package.json` scripts
+rather than assuming a fixed toolchain.
 
 ## Installation
 
+Add the marketplace, then install the plugin:
+
 ```bash
-/plugin install ts-workflow@gopher-ai
+/plugin marketplace add michaelhvisser/ai
+/plugin install ts-workflow@michaelhvisser-ai
 ```
 
-Or install via marketplace:
-```bash
-/plugin marketplace add gopherguides/gopher-ai
-```
+## Project Detection
+
+Every skill resolves the toolchain before running commands:
+
+| Signal | Result |
+|--------|--------|
+| `pnpm-lock.yaml` | `pnpm` |
+| `yarn.lock` | `yarn` |
+| `bun.lock` / `bun.lockb` | `bun` |
+| `package-lock.json` or no lockfile | `npm` |
+| `turbo.json`, `nx.json`, `pnpm-workspace.yaml` | monorepo — root scripts run from the repo root and fan out to workspaces |
+
+The `scripts` block in `package.json` is the authority for which verification
+commands exist: build → `<pm> run build`, type-check → `<pm> run type-check`
+(falling back to `npx tsc --noEmit`), tests → `<pm> run test` (falling back to
+vitest or jest), lint → `<pm> run lint`, dev server → `<pm> run dev`. Browser
+E2E uses Chrome DevTools MCP, plus the repo's Playwright suite when one is
+configured.
 
 ## Workflow Skills and Commands
 
@@ -47,9 +69,12 @@ The `start-issue` skill provides an intelligent issue-to-PR workflow:
 2. **Offers worktree creation** for isolated work (creates `../repo-issue-123-title/`)
 3. **Auto-detects issue type** by analyzing labels, then title/body patterns
 4. **Routes to appropriate workflow:**
-   - **Bug fix**: Checks duplicates → TDD approach (failing test first) → `fix/` branch
+   - **Bug fix**: Checks duplicates → TDD approach (failing `*.test.ts` first) → `fix/` branch
    - **Feature**: Plans approach → Implementation → Tests → `feat/` branch
 5. **Asks for clarification** if the type can't be determined automatically
+
+Tests follow the repo's runner and naming (`*.test.ts` / `*.spec.ts`, colocated
+or under `__tests__/`), with `it.each`/`test.each` for parameterized cases.
 
 #### Subagent Model Tiering
 
@@ -102,10 +127,26 @@ When bot reviewers (Codex, CodeRabbit, Greptile, etc.) leave feedback, the skill
 DISABLE_BOT_REREVIEW=true
 ```
 
+### E2E Verify
+
+`$ts-workflow:e2e-verify` rebases the PR, runs the repo's build/type-check/test/
+lint scripts, starts the dev server (`<pm> run dev`), and drives a real browser
+through the changed routes via Chrome DevTools MCP — reading every screenshot
+and comparing it against the issue spec. Route discovery understands Next.js
+App and Pages Router, Astro `src/pages`, Remix `app/routes`, and
+Express/Hono/Fastify registrations. A configured Playwright suite runs as a
+supplement; it never substitutes for the visual check.
+
 ## Requirements
 
+- Node.js 20+ and one of pnpm / npm / yarn / bun
 - GitHub CLI (`gh`) - authenticated
 - Git with worktree support
+- Chrome DevTools MCP (for `e2e-verify` browser testing)
+
+## Credits
+
+Forked from go-workflow in gopherguides/gopher-ai (MIT).
 
 ## License
 

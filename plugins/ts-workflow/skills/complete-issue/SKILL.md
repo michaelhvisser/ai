@@ -177,9 +177,10 @@ echo "PR #$PR_NUM created"
 ```
 
 > **Worktree invariant (decision-time, must stay in trunk):** All subsequent
-> phases MUST operate on `$WORKTREE_PATH`. Prefer `git -C "$WORKTREE_PATH"`,
-> `go -C "$WORKTREE_PATH"`, and `gh ... --repo "$REPO_SLUG"`; use an explicit
-> worktree-scoped group only when no per-command option exists. Use
+> phases MUST operate on `$WORKTREE_PATH`. Prefer `git -C "$WORKTREE_PATH"` and
+> `gh ... --repo "$REPO_SLUG"`; Node tooling has no directory flag, so run every
+> package-manager, `npx`, and test-runner command inside an explicit
+> worktree-scoped group — `(cd "$WORKTREE_PATH" && ...)`. Use
 > `$WORKTREE_PATH` as the base for all file tools. `STATE_FILE` remains the one
 > normalized caller-owned path established before Phase 1. Do not assume a
 > pre-tool-use hook will correct or reject an ambient-directory command.
@@ -232,8 +233,8 @@ if ! git -C "$WORKTREE_PATH" diff --cached --quiet; then
 fi
 
 REVIEW_FILES=(
-  "path/to/reviewed-file.go"
-  "path/to/reviewed-file_test.go"
+  "path/to/reviewed-file.ts"
+  "path/to/reviewed-file.test.ts"
 )
 if [ "${#REVIEW_FILES[@]}" -gt 0 ]; then
   git -C "$WORKTREE_PATH" add -- "${REVIEW_FILES[@]}"

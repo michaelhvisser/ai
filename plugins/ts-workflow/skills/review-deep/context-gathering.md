@@ -135,6 +135,44 @@ Include these guidelines as additional review criteria specific to the project.
 
 ---
 
+## Stack Detection
+
+`review-criteria.md` gates several checks on the frameworks in use. Detect them
+once here so those checks are applied only where they are relevant:
+
+```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+if [ -f pnpm-lock.yaml ]; then PM=pnpm
+elif [ -f yarn.lock ]; then PM=yarn
+elif [ -f bun.lock ] || [ -f bun.lockb ]; then PM=bun
+else PM=npm
+fi
+
+IS_MONOREPO=no
+if [ -f turbo.json ] || [ -f nx.json ] || [ -f pnpm-workspace.yaml ]; then
+  IS_MONOREPO=yes
+fi
+
+# Dependency names across the root manifest and any workspace manifests.
+DEPS=$(git ls-files '*package.json' ':!:**/node_modules/**' | while read -r m; do
+  jq -r '((.dependencies // {}) + (.devDependencies // {})) | keys[]' "$m" 2>/dev/null
+done | sort -u)
+
+echo "$DEPS" | grep -qx 'next'   && echo "framework: next"
+echo "$DEPS" | grep -qx 'react'  && echo "framework: react"
+echo "$DEPS" | grep -qx 'astro'  && echo "framework: astro"
+echo "$DEPS" | grep -qx 'convex' && echo "framework: convex"
+echo "$DEPS" | grep -qxE 'vitest|jest' && echo "test runner: present"
+echo "package manager: $PM (monorepo: $IS_MONOREPO)"
+```
+
+Record `PM`, `IS_MONOREPO`, and the detected frameworks — later steps reuse them
+for verification commands and framework-specific review criteria.
+
+---
+
 ## Bot Noise Filtering
 
 Silently discard any PR comment or review comment that contains external service usage limit messages. These patterns indicate automated bot noise:

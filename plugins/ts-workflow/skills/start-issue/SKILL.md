@@ -196,7 +196,7 @@ if [ "$EMBEDDED_WORKFLOW" = "true" ]; then
 elif [ -n "$EXISTING_PHASE" ]; then
   echo "Re-entry detected (phase: $EXISTING_PHASE) — skipping setup-loop."
 elif [ ! -x "${CLAUDE_PLUGIN_ROOT}/scripts/setup-loop.sh" ]; then
-  echo "ERROR: Plugin cache stale. Run /gopher-ai-refresh (or refresh-plugins.sh) and restart Claude Code."
+  echo "ERROR: Plugin cache stale. Run "/plugin marketplace update michaelhvisser-ai" and restart Claude Code."
   exit 1
 else
   "${CLAUDE_PLUGIN_ROOT}/scripts/setup-loop.sh" "start-issue-$ISSUE_NUM" "COMPLETE" "" "" '{}' \
@@ -223,6 +223,29 @@ git -C "$WORKTREE_PATH" remote show origin 2>/dev/null | grep 'HEAD branch' | se
 basename "$WORKTREE_PATH"
 git -C "$WORKTREE_PATH" worktree list
 ```
+
+Detect the package manager once; every build, test, type-check, and lint
+command below uses `$PM`:
+
+```bash
+if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm
+elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn
+elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun
+else PM=npm
+fi
+IS_MONOREPO=false
+if [ -f "$WORKTREE_PATH/turbo.json" ] || [ -f "$WORKTREE_PATH/nx.json" ] || [ -f "$WORKTREE_PATH/pnpm-workspace.yaml" ]; then
+  IS_MONOREPO=true
+fi
+echo "Package manager: $PM | monorepo: $IS_MONOREPO"
+jq -r '.scripts // {} | keys[]' "$WORKTREE_PATH/package.json" 2>/dev/null
+```
+
+The script list above is the authority for which verification commands exist.
+Run a `$PM run <script>` command only when that script is listed; in a monorepo,
+run the root scripts from the repository root so the task runner fans out to the
+workspaces. When there is no `type-check` script, use `npx tsc --noEmit` if the
+repo has a `tsconfig.json`.
 
 ---
 
@@ -334,7 +357,7 @@ must explicitly target `WORKTREE_PATH`; a prior `cd` is never evidence of scope.
 
 | Tool | How to use the worktree path |
 |------|------------------------------|
-| **Bash** | Prefer `git -C "$WORKTREE_PATH"`, `go -C "$WORKTREE_PATH"`, and `gh ... --repo "$REPO_SLUG"`; use `(cd "$WORKTREE_PATH" && ...)` only when a command has no directory option |
+| **Bash** | Prefer `git -C "$WORKTREE_PATH"` and `gh ... --repo "$REPO_SLUG"`; run package-manager, test-runner, and `tsc` commands as `(cd "$WORKTREE_PATH" && ...)` because they resolve config from the current directory |
 | **Read** | Use `$WORKTREE_PATH/path/to/file` as the `file_path` |
 | **Edit** | Use `$WORKTREE_PATH/path/to/file` as the `file_path` |
 | **Write** | Use `$WORKTREE_PATH/path/to/file` as the `file_path` |
@@ -418,9 +441,10 @@ verify → coverage → security → submit → watch CI.
 Before outputting `<done>COMPLETE</done>`, every claim MUST have FRESH evidence
 from THIS session — actual command output, not narrative:
 
-- **"Tests pass"** → `go -C "$WORKTREE_PATH" test ./...` output with "ok" lines, zero failures
-- **"Build succeeds"** → `go -C "$WORKTREE_PATH" build ./...` exit 0
-- **"Lint clean"** → `(cd "$WORKTREE_PATH" && golangci-lint run)` output (skip if not installed)
+- **"Tests pass"** → `(cd "$WORKTREE_PATH" && $PM test)` — or the detected runner (`npx vitest run`, `npx jest`) — output with zero failures
+- **"Build succeeds"** → `(cd "$WORKTREE_PATH" && $PM run build)` exit 0 (if the `build` script exists)
+- **"Types check"** → `(cd "$WORKTREE_PATH" && $PM run type-check)` if the script exists, else `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` exists
+- **"Lint clean"** → `(cd "$WORKTREE_PATH" && $PM run lint)` output (skip if the script does not exist)
 - **"CI passes"** → `gh pr checks "$PR_NUM" --repo "$REPO_SLUG"` with all checks green
 
 **Red-flag language check** — if you are about to write "should work" / "should
@@ -455,10 +479,10 @@ does not emit a terminal marker.
 **DO NOT output `<done>COMPLETE</done>` until ALL of these are TRUE:**
 
 1. Code changes implemented and address the issue
-2. Tests written and ALL PASS (`go -C "$WORKTREE_PATH" test ./...` or equivalent) — with output shown above
+2. Tests written and ALL PASS (`(cd "$WORKTREE_PATH" && $PM test)` or the detected runner) — with output shown above
 3. Coverage verified for changed source files, or not applicable because the
-   diff is source-free / all changed Go files are `package main`
-4. Linting passes (`(cd "$WORKTREE_PATH" && golangci-lint run)` or equivalent, if installed) — with output shown above
+   diff is source-free / contains no gated source files
+4. Type-check and linting pass (`(cd "$WORKTREE_PATH" && $PM run type-check)` — or `npx tsc --noEmit` — and `(cd "$WORKTREE_PATH" && $PM run lint)`, each if the script exists) — with output shown above
 5. Changes committed with a proper commit message
 6. Changes pushed to the remote branch
 7. PR created and the PR URL displayed

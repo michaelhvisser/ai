@@ -13,10 +13,11 @@ Output ONLY the coverage table and aggregate line. Do NOT add any analysis,
 explanation, or commentary. Do NOT discuss why coverage is low or whether the
 low coverage is justified.
 
-**Go format** — 4 columns; rows for `package main` files carry a Notes value
-of `excluded from gate (package main)`. The footer is selected by the
-`ALL_MAIN` flag from Step D — never substitute `{AGGREGATE_COVERAGE}` directly
-into the gated-form footer when `ALL_MAIN=true`, or you'll render `N/A%`.
+**Node/TypeScript format** — 4 columns; rows for entrypoint/wiring files carry
+a Notes value of `excluded from gate (entrypoint/wiring)`. The footer is
+selected by the `ALL_ENTRYPOINT` flag from Step D — never substitute
+`{AGGREGATE_COVERAGE}` directly into the gated-form footer when
+`ALL_ENTRYPOINT=true`, or you'll render `N/A%`.
 
 ```
 ## Coverage Report (Changed Files)
@@ -25,37 +26,37 @@ into the gated-form footer when `ALL_MAIN=true`, or you'll render `N/A%`.
 |------|----------|--------------------|-------|
 <one row per file from CHANGED_SRC_GATED, then CHANGED_SRC_INFO, using FILE_REPORT from Step D>
 
-# If ALL_MAIN=true:
-**Changed-file coverage: N/A — all changed files are `package main`; gate skipped (see Step E.2 warning)**
+# If ALL_ENTRYPOINT=true:
+**Changed-file coverage: N/A — all changed files are entrypoint/wiring modules; gate skipped (see Step E.2 warning)**
 
-# Else (ALL_MAIN=false):
+# Else (ALL_ENTRYPOINT=false):
 **Changed-file coverage: {AGGREGATE_COVERAGE}% (threshold: {COVERAGE_THRESHOLD}%)** [— {INFO_COUNT} file(s) shown for info only]
 ```
 
 Pick exactly one footer line; do not emit both. The `# If ... # Else` comments
 are for this skill's reader — they must not appear in the rendered report.
 
-**Non-Go formats** — keep the existing 3-column table
-(`File | Coverage | Uncovered Functions`); the `package main` carve-out is
-Go-specific and does not apply to Node/TS, Rust, or Python paths.
+**Rust / Python / Go fallback formats** — keep the existing 3-column table
+(`File | Coverage | Uncovered Functions`); the entrypoint carve-out is specific
+to the JS/TS framework layout and does not apply to those paths.
 
 ## Step E.2 — Gate Decision
 
 Apply IMMEDIATELY after displaying the report — no intervening text or
 analysis:
 
-### Branch 1 — Go path, `ALL_MAIN=true`
+### Branch 1 — Node/TypeScript path, `ALL_ENTRYPOINT=true`
 
-Every changed file is `package main` → emit this exact one-line warning,
-**then run Step E.3 to persist the skip reason** (`coverage_skip_reason =
-"all-main"`, `coverage_result = ""`), and return to the calling command's next
-step. There is no signal to act on, and
+Every changed file is an entrypoint/wiring module → emit this exact one-line
+warning, **then run Step E.3 to persist the skip reason**
+(`coverage_skip_reason = "all-entrypoint"`, `coverage_result = ""`), and return
+to the calling command's next step. There is no signal to act on, and
 silently passing would hide the fact that no gate ran. Skipping Step E.3 here
 would leave the calling skill (e.g. `$ts-workflow:ship`) unable to render the correct
 summary line.
 
 ```
-⚠️  Coverage gate skipped: all changed files are in `package main` (typically bootstrap/wiring code that's untestable in practice). See issue #143 for rationale.
+⚠️  Coverage gate skipped: all changed files are entrypoint/wiring modules (config, middleware, layout/error shells, schema declarations — typically bootstrap code that's untestable in practice). See issue #143 for rationale.
 ```
 
 ### Branch 2 — Coverage >= `COVERAGE_THRESHOLD`
@@ -65,9 +66,9 @@ the calling command's next step.
 
 ### Branch 3 — Coverage < `COVERAGE_THRESHOLD`
 
-Run Step F in **all uncovered functions** mode. On the Go path, generate only
-for gated files (`CHANGED_SRC_GATED`); `package main` entries remain
-informational.
+Run Step F in **all uncovered functions** mode. On the Node/TypeScript path,
+generate only for gated files (`CHANGED_SRC_GATED`); entrypoint/wiring entries
+remain informational.
 
 After tests are generated and pass, rerun Steps C through E once. If coverage
 still misses the threshold, follow Step E.4 with:
@@ -97,18 +98,18 @@ calling command's next step.
 
 ### Branch 5 — Coverage tool genuinely failed or unavailable
 
-If the tool genuinely failed (non-zero exit code AND no usable output, or
-missing binary), follow Step E.4 with:
+If the tool genuinely failed (non-zero exit code AND no usable output, or a
+missing runner/coverage provider), follow Step E.4 with:
 
 ```
 WORKFLOW_RESULT=INCOMPLETE
 WORKFLOW_REASON=coverage-tool-unavailable
 ```
 
-If `go -C "$WORKTREE_PATH" test -coverprofile=.local/state/coverage.out`
-produced a `coverage.out` file with content, or if
-the JSON coverage file exists with data, the tool did NOT fail — proceed with
-coverage analysis even if coverage is 0%.
+If the coverage run produced a `coverage/coverage-summary.json` with content, or
+if the fallback JSON/coverprofile file exists with data, the tool did NOT fail —
+proceed with coverage analysis even if coverage is 0%. Failing *tests* are not a
+tool failure either; the summary is still written.
 
 ## Step E.3 — Persist Result
 
@@ -118,9 +119,9 @@ that explains why the gate did not run, so callers can render a sensible
 summary line without producing `N/A%`-style output.
 
 ```bash
-if [ "$ALL_MAIN" = "true" ]; then
+if [ "$ALL_ENTRYPOINT" = "true" ]; then
   set_loop_field "$STATE_FILE" "coverage_result" "" "$WORKFLOW_STATE_PATH"
-  set_loop_field "$STATE_FILE" "coverage_skip_reason" "all-main" "$WORKFLOW_STATE_PATH"
+  set_loop_field "$STATE_FILE" "coverage_skip_reason" "all-entrypoint" "$WORKFLOW_STATE_PATH"
 else
   set_loop_field "$STATE_FILE" "coverage_result" "$AGGREGATE_COVERAGE" "$WORKFLOW_STATE_PATH"
   set_loop_field "$STATE_FILE" "coverage_skip_reason" "" "$WORKFLOW_STATE_PATH"
@@ -130,8 +131,8 @@ fi
 **Caller contract:** Callers that render a summary line (e.g. `$ts-workflow:ship` Step
 13f) must check `coverage_skip_reason` before formatting `coverage_result`
 with a percent sign. If `coverage_skip_reason` is non-empty, render a textual
-reason (e.g. `skipped — all changed files are package main`) instead of
-`<COV_RESULT>%`.
+reason (e.g. `skipped — all changed files are entrypoint/wiring modules`)
+instead of `<COV_RESULT>%`.
 
 ## Step E.4 — Persist Incomplete Outcome
 

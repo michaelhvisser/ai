@@ -30,9 +30,13 @@ In every fail case, still proceed to Step 6 to post the failure comment so the
 gate in `SKILL.md` Step 7 can stop the workflow.
 
 **Web component indicators** (at least one must be true):
-- `.templ` files exist in the project
-- Changed Go files contain HTTP handler patterns: `http.Handler`, `echo.Context`, `gin.Context`, `chi.Router`, `http.HandleFunc`
-- `*.html`, `*.tsx`, `*.vue` files exist in the project
+- A UI framework is declared in `package.json` dependencies (`next`, `astro`,
+  `react`, `vue`, `svelte`, `@remix-run/*`, `nuxt`, `solid-js`)
+- `*.tsx`, `*.jsx`, `*.vue`, `*.svelte`, `*.astro`, or `*.html` files exist in
+  the project
+- Changed server files contain HTTP route patterns: an App Router
+  `route.ts`/`route.js`, a `pages/api/` handler, `express()`/`app.get(`,
+  `Hono`, `fastify`, or a Convex `httpAction`
 
 **Web-facing change detection:**
 
@@ -40,9 +44,12 @@ gate in `SKILL.md` Step 7 can stop the workflow.
 if [ -z "$CHANGED_FILES" ]; then
   CHANGED_FILES=$(git -C "$WORKTREE_PATH" diff --name-only "${BASE_REMOTE}/${BASE_BRANCH}...HEAD")
 fi
-WEB_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(templ|html|tsx|vue|jsx)$' || true)
-HANDLER_CHANGES=$(echo "$CHANGED_FILES" | grep '\.go$' | while IFS= read -r f; do
-  grep -l -E 'http\.Handler|echo\.Context|gin\.Context|chi\.Router|http\.HandleFunc|http\.ServeMux' "$WORKTREE_PATH/$f" 2>/dev/null
+WEB_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(tsx|jsx|vue|svelte|astro|html|mdx|css|scss)$' || true)
+HANDLER_CHANGES=$(echo "$CHANGED_FILES" | grep -E '\.(ts|js|mts|cts|mjs|cjs)$' | while IFS= read -r f; do
+  case "$f" in
+    */route.ts|*/route.js|route.ts|route.js|*/pages/api/*|pages/api/*) echo "$f"; continue ;;
+  esac
+  grep -l -E 'export (async )?function (GET|POST|PUT|PATCH|DELETE)|NextResponse|NextRequest|express\(\)|app\.(get|post|put|patch|delete)\(|new Hono\(|fastify\(|httpAction|httpRouter' "$WORKTREE_PATH/$f" 2>/dev/null
 done || true)
 ```
 
@@ -118,34 +125,45 @@ This checklist is what you verify screenshots against. If you can't articulate w
 ## 5c. Detect Dev Server
 
 Detect the command beneath `$WORKTREE_PATH` and store the raw executable
-command in `DEV_SERVER_CMD`:
+command in `DEV_SERVER_CMD`. Use the `$PM` resolved in `rebase-and-build.md`
+§2a (re-run that detection block if `$PM` is unset):
 
-1. Check for Air config: `.air.toml` or `air.toml` → command: `air`
-2. Check `Makefile` for targets: `run`, `serve`, `dev` → command: `make <target>`
-3. Check `package.json` scripts: `dev`, `start` → command: `npm run dev` or `npm start`
-4. Fallback for Go: `go run ./cmd/*/main.go` or `go run .`
+1. Check `package.json` scripts for `dev` → command: `$PM run dev`
+2. Check `package.json` scripts for `start`/`serve` → command: `$PM run start`
+3. In a monorepo, prefer the root `dev` script so the task runner starts every
+   workspace (web + backend); only target a single workspace
+   (`pnpm --filter <pkg> dev`, `npm run dev -w <pkg>`) when the root script does
+   not exist
+4. Fallback for a framework with no script: `$PMX next dev`, `$PMX astro dev`,
+   or `$PMX vite`
 
 Detect the server port:
-- Parse Air config for proxy port or listen port
+- Check the `dev`/`start` script for an explicit `-p`/`--port` flag
 - Check for `PORT` env var patterns in code
-- Check `.env` or `.envrc` for PORT
-- Default: `8080` for Go, `3000` for Node, `5173` for Vite
+- Check `.env`, `.env.local`, or `.envrc` for `PORT`
+- Default by framework: `3000` for Next.js/Remix/Express, `4321` for Astro,
+  `5173` for Vite, `8788` for Wrangler
 
 ## 5d. Run Database Migrations (if applicable)
 
 **Run migrations BEFORE starting the dev server.** Many apps require up-to-date schema to boot successfully.
 
 ```bash
-if [ -f "$WORKTREE_PATH/Makefile" ] && (cd "$WORKTREE_PATH" && make -qp 2>/dev/null | grep -q '^migrate-up:'); then
-  (cd "$WORKTREE_PATH" && make migrate-up)
-elif command -v goose >/dev/null 2>&1; then
-  (cd "$WORKTREE_PATH" && goose up)
-elif command -v migrate >/dev/null 2>&1; then
-  (cd "$WORKTREE_PATH" && migrate -path ./migrations -database "$DATABASE_URL" up)
+MIGRATE_SCRIPT=$(jq -r '.scripts // {} | keys[]' "$WORKTREE_PATH/package.json" 2>/dev/null \
+  | grep -E '^(migrate|db:migrate|db:push|migrate:up)$' | head -1 || true)
+if [ -n "$MIGRATE_SCRIPT" ]; then
+  (cd "$WORKTREE_PATH" && $PM run "$MIGRATE_SCRIPT")
+elif [ -d "$WORKTREE_PATH/prisma" ]; then
+  (cd "$WORKTREE_PATH" && $PMX prisma migrate deploy)
+elif ls "$WORKTREE_PATH"/drizzle.config.* >/dev/null 2>&1; then
+  (cd "$WORKTREE_PATH" && $PMX drizzle-kit migrate)
 else
   echo "No migration tool detected — skipping migrations"
 fi
 ```
+
+Convex projects need no separate migration step: `convex dev` pushes the schema
+in `convex/schema.ts` as part of starting the backend.
 
 ## 5e. Start Dev Server (if not already running)
 
@@ -180,6 +198,27 @@ If the server fails to start within 30 seconds:
 - **Non-UI diff** → set `E2E_RESULT="skipped"` with reason
   `skipped-server-failed` and continue to Step 6. There was nothing visual to
   verify anyway.
+
+## 5e.1 Existing Playwright Suite (if configured)
+
+If the repo configures Playwright (`playwright.config.ts`/`.js` present, or
+`@playwright/test` in `devDependencies`), run the existing suite against the
+running dev server before the manual route walk:
+
+```bash
+if ls "$WORKTREE_PATH"/playwright.config.* >/dev/null 2>&1; then
+  (cd "$WORKTREE_PATH" && $PMX playwright test --reporter=list) || PLAYWRIGHT_RESULT=fail
+fi
+```
+
+A Playwright failure on a UI-visible diff sets `E2E_RESULT='fail'`; record the
+failing spec names in the findings. Install prompts (`playwright install`) are
+never auto-accepted — if browsers are missing, record the suite as not run and
+continue with the MCP walk below.
+
+**A green Playwright suite does NOT satisfy this step.** Playwright asserts what
+the DOM contains; it cannot tell you the page looks right. The
+navigate → stabilize → screenshot → READ sequence in §5h remains mandatory.
 
 ## 5f. Login Flow (if applicable)
 
@@ -276,10 +315,10 @@ async () => {
     new Promise(resolve => setTimeout(resolve, 5000))
   ]);
 
-  let style = document.getElementById('gopher-ai-e2e-stabilization');
+  let style = document.getElementById('ts-workflow-e2e-stabilization');
   if (!style) {
     style = document.createElement('style');
-    style.id = 'gopher-ai-e2e-stabilization';
+    style.id = 'ts-workflow-e2e-stabilization';
     style.textContent = '*, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; scroll-behavior: auto !important; }';
     document.head.appendChild(style);
   }
@@ -296,11 +335,18 @@ async () => {
 
 ## 5h. Route Testing (the core of E2E)
 
-Identify routes from changed files:
+Identify routes from changed files using the framework's file conventions:
 
-1. Parse Go handler registrations for URL patterns (e.g., `mux.HandleFunc("/api/users", ...)`)
-2. Parse templ file names to infer page routes
-3. If route detection fails, test the root path (`/`) as a baseline
+1. **Next.js App Router:** `app/**/page.tsx` → the directory path is the route
+   (`app/(marketing)/pricing/page.tsx` → `/pricing`; route groups in
+   parentheses do not appear in the URL, `[param]` segments need a real value)
+2. **Next.js Pages Router:** `pages/**/*.tsx` → file path minus `pages/` and the
+   extension (`pages/index.tsx` → `/`)
+3. **Astro:** `src/pages/**/*.astro` → same file-path mapping
+4. **Remix / React Router:** `app/routes/*.tsx` → dots become slashes
+5. **Express/Hono/Fastify:** parse the registration call for the URL pattern
+   (e.g. `app.get("/api/users", ...)`)
+6. If route detection fails, test the root path (`/`) as a baseline
 
 **For each route, execute the FULL test sequence:**
 
@@ -417,6 +463,8 @@ Collect results:
   `E2E_RESULT='fail'`.
 - Console JavaScript errors → record in findings. Not load-bearing on their
   own, but combined with a visual defect they reinforce the fail.
+- `PLAYWRIGHT_RESULT=fail` from §5e.1 → `E2E_RESULT='fail'`. List the failing
+  spec names in the findings.
 - MCP tool call fails on the first call or mid-test →
   `E2E_RESULT='missing-browser-tooling'`. Preserve `PAGES_TESTED`; the browser
   cannot inspect what it cannot reach.

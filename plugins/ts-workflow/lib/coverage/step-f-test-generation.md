@@ -12,22 +12,23 @@ no-test-files branch.
 Set by the Step E branch:
 
 - **All uncovered functions mode**: Generate tests for every
-  uncovered function in `CHANGED_SRC` (Go: `CHANGED_SRC_GATED`), as listed
+  uncovered function in `CHANGED_SRC` (Node/TS: `CHANGED_SRC_GATED`), as listed
   in `UNCOVERED_FUNCS` from Step D.
 - **No-test-files path**:
   `UNCOVERED_FUNCS` may be empty because Step D short-circuits when coverage
-  data is missing. In this case, read each file in `CHANGED_SRC` (Go:
-  `CHANGED_SRC_GATED` — `package main` files are excluded so Step F never
-  generates tests for `func main()`-style code) directly and extract all
-  exported function/method signatures as test targets.
-- **Changed functions only mode** (Go only): Available to callers that already
+  data is missing. In this case, read each file in `CHANGED_SRC` (Node/TS:
+  `CHANGED_SRC_GATED` — entrypoint/wiring files are excluded so Step F never
+  generates tests for a `next.config.ts` or a provider-only `layout.tsx`)
+  directly and extract all exported function/const/class declarations as test
+  targets.
+- **Changed functions only mode**: Available to callers that already
   selected this scope before entering the mandatory gate; it is never offered
   as a low-coverage bypass.
 
-## Changed-functions extraction (Go only)
+## Changed-functions extraction
 
 When a caller selected this scope before the gate, identify changed functions
-by mapping diff hunks to their enclosing function
+by mapping diff hunks to their enclosing declaration
 using committed, staged, unstaged, and untracked changes (matching Step B's
 file detection):
 
@@ -35,25 +36,33 @@ file detection):
 # Combine committed + staged + unstaged diffs
 COMBINED_DIFF=$( (git -C "$WORKTREE_PATH" diff "${BASE_BRANCH}...HEAD" -- $CHANGED_SRC 2>/dev/null; git -C "$WORKTREE_PATH" diff HEAD -- $CHANGED_SRC 2>/dev/null; git -C "$WORKTREE_PATH" diff --cached HEAD -- $CHANGED_SRC 2>/dev/null) )
 # For untracked files: generate a synthetic diff so new functions are detected
-UNTRACKED_SRC=$(git -C "$WORKTREE_PATH" ls-files --others --exclude-standard 2>/dev/null | grep '\.go$' | grep -v '_test\.go$' || true)
+UNTRACKED_SRC=$(git -C "$WORKTREE_PATH" ls-files --others --exclude-standard 2>/dev/null | grep -E '\.(ts|tsx|js|jsx|mjs|cjs)$' | grep -v -E '\.(test|spec)\.[cm]?[jt]sx?$' || true)
 for uf in $UNTRACKED_SRC; do
   COMBINED_DIFF="${COMBINED_DIFF}
 $(git -C "$WORKTREE_PATH" diff --no-index /dev/null "$WORKTREE_PATH/$uf" 2>/dev/null || true)"
 done
-# Extract function names from diff hunk headers (@@...@@ func Name or func (r *T) Name)
-# These identify the enclosing function for ANY changed line, not just added declarations.
-# Use `go tool cover -func` format for matching: bare name for functions, receiver for methods.
-CHANGED_FUNC_NAMES=$(echo "$COMBINED_DIFF" | grep -oE '^@@.*@@ func (\([^)]*\) )?[A-Za-z_][A-Za-z0-9_]*' | sed 's/^@@.*@@ //' | sort -u)
-# Also catch newly added function declarations (on added lines)
-NEW_FUNCS=$(echo "$COMBINED_DIFF" | grep -E '^\+.*func ' | grep -v '^\+\+\+' | sed 's/^+//' | grep -oE 'func (\([^)]*\) )?[A-Za-z_][A-Za-z0-9_]*' | sed 's/^func //' | sort -u)
-CHANGED_FUNC_NAMES=$(printf '%s\n%s' "$CHANGED_FUNC_NAMES" "$NEW_FUNCS" | sort -u | grep -v '^$')
+# Declarations on added lines: `export function x`, `async function x`,
+# `export const x = () =>`, `const x = query({...})` (Convex), `export class X`.
+# This over-collects (a local `const total = 0` shows up too); the per-file
+# intersection with UNCOVERED_FUNCS below discards anything the coverage report
+# does not know as a function.
+CHANGED_FUNC_NAMES=$(echo "$COMBINED_DIFF" | grep '^+' | grep -v '^+++' | sed 's/^+//' \
+  | grep -oE '(export[[:space:]]+)?(default[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*|(export[[:space:]]+)?(const|let|var)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*[[:space:]]*=|(export[[:space:]]+)?(abstract[[:space:]]+)?class[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*' \
+  | sed -E 's/^(.*[[:space:]])?(function|class|const|let|var)[[:space:]]+//' \
+  | sed -E 's/[[:space:]]*[=(].*$//' \
+  | sort -u | grep -v '^$')
+# Best-effort enclosing-declaration context from hunk headers. Git ships no
+# built-in userdiff driver for JS/TS, so headers are only useful when the repo
+# sets one via .gitattributes — treat this as additive, not authoritative.
+HUNK_FUNCS=$(echo "$COMBINED_DIFF" | grep -oE '^@@.*@@[[:space:]]+.*(function|const|class)[[:space:]]+[A-Za-z_$][A-Za-z0-9_$]*' | sed -E 's/.*[[:space:]](function|const|class)[[:space:]]+//' | sort -u)
+CHANGED_FUNC_NAMES=$(printf '%s\n%s' "$CHANGED_FUNC_NAMES" "$HUNK_FUNCS" | sort -u | grep -v '^$')
 ```
 
-**Matching logic:** Cross-reference per-file to avoid ambiguity (e.g., `Run`
-in `pkg/a/a.go` vs `pkg/b/b.go`). For each file in `CHANGED_SRC`:
+**Matching logic:** Cross-reference per-file to avoid ambiguity (e.g., `run`
+in `src/a.ts` vs `src/b.ts`). For each file in `CHANGED_SRC`:
 
-1. Get the functions changed in that file from `COMBINED_DIFF` (hunk headers
-   and added `func` lines scoped to that file)
+1. Get the declarations changed in that file from `COMBINED_DIFF` (added
+   declaration lines scoped to that file)
 2. Get the uncovered functions in that file from `UNCOVERED_FUNCS` (Step D
    stores entries as `file:func1, func2`)
 3. Intersect the two lists — only generate tests for functions that are BOTH
@@ -67,31 +76,81 @@ covered), report this and return to the calling command's next step.
 Generate tests appropriate for the detected project type. For each target
 uncovered function:
 
-1. **Read the source file** and understand the function signature, parameters,
+1. **Read the source file** and understand the signature, parameters,
    return types, and dependencies.
 
 2. **Check for existing test files** and **detect testing conventions** per
-   language.
+   runner. Match the project's dominant convention rather than introducing a
+   second one.
 
-### Go
+### Vitest (primary)
 
 - Check for existing test files following patterns from `${CLAUDE_PLUGIN_ROOT}/skills/address-review/test-generation.md` Steps 4.5b-4.5c:
   ```bash
-  ls "$WORKTREE_PATH/${FILE%.*}_test.go" 2>/dev/null || ls "$WORKTREE_PATH/$(dirname "$FILE")"/*_test.go 2>/dev/null
+  ls "$WORKTREE_PATH/${FILE%.*}".{test,spec}.{ts,tsx,js,jsx} 2>/dev/null || ls "$WORKTREE_PATH/$(dirname "$FILE")"/__tests__/* 2>/dev/null
   ```
-- Detect: stdlib `testing` vs `testify`, table-driven patterns
-  (`tests := []struct`), naming conventions
-- Generate table-driven tests with `t.Run()`, `t.Parallel()`, following
-  `test-gen.md` patterns
-- Verify: `go -C "$WORKTREE_PATH" test ./path/to/package/... -run "TestFunctionName" -v`
-- Re-run coverage: `go -C "$WORKTREE_PATH" test -coverprofile=.local/state/coverage.out ./... 2>/dev/null || true`
+  Colocated `foo.test.ts` beside `foo.ts` is the default; use
+  `__tests__/foo.test.ts` only if the repo already does.
+- Detect: explicit imports (`import { describe, it, expect, vi } from "vitest"`)
+  vs `globals: true` in `vitest.config.*`; `it` vs `test`; assertion style.
+- Use `it.each` / `test.each` case tables for multi-case coverage — the
+  JS/TS equivalent of a table-driven test:
+  ```ts
+  it.each([
+    { name: "empty input", input: "", expected: null },
+    { name: "trims whitespace", input: " a ", expected: "a" },
+  ])("$name", ({ input, expected }) => {
+    expect(parse(input)).toEqual(expected);
+  });
+  ```
+- Mocks and isolation: `vi.mock()`, `vi.fn()`, `vi.spyOn()`,
+  `vi.useFakeTimers()`; reset in `beforeEach` when the file already does.
+- React components: `@testing-library/react` with a `jsdom`/`happy-dom`
+  environment — only if the project already depends on them.
+- **Convex**: use `convex-test` with the project schema
+  (`const t = convexTest(schema)`) and call functions through
+  `api`/`internal` from `./_generated/api`. Never edit `convex/_generated/`; if
+  the generated types are stale run
+  `(cd "$WORKTREE_PATH" && npx convex codegen)`.
+- Verify one file: `(cd "$WORKTREE_PATH" && npx vitest run path/to/file.test.ts)`
+- Verify one case: `(cd "$WORKTREE_PATH" && npx vitest run path/to/file.test.ts -t "case name")`
 
-### Node/TypeScript
+### Jest
 
 - Check for existing test files: `*.test.ts`, `*.spec.ts`, `__tests__/*.ts`
-- Detect: vitest vs jest vs mocha, describe/it patterns, assertion style
-- Generate tests following detected conventions (describe blocks, beforeEach setup)
-- Verify: `(cd "$WORKTREE_PATH" && npx vitest run <test-file>)` or `(cd "$WORKTREE_PATH" && npx jest <test-file>)`
+- Detect: `ts-jest` vs `babel-jest` vs SWC transform in `jest.config.*`;
+  globals are injected, so tests normally import nothing from the runner.
+- Use `test.each` / `describe.each` case tables; `jest.mock()`, `jest.fn()`,
+  `jest.spyOn()`, `jest.useFakeTimers()`.
+- Verify one file: `(cd "$WORKTREE_PATH" && npx jest path/to/file.test.ts)`
+- Verify one case: `(cd "$WORKTREE_PATH" && npx jest -t "case name")`
+
+### node:test / mocha
+
+- `import { test } from "node:test"` with `node:assert/strict`, or mocha's
+  `describe`/`it` with the project's assertion library.
+- Verify: `(cd "$WORKTREE_PATH" && node --test path/to/file.test.ts)` or
+  `(cd "$WORKTREE_PATH" && npx mocha path/to/file.test.ts)`
+
+### Verify generated tests compile and lint
+
+Before rerunning coverage, confirm the new files pass the repo's own checks.
+`PM` and `has_script` come from Step C's detection block — re-run that block
+first if this step is entered in a fresh shell:
+
+```bash
+if has_script "type-check"; then
+  (cd "$WORKTREE_PATH" && "$PM" run type-check) || true
+elif [ -f "$WORKTREE_PATH/tsconfig.json" ]; then
+  (cd "$WORKTREE_PATH" && npx tsc --noEmit) || true
+fi
+if has_script "lint"; then
+  (cd "$WORKTREE_PATH" && "$PM" run lint) || true
+fi
+```
+
+Fix any type or lint errors in the generated tests before continuing. Then
+re-run coverage using the same command Step C selected.
 
 ### Rust
 
@@ -110,15 +169,23 @@ uncovered function:
 - Generate pytest functions with `@pytest.mark.parametrize` for multiple cases
 - Verify: `(cd "$WORKTREE_PATH" && pytest <test-file> -v)`
 
+### Go (secondary fallback)
+
+- Check for an existing `${FILE%.*}_test.go` or other `*_test.go` in the
+  package; detect stdlib `testing` vs `testify`
+- Generate table-driven tests with `t.Run()` / `t.Parallel()`
+- Verify: `go -C "$WORKTREE_PATH" test ./path/to/package/... -run "TestFunctionName" -v`
+
 ## Test scenarios (all languages)
 
 For each target function include:
 
 - Happy path with typical inputs
-- Edge cases (nil/empty/boundary values)
-- Error scenarios (invalid input, expected failures)
-- If existing table/parametrized tests exist for the function, add new cases
-  to them
+- Edge cases (null/undefined/empty/boundary values)
+- Error scenarios (invalid input, rejected promises, thrown errors —
+  assert with `await expect(fn()).rejects.toThrow(...)` for async code)
+- If existing `it.each` / `test.each` case tables exist for the function, add
+  new cases to them
 - If no test exists, create a new test following project conventions
 
 ## Persist count and return

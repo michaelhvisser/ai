@@ -79,5 +79,5 @@ worktree, registers worktree state, opens or switches to the issue tmux window,
 launches Claude Code, waits for a prompt or stable launch marker, and sends
 `/ts-workflow:start-issue <issue-number>`.
 
-Set `GOPHER_AI_TMUX_CLAUDE_CMD` before invocation to override the default
+Set `TS_WORKFLOW_TMUX_CLAUDE_CMD` before invocation to override the default
 Claude launch command (`claude --dangerously-skip-permissions`).

@@ -7,7 +7,7 @@ argument-hint: "[PR-number|--issue <N>] [--post] [--scope <hint>] [--no-fix] [--
 # Deep Review: Full-Context Code Review + Fix
 
 Performs a thorough code review with full PR/issue context, then fixes all actionable findings.
-Combines the depth of spec review, quality review, and Go-specific analysis in a single pass.
+Combines the depth of spec review, quality review, and TypeScript/JavaScript-specific analysis in a single pass.
 
 Before requesting decisions or delegating work, read
 `${CLAUDE_PLUGIN_ROOT}/lib/driver-interaction.md` and follow its
@@ -23,7 +23,7 @@ Parse `$ARGUMENTS` to extract:
 - Bare numeric value: PR number (e.g., `$ts-workflow:review-deep 42`)
 - `--issue <N>`: Use specific issue as context (no PR required)
 - `--post`: Auto-post findings to PR as a comment (skip asking)
-- `--scope <hint>`: Focus area for the review (e.g., "error handling", "concurrency")
+- `--scope <hint>`: Focus area for the review (e.g., "async error handling", "server/client boundaries")
 - `--no-fix`: Review only; do not edit files
 - `--no-commit`: Apply fixes but leave review-owned changes uncommitted
 - `--push`: Push the resulting local HEAD, including for a branch-only run
@@ -201,15 +201,69 @@ because of raw diff size. Preserve `SCOPE_HINT` as review emphasis.
 
 ## Step 4: Static Analysis
 
-If a Go project is detected (`go.mod` exists):
+Detect the package manager once and reuse it for every command in this skill.
+Run all root scripts from the repository root — in a monorepo (`turbo.json`,
+`nx.json`, or `pnpm-workspace.yaml` present) the root scripts fan out to the
+workspaces, so never `cd` into a package to run them.
 
 ```bash
-CHANGED=$(git diff --name-only "${BASE_BRANCH}...HEAD" | grep '\.go$')
-if [ -n "$CHANGED" ]; then
-  echo "$CHANGED" | xargs -I{} dirname {} | sort -u | xargs go vet 2>&1 || true
-  echo "$CHANGED" | xargs -I{} dirname {} | sort -u | xargs staticcheck 2>&1 || true
-  echo "$CHANGED" | xargs -I{} dirname {} | sort -u | xargs go test -race -count=1 2>&1 || true
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+if [ -f pnpm-lock.yaml ]; then PM=pnpm; PMX="pnpm exec"
+elif [ -f yarn.lock ]; then PM=yarn; PMX="yarn exec"
+elif [ -f bun.lock ] || [ -f bun.lockb ]; then PM=bun; PMX=bunx
+else PM=npm; PMX=npx
 fi
+
+# True when package.json declares the named script.
+has_script() { jq -e --arg s "$1" '.scripts[$s] // empty' package.json >/dev/null 2>&1; }
+
+echo "Package manager: $PM"
+```
+
+If a Node/TypeScript project is detected (`package.json` exists):
+
+```bash
+CHANGED=$(git diff --name-only "${BASE_BRANCH}...HEAD" | grep -E '\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$' || true)
+if [ -n "$CHANGED" ] && [ -f package.json ]; then
+  echo "=== Type check ==="
+  if has_script type-check; then
+    $PM run type-check 2>&1 || true
+  elif has_script typecheck; then
+    $PM run typecheck 2>&1 || true
+  elif [ -f tsconfig.json ]; then
+    $PMX tsc --noEmit 2>&1 || true
+  fi
+
+  echo "=== Lint ==="
+  if has_script lint; then
+    $PM run lint 2>&1 || true
+  fi
+
+  echo "=== Tests ==="
+  if has_script test; then
+    $PM run test 2>&1 || true
+  elif ls vitest.config.* >/dev/null 2>&1; then
+    $PMX vitest run 2>&1 || true
+  elif ls jest.config.* >/dev/null 2>&1; then
+    $PMX jest 2>&1 || true
+  fi
+fi
+```
+
+**Rust fallback** (`Cargo.toml` exists, no `package.json`):
+
+```bash
+cargo clippy 2>&1 || true
+cargo test 2>&1 || true
+```
+
+**Go fallback** (`go.mod` exists, no `package.json`):
+
+```bash
+go vet ./... 2>&1 || true
+go test -race -count=1 ./... 2>&1 || true
 ```
 
 Static-analysis failures are informational — they feed into the review, not block it.
@@ -281,7 +335,7 @@ reversible delivery choice.
 ## Further Reading
 
 - `context-gathering.md` — PR/issue/review-thread fetching, repo-guideline detection, size guard
-- `review-criteria.md` — full review criteria, Go idiom checks, Quality Score Rubric, confidence scoring, breaking-change detection
+- `review-criteria.md` — full review criteria, TS/JS idiom checks, framework checks (React/Next.js, Convex), Quality Score Rubric, confidence scoring, breaking-change detection
 - `fix-and-verify.md` — fix iteration, parallel dispatch, test generation, verification, commit, and push
 - `../../scripts/review-deep-post-fix.sh` — deterministic owned-file commit, optional push, and remote-head verification
 - `output-format.md` — findings table, spec-compliance table, review-comments-status table, PR-comment template

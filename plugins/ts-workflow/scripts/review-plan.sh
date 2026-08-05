@@ -46,7 +46,7 @@ else
 fi
 
 RANGE="$BASE...HEAD"
-TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gopher-ai-review-plan.XXXXXX")
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ts-workflow-review-plan.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT
 RECORDS="$TMP_DIR/records.tsv"
 CONCERNS="$TMP_DIR/concerns.txt"
@@ -83,9 +83,9 @@ while IFS= read -r -d '' record; do
     case "$path" in
       vendor/*|*/vendor/*|third_party/*|*/third_party/*|node_modules/*|*/node_modules/*)
         category=vendored; relevant=no; VENDORED=$((VENDORED + 1)) ;;
-      go.sum|*/go.sum|go.work.sum|*/go.work.sum|package-lock.json|*/package-lock.json|npm-shrinkwrap.json|*/npm-shrinkwrap.json|yarn.lock|*/yarn.lock|pnpm-lock.yaml|*/pnpm-lock.yaml|Cargo.lock|*/Cargo.lock|Gemfile.lock|*/Gemfile.lock|composer.lock|*/composer.lock|poetry.lock|*/poetry.lock|uv.lock|*/uv.lock)
+      package-lock.json|*/package-lock.json|npm-shrinkwrap.json|*/npm-shrinkwrap.json|yarn.lock|*/yarn.lock|pnpm-lock.yaml|*/pnpm-lock.yaml|bun.lock|*/bun.lock|bun.lockb|*/bun.lockb|go.sum|*/go.sum|go.work.sum|*/go.work.sum|Cargo.lock|*/Cargo.lock|Gemfile.lock|*/Gemfile.lock|composer.lock|*/composer.lock|poetry.lock|*/poetry.lock|uv.lock|*/uv.lock)
         category=lockfile; relevant=no; LOCKFILES=$((LOCKFILES + 1)) ;;
-      generated/*|*/generated/*|gen/*|*/gen/*|*.gen.*|*_generated.go|*zz_generated.*|*.pb.go|*.pb.cc|*.pb.h|*.min.js|*.min.css)
+      generated/*|*/generated/*|_generated/*|*/_generated/*|gen/*|*/gen/*|*.gen.*|*_generated.go|*zz_generated.*|*.pb.go|*.pb.cc|*.pb.h|*.min.js|*.min.css)
         category=generated; relevant=no; GENERATED=$((GENERATED + 1)) ;;
       *)
         if [ "${status#D}" != "$status" ] || { [ "$added" -eq 0 ] && [ "$deleted" -gt 0 ]; }; then

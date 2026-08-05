@@ -190,7 +190,7 @@ Read `fix-cycle.md` for the complete fix cycle:
 - **Clean-review path:** Set `REVIEW_CLEAN=true`, persist `review_clean=true` to the active state, skip inapplicable mutation work, and continue through local verification, CI, and Step 11
 - **Step 4:** Address each comment — parallel dispatch for 3+ comments on different files, sequential otherwise. Understand request, locate code, make minimal fix, validate against feedback
 - **Step 4.5:** Generate tests for testable fixes (read `test-generation.md`)
-- **Step 5:** Verify locally — `go -C "$WORKTREE_PATH" build`, `go -C "$WORKTREE_PATH" test`, and a worktree-scoped `golangci-lint`
+- **Step 5:** Verify locally — worktree-scoped build, type-check, test, and lint through the repo's detected package manager (`fix-cycle.md` carries the detection block and command table)
 - **Step 6:** Commit and push, capture `BOT_REVIEW_BASELINE` timestamp
 - **Step 7:** Watch CI — retry up to 3x if no checks reported
 - **Step 8:** Reply to each comment

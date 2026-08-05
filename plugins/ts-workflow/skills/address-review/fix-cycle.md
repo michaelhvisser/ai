@@ -96,7 +96,7 @@ procedure so the workflow cannot advance.
 When there are 3 or more unresolved comments targeting **different files**, dispatch parallel Implementer subagents:
 
 1. **Group comments by file** — comments in the same file are handled by one subagent
-2. **Group by shared test files** — if two source files are in the same package and share a `_test.go`, they must be in the same group to avoid write conflicts
+2. **Group by shared test files** — if two source files are covered by the same test file (one colocated `*.test.ts`/`*.spec.ts`, a shared `__tests__/` module, or a shared test-utils/fixture module), they must be in the same group to avoid write conflicts
 3. **For each file group**, delegate a fresh-context implementation worker
    through the active surface, selecting sonnet when the surface supports model
    choice, with:
@@ -136,11 +136,44 @@ Read `test-generation.md` for full test generation guidelines including testabil
 
 ## Step 5: Verify Fixes Locally
 
-**All must pass before proceeding:**
-- `go -C "$WORKTREE_PATH" build ./...`
-- `go -C "$WORKTREE_PATH" test ./...`
-- `(cd "$WORKTREE_PATH" && golangci-lint run)` (if available)
-- Check dev server logs for errors if applicable
+Detect the package manager once, from the repository root:
+
+```bash
+PM=$(cd "$WORKTREE_PATH" && \
+  if [ -f pnpm-lock.yaml ]; then echo pnpm
+  elif [ -f yarn.lock ]; then echo yarn
+  elif [ -f bun.lock ] || [ -f bun.lockb ]; then echo bun
+  else echo npm; fi)
+echo "Package manager: $PM"
+```
+
+`package-lock.json` or no lockfile at all both mean `npm`. Then read the
+available scripts so you only run checks the repo actually defines:
+
+```bash
+(cd "$WORKTREE_PATH" && jq -r '.scripts // {} | keys[]' package.json 2>/dev/null)
+```
+
+**Every applicable check must pass before proceeding:**
+
+| Check | Command |
+|---|---|
+| Build | `(cd "$WORKTREE_PATH" && $PM run build)` — only when a `build` script exists |
+| Type-check | `(cd "$WORKTREE_PATH" && $PM run type-check)` when that script exists; otherwise `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` is present |
+| Test | `(cd "$WORKTREE_PATH" && $PM test)` when a `test` script exists; otherwise the detected runner — `(cd "$WORKTREE_PATH" && npx vitest run)` or `(cd "$WORKTREE_PATH" && npx jest)` |
+| Lint | `(cd "$WORKTREE_PATH" && $PM run lint)` — only when a `lint` script exists |
+
+With `bun`, invoke scripts as `bun run <script>` (bare `bun test` runs Bun's own
+runner instead of the package script). In a monorepo (`turbo.json`, `nx.json`,
+or `pnpm-workspace.yaml` present) run these as **root** scripts from
+`$WORKTREE_PATH` so the task runner fans out to every affected workspace
+package.
+
+If any fix touched Convex functions, refresh the generated types before
+type-checking: `(cd "$WORKTREE_PATH" && npx convex codegen)`. Never edit
+`convex/_generated/` by hand — regenerate it.
+
+Also check dev server logs for errors if applicable.
 
 Fix any failures and re-run until all green.
 
@@ -192,8 +225,8 @@ if ! git -C "$WORKTREE_PATH" diff --cached --quiet; then
 fi
 
 OWNED_FILES=(
-  "path/to/fixed-file.go"
-  "path/to/generated_test.go"
+  "path/to/fixed-file.ts"
+  "path/to/fixed-file.test.ts"
 )
 git -C "$WORKTREE_PATH" add -- "${OWNED_FILES[@]}"
 

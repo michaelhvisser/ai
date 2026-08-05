@@ -186,7 +186,7 @@ control without emitting a terminal marker.
 set_loop_phase "$STATE_FILE" "rebasing" "$WORKFLOW_STATE_PATH"
 ```
 
-Read `rebase-and-build.md` for the full procedure: detect base branch, fetch, rebase if behind, force-push with lease, wait for CI; then run code generation, `go -C "$WORKTREE_PATH" build`, `go -C "$WORKTREE_PATH" test`, a worktree-scoped `golangci-lint`, and check for generated-file drift.
+Read `rebase-and-build.md` for the full procedure: detect base branch, fetch, rebase if behind, force-push with lease, wait for CI; then detect the package manager, run any codegen script, `$PM run build`, the type-check (`$PM run type-check` or `$PMX tsc --noEmit`), the test suite, `$PM run lint`, and check for generated-file drift.
 
 After build verification, persist results — Read `loop-state.md` for the **persist-build-result block**.
 
@@ -411,13 +411,13 @@ Failure** and stop before staging or verification.
 ### Refresh Generated Output After Review
 
 Review fixes can change generator inputs. In both fix modes, rerun the selected
-generation target after address-review returns, then replace `GEN_NEW_FILES`
+generation script after address-review returns, then replace `GEN_NEW_FILES`
 with the exact post-review generated path set while still leaving the index
 empty:
 
 ```bash
 if [ -n "${GEN_TARGET:-}" ]; then
-  if ! (cd "$WORKTREE_PATH" && make "$GEN_TARGET") 2>&1; then
+  if ! (cd "$WORKTREE_PATH" && $PM run "$GEN_TARGET") 2>&1; then
     WORKFLOW_RESULT=INCOMPLETE
     WORKFLOW_REASON=generation-failed
   else
@@ -590,17 +590,36 @@ cannot be read or the local parent is not the exact published PR head.
 
 ### Re-verify after fixes
 
-**CRITICAL:** Step 3 modified code, so re-run build verification before E2E:
+**CRITICAL:** Step 3 modified code, so re-run build verification before E2E.
+This repeats `rebase-and-build.md` §2c with the `$PM`/`$PMX`/`has_script`
+values resolved in §2a. On a re-entry that skipped Steps 1-2, re-run the §2a
+detection block first so those values exist:
 
 ```bash
 BUILD_RESULT=pass
-if ! go -C "$WORKTREE_PATH" build ./...; then
-  BUILD_RESULT=fail
-elif ! go -C "$WORKTREE_PATH" test ./...; then
-  BUILD_RESULT=fail
-elif command -v golangci-lint >/dev/null 2>&1 && ! (cd "$WORKTREE_PATH" && golangci-lint run); then
-  BUILD_RESULT=fail
-fi
+(
+  cd "$WORKTREE_PATH" || exit 1
+
+  if has_script build && ! $PM run build; then exit 1; fi
+
+  if has_script type-check; then
+    $PM run type-check || exit 1
+  elif has_script typecheck; then
+    $PM run typecheck || exit 1
+  elif [ -f tsconfig.json ]; then
+    $PMX tsc --noEmit || exit 1
+  fi
+
+  if has_script test; then
+    $PM run test || exit 1
+  elif ls vitest.config.* >/dev/null 2>&1; then
+    $PMX vitest run || exit 1
+  elif ls jest.config.* >/dev/null 2>&1; then
+    $PMX jest || exit 1
+  fi
+
+  if has_script lint && ! $PM run lint; then exit 1; fi
+) || BUILD_RESULT=fail
 ```
 
 If `BUILD_RESULT=fail`, report `WORKFLOW_RESULT=INCOMPLETE` and

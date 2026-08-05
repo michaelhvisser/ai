@@ -30,13 +30,13 @@ After this workflow returns, the resolved workflow object holds these keys
 | Field | Type | Set by | Meaning |
 |-------|------|--------|---------|
 | `coverage_result` | string | Step E.3 | Aggregate percent (e.g. `"82.4"`); empty when skipped |
-| `coverage_skip_reason` | string | Step E.3 | Empty when a real number was computed; `"all-main"` when every changed file was `package main` |
+| `coverage_skip_reason` | string | Step E.3 | Empty when a real number was computed; `"all-entrypoint"` when every changed file was an entrypoint/wiring module |
 | `coverage_tests_generated` | number | Step F | Count of new tests added (0 when Step F didn't run) |
 
 **Caller contract:** When rendering a summary, check `coverage_skip_reason`
 before formatting `coverage_result` with a percent sign. If `coverage_skip_reason`
 is non-empty, render a textual reason (e.g. `skipped — all changed files are
-package main`) instead of `<COV_RESULT>%`.
+entrypoint/wiring modules`) instead of `<COV_RESULT>%`.
 
 ## Step A: Skip Conditions
 
@@ -47,15 +47,16 @@ measurable changed-source coverage.
 ## Step B: Detect Changed Source Files
 
 Detect committed/uncommitted/staged/untracked files and filter to source files
-per detected project type. For Go, partition into **gated** files (count toward
-the aggregate) and **info** files (`package main` — shown in the report but
-excluded from the gate).
+per detected project type. For Node/TypeScript, partition into **gated** files
+(count toward the aggregate) and **info** files (entrypoint/wiring modules —
+shown in the report but excluded from the gate).
 
 → Read `step-b-detect-changed-files.md` for the full procedure: the
-`CHANGED_FILES` collector, per-language source-file filters (Go / Node /
-Rust / Python), the `get_pkg` comment-aware Go package extractor, and the
-gated/info partitioning loop. The rationale for excluding `package main`
-(issue #143) lives there.
+`CHANGED_FILES` collector, per-language source-file filters (Node/TS /
+Rust / Python / Go), the `is_entrypoint` path classifier, and the
+gated/info partitioning loop. The rationale for excluding entrypoint/wiring
+modules (issue #143) lives there, along with the exclusions for test files,
+`.d.ts`, build output, and generated directories such as `convex/_generated/`.
 
 If `CHANGED_SRC` is empty after filtering → skip (no source files to measure
 coverage for). Return to the calling command's next step.
@@ -65,13 +66,17 @@ coverage for). Return to the calling command's next step.
 Run the coverage tool appropriate for the detected project type and store
 output for analysis.
 
-→ Read `step-c-run-coverage.md` for the per-language commands (Go's built-in
-the Go coverage command; Node detection of vitest/jest/c8; Rust llvm-cov or
-tarpaulin; Python pytest-cov or coverage.py). It also contains the rule for
-when tool failure stops the workflow vs zero coverage proceeding to analysis.
+→ Read `step-c-run-coverage.md` for the package-manager detection
+(`pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `bun.lock`/`bun.lockb` → bun,
+otherwise npm; monorepo root scripts) and the per-language commands (Node
+detection of a `test:coverage` script then vitest/jest/c8/nyc; Rust llvm-cov or
+tarpaulin; Python pytest-cov or coverage.py; Go coverprofile as a secondary
+fallback). It also contains the rule for when tool failure stops the workflow
+vs zero coverage proceeding to analysis.
 
-If the coverage tool binary is genuinely missing (e.g., `cargo-llvm-cov` not
-installed), stop incomplete with `WORKFLOW_REASON=coverage-tool-unavailable`.
+If the coverage tool is genuinely missing (no test runner installed, or a
+missing vitest coverage provider), stop incomplete with
+`WORKFLOW_REASON=coverage-tool-unavailable`.
 Otherwise — even if coverage is 0% — proceed to Step D. **Do NOT treat low
 coverage as a tool failure.**
 
@@ -79,23 +84,24 @@ coverage as a tool failure.**
 
 Parse the coverage output and compute per-file coverage for changed files only:
 
-1. For each file in `CHANGED_SRC`, extract its line or function coverage percentage
+1. For each file in `CHANGED_SRC`, extract its statement coverage percentage
 2. Identify specific uncovered functions/methods in changed files
-3. Calculate the aggregate coverage percentage across changed source files (Go: gated files only — `CHANGED_SRC_GATED`, excluding `package main`; other languages: all of `CHANGED_SRC`)
+3. Calculate the aggregate coverage percentage across changed source files (Node/TS: gated files only — `CHANGED_SRC_GATED`, excluding entrypoint/wiring modules; other languages: all of `CHANGED_SRC`)
 
-→ Read `step-d-analyze.md` for the full statement-weighted Go coverprofile
-parser (two-pass: gated, then info), the `ALL_MAIN` flag logic, and the
-per-language JSON parsing notes (Node coverage-summary.json, Rust
-llvm-cov/tarpaulin JSON, Python coverage.json).
+→ Read `step-d-analyze.md` for the full statement-weighted
+`coverage-summary.json` parser (two-pass: gated, then info), the uncovered
+function-name lookup in `coverage-final.json`, the `ALL_ENTRYPOINT` flag logic,
+and the fallback parsing notes (Rust llvm-cov/tarpaulin JSON, Python
+coverage.json, Go coverprofile).
 
 **Outputs from Step D** (used by Steps E and F):
-- `AGGREGATE_COVERAGE` — percent string (or `"N/A"` when `ALL_MAIN=true`)
-- `ALL_MAIN` — boolean: `true` when every changed file is `package main`
+- `AGGREGATE_COVERAGE` — percent string (or `"N/A"` when `ALL_ENTRYPOINT=true`)
+- `ALL_ENTRYPOINT` — boolean: `true` when every changed file is an entrypoint/wiring module
 - `FILE_REPORT` — per-file table rows (gated rows have empty Notes;
-  info rows carry `excluded from gate (package main)`)
+  info rows carry `excluded from gate (entrypoint/wiring)`)
 - `UNCOVERED_FUNCS` — newline-separated `file:func1, func2` entries
-  (Go-only, gated files only — see issue #143)
-- `INFO_COUNT` — number of `package main` files included in the report
+  (gated files only — see issue #143)
+- `INFO_COUNT` — number of entrypoint/wiring files included in the report
 
 ## Step E: Coverage Gate Decision
 
@@ -107,14 +113,15 @@ with low coverage.
 
 **Design philosophy: "if you touch it, you own it."** The entire file's
 coverage counts, regardless of which lines you changed. The carve-out for
-`package main` (Go only) is detected by the package clause and is the only
-exception — see Step B and issue #143.
+entrypoint/wiring modules (Node/TS only) is detected by path convention and is
+the only exception — see Step B and issue #143. `page.tsx`, `route.ts`, and
+`convex/http.ts` are not carved out.
 
-→ Read `step-e-gate.md` for the exact report formats (Go 4-column with the
-`ALL_MAIN`-conditional footer; non-Go 3-column), the gate-decision tree (pass /
-`ALL_MAIN` warning / coverage < threshold / no test files / tool failure), test
-generation routing, and the jq blocks that persist success or incomplete
-outcomes.
+→ Read `step-e-gate.md` for the exact report formats (Node/TS 4-column with the
+`ALL_ENTRYPOINT`-conditional footer; Rust/Python/Go 3-column), the
+gate-decision tree (pass / `ALL_ENTRYPOINT` warning / coverage < threshold / no
+test files / tool failure), test generation routing, and the jq blocks that
+persist success or incomplete outcomes.
 
 ## Step F: Test Generation for Uncovered Code
 
@@ -129,14 +136,15 @@ After generation, rerun Steps C through E once. If the gate still fails, Step E
 persists the incomplete reason and stops.
 
 → Read `step-f-test-generation.md` for: the `CHANGED_FUNC_NAMES` extraction
-bash, per-language test-writing conventions (Go table-driven, vitest/jest,
-Rust `#[test]`, pytest parametrize), and the `coverage_tests_generated`
-state-file write at the end.
+bash, per-runner test-writing conventions (vitest/jest `it.each` case tables,
+node:test/mocha, Rust `#[test]`, pytest parametrize, Go table-driven fallback),
+the type-check/lint verification of generated tests, and the
+`coverage_tests_generated` state-file write at the end.
 
 ## Further Reading
 
-- `step-b-detect-changed-files.md` — `CHANGED_FILES` collector, per-language source filters, `get_pkg` extractor, gated/info partitioning
-- `step-c-run-coverage.md` — per-language coverage invocations and JSON shapes
-- `step-d-analyze.md` — statement-weighted Go parser, `ALL_MAIN` logic, per-language JSON parsing
+- `step-b-detect-changed-files.md` — `CHANGED_FILES` collector, per-language source filters, `is_entrypoint` classifier, gated/info partitioning
+- `step-c-run-coverage.md` — package-manager detection, per-language coverage invocations and JSON shapes
+- `step-d-analyze.md` — statement-weighted `coverage-summary.json` parser, `ALL_ENTRYPOINT` logic, fallback JSON parsing
 - `step-e-gate.md` — report formats, gate decision tree, hard-stop outcomes, state-file persistence
 - `step-f-test-generation.md` — mode selection, `CHANGED_FUNC_NAMES` extraction, per-language test generation, final state-file write

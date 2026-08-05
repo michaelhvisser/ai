@@ -206,16 +206,43 @@ and stop before build or E2E testing.
 
 ## Step 2: Build Verification
 
-### 2a. Code Generation (if applicable)
+### 2a. Detect the Package Manager
+
+Detect the package manager once; every generation, build, type-check, test, and
+lint command below uses `$PM`. In a monorepo (`turbo.json`, `nx.json`, or
+`pnpm-workspace.yaml` present) the root scripts fan out to the workspaces, so
+always run them from the repository root — never `cd` into a package.
+
+```bash
+if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm; PMX="pnpm exec"
+elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn; PMX="yarn exec"
+elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun; PMX=bunx
+else PM=npm; PMX=npx
+fi
+IS_MONOREPO=false
+if [ -f "$WORKTREE_PATH/turbo.json" ] || [ -f "$WORKTREE_PATH/nx.json" ] || [ -f "$WORKTREE_PATH/pnpm-workspace.yaml" ]; then
+  IS_MONOREPO=true
+fi
+echo "Package manager: $PM | monorepo: $IS_MONOREPO"
+
+# True when package.json declares the named script.
+has_script() { jq -e --arg s "$1" '.scripts[$s] // empty' "$WORKTREE_PATH/package.json" >/dev/null 2>&1; }
+```
+
+The `scripts` block in `package.json` is the authority for which verification
+commands exist. Run a `$PM run <script>` command only when that script is
+declared.
+
+### 2b. Code Generation (if applicable)
 
 ```bash
 if ! declare -p GEN_NEW_FILES >/dev/null 2>&1; then
   GEN_NEW_FILES=()
 fi
-if [ -f "$WORKTREE_PATH/Makefile" ]; then
+if [ -f "$WORKTREE_PATH/package.json" ]; then
   if [ -z "${GEN_TARGET:-}" ]; then
-    GEN_TARGET=$( (cd "$WORKTREE_PATH" && make -qp 2>/dev/null) | awk -F: '/^[a-zA-Z0-9_-]+:/ {print $1}' \
-      | grep -E '^(generate|gen|codegen|sqlc|proto|templ)$' | head -1 || true)
+    GEN_TARGET=$(jq -r '.scripts // {} | keys[]' "$WORKTREE_PATH/package.json" 2>/dev/null \
+      | grep -E '^(generate|gen|codegen|prisma:generate|build:types)$' | head -1 || true)
     if [ -n "$GEN_TARGET" ]; then
       GEN_SNAPSHOT_FILES=()
       while IFS= read -r -d '' SNAPSHOT_FILE; do
@@ -244,8 +271,8 @@ if [ -f "$WORKTREE_PATH/Makefile" ]; then
     fi
   fi
   if [ -n "$GEN_TARGET" ]; then
-    echo "Running make $GEN_TARGET..."
-    if ! (cd "$WORKTREE_PATH" && make "$GEN_TARGET") 2>&1; then
+    echo "Running $PM run $GEN_TARGET..."
+    if ! (cd "$WORKTREE_PATH" && $PM run "$GEN_TARGET") 2>&1; then
       BUILD_RESULT="fail"
       WORKFLOW_REASON="generation-failed"
     fi
@@ -332,17 +359,41 @@ if [ -n "$GEN_TARGET" ] && [ -z "${WORKFLOW_REASON:-}" ]; then
 fi
 ```
 
-### 2b. Build and Test
+### 2c. Build, Type-check, Test, and Lint
+
+Run each check only when the repo declares it. A missing `type-check` script
+falls back to `tsc --noEmit` when a `tsconfig.json` exists; a missing `test`
+script falls back to the configured runner (vitest or jest) when one is
+present. A check the repo does not configure at all is skipped, not failed.
+
+Run this in the same shell invocation as §2a — or re-run §2a's block first — so
+`$PM`, `$PMX`, and `has_script` are defined.
 
 ```bash
 BUILD_RESULT=pass
-if ! go -C "$WORKTREE_PATH" build ./...; then
-  BUILD_RESULT=fail
-elif ! go -C "$WORKTREE_PATH" test ./...; then
-  BUILD_RESULT=fail
-elif command -v golangci-lint >/dev/null 2>&1 && ! (cd "$WORKTREE_PATH" && golangci-lint run); then
-  BUILD_RESULT=fail
-fi
+(
+  cd "$WORKTREE_PATH" || exit 1
+
+  if has_script build && ! $PM run build; then exit 1; fi
+
+  if has_script type-check; then
+    $PM run type-check || exit 1
+  elif has_script typecheck; then
+    $PM run typecheck || exit 1
+  elif [ -f tsconfig.json ]; then
+    $PMX tsc --noEmit || exit 1
+  fi
+
+  if has_script test; then
+    $PM run test || exit 1
+  elif ls vitest.config.* >/dev/null 2>&1; then
+    $PMX vitest run || exit 1
+  elif ls jest.config.* >/dev/null 2>&1; then
+    $PMX jest || exit 1
+  fi
+
+  if has_script lint && ! $PM run lint; then exit 1; fi
+) || BUILD_RESULT=fail
 ```
 
 If `BUILD_RESULT=fail`, report:
@@ -356,17 +407,20 @@ Follow the top-level **Hard Invariant Failure** procedure and stop. Never
 continue to browser E2E with failed generation, build, tests, or configured
 lint.
 
-### 2c. Dev Server Logs (if running)
+### 2d. Dev Server Logs (if running)
 
-If Air or another dev server is running, check `tmp/logs/api.log` or similar for build errors:
+If a dev server (`next dev`, `astro dev`, `vite`, `convex dev`, …) is already
+running and writes to a log file, scan it for compile errors:
 
 ```bash
-if [ -f "$WORKTREE_PATH/tmp/logs/api.log" ]; then
-  tail -20 "$WORKTREE_PATH/tmp/logs/api.log" | grep -iE 'error|fatal|panic' || echo "No errors in dev server logs"
-fi
+for DEV_LOG in "$WORKTREE_PATH/tmp/logs/dev.log" "$WORKTREE_PATH/.local/logs/dev.log" "$WORKTREE_PATH/dev-server.log"; do
+  if [ -f "$DEV_LOG" ]; then
+    tail -20 "$DEV_LOG" | grep -iE 'error|failed to compile|unhandled|econnrefused' || echo "No errors in $DEV_LOG"
+  fi
+done
 ```
 
-### 2d. Check for Unexpected Diffs
+### 2e. Check for Unexpected Diffs
 
 ```bash
 git -C "$WORKTREE_PATH" diff --stat

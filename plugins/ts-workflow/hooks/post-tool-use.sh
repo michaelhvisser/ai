@@ -4,7 +4,7 @@ set -euo pipefail
 HOOK_INPUT=$(cat)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 TOOL_OUTPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_output // empty' 2>/dev/null)
-RETRY_STATE="${TMPDIR:-/tmp}/gopher-ai-retry-${TOOL_NAME}"
+RETRY_STATE="${TMPDIR:-/tmp}/ts-workflow-retry-${TOOL_NAME}"
 
 detect_network_timeout() {
   echo "$TOOL_OUTPUT" | grep -qiE 'connection timed out|network.*(unreachable|timeout)|dial tcp.*timeout|context deadline exceeded|ETIMEDOUT'
@@ -49,10 +49,10 @@ if detect_network_timeout; then handle_network_timeout; exit 0; fi
 if detect_rate_limit; then handle_rate_limit; exit 0; fi
 
 # Non-transient errors (inform only)
-if echo "$TOOL_OUTPUT" | grep -qE '^.+\.go:[0-9]+:[0-9]+: '; then
-  echo "Go compilation error detected. Fix the reported errors before proceeding." >&2
+if echo "$TOOL_OUTPUT" | grep -qE 'error TS[0-9]+'; then
+  echo "TypeScript compilation error detected. Fix the reported errors before proceeding." >&2
 fi
-if echo "$TOOL_OUTPUT" | grep -qiE 'golangci-lint.*error|staticcheck.*error'; then
+if echo "$TOOL_OUTPUT" | grep -qiE '[0-9]+ problems? \([0-9]+ errors?|✖ [0-9]+ problem|eslint.*error|[0-9]+ errors? and [0-9]+ warnings?'; then
   echo "Lint failures detected. Review and fix before committing." >&2
 fi
 if echo "$TOOL_OUTPUT" | grep -qiE 'permission denied|403 Forbidden|EACCES|not authorized'; then
