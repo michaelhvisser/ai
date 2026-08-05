@@ -1,0 +1,142 @@
+# Coverage Verification (Shared Reference)
+
+This document is referenced by both `$ts-workflow:ship` and `$ts-workflow:start-issue`. It's a router:
+each step (A through F) gives the contract — what must be true on entry, what
+must be true on return — and points to the sibling that owns the implementation.
+Follow Steps A through F using the parameters provided by the calling command.
+
+## Prerequisites
+
+The calling command MUST set these variables before invoking this workflow:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `BASE_BRANCH` | Branch to diff against | `origin/main` |
+| `WORKTREE_PATH` | Absolute checkout path for every repository command | `/path/to/worktree` |
+| `STATE_FILE` | **Absolute path** to the loop state JSON file | `/path/to/.local/state/owner.loop.local.json` |
+| `WORKFLOW_STATE_PATH` | JSON array path for the calling workflow object | `[]` or `["components","ship"]` |
+| `SKIP_COVERAGE` | Compatibility flag; may skip only source-free changes | `true` or `false` |
+| `COVERAGE_THRESHOLD` | Minimum coverage percentage for changed files | `60` |
+
+**Worktree note:** `STATE_FILE` points into the original repo, while coverage
+artifacts live under `$WORKTREE_PATH/.local/state/`. Every repository and
+coverage command targets `WORKTREE_PATH` explicitly.
+
+## State-file fields written
+
+After this workflow returns, the resolved workflow object holds these keys
+(callers read them to render summary lines):
+
+| Field | Type | Set by | Meaning |
+|-------|------|--------|---------|
+| `coverage_result` | string | Step E.3 | Aggregate percent (e.g. `"82.4"`); empty when skipped |
+| `coverage_skip_reason` | string | Step E.3 | Empty when a real number was computed; `"all-main"` when every changed file was `package main` |
+| `coverage_tests_generated` | number | Step F | Count of new tests added (0 when Step F didn't run) |
+
+**Caller contract:** When rendering a summary, check `coverage_skip_reason`
+before formatting `coverage_result` with a percent sign. If `coverage_skip_reason`
+is non-empty, render a textual reason (e.g. `skipped — all changed files are
+package main`) instead of `<COV_RESULT>%`.
+
+## Step A: Skip Conditions
+
+Only source-free changes may skip this workflow. `SKIP_COVERAGE=true` does not
+waive the gate when Step B finds changed source files. No driver may bypass
+measurable changed-source coverage.
+
+## Step B: Detect Changed Source Files
+
+Detect committed/uncommitted/staged/untracked files and filter to source files
+per detected project type. For Go, partition into **gated** files (count toward
+the aggregate) and **info** files (`package main` — shown in the report but
+excluded from the gate).
+
+→ Read `step-b-detect-changed-files.md` for the full procedure: the
+`CHANGED_FILES` collector, per-language source-file filters (Go / Node /
+Rust / Python), the `get_pkg` comment-aware Go package extractor, and the
+gated/info partitioning loop. The rationale for excluding `package main`
+(issue #143) lives there.
+
+If `CHANGED_SRC` is empty after filtering → skip (no source files to measure
+coverage for). Return to the calling command's next step.
+
+## Step C: Run Coverage
+
+Run the coverage tool appropriate for the detected project type and store
+output for analysis.
+
+→ Read `step-c-run-coverage.md` for the per-language commands (Go's built-in
+the Go coverage command; Node detection of vitest/jest/c8; Rust llvm-cov or
+tarpaulin; Python pytest-cov or coverage.py). It also contains the rule for
+when tool failure stops the workflow vs zero coverage proceeding to analysis.
+
+If the coverage tool binary is genuinely missing (e.g., `cargo-llvm-cov` not
+installed), stop incomplete with `WORKFLOW_REASON=coverage-tool-unavailable`.
+Otherwise — even if coverage is 0% — proceed to Step D. **Do NOT treat low
+coverage as a tool failure.**
+
+## Step D: Analyze Changed-File Coverage
+
+Parse the coverage output and compute per-file coverage for changed files only:
+
+1. For each file in `CHANGED_SRC`, extract its line or function coverage percentage
+2. Identify specific uncovered functions/methods in changed files
+3. Calculate the aggregate coverage percentage across changed source files (Go: gated files only — `CHANGED_SRC_GATED`, excluding `package main`; other languages: all of `CHANGED_SRC`)
+
+→ Read `step-d-analyze.md` for the full statement-weighted Go coverprofile
+parser (two-pass: gated, then info), the `ALL_MAIN` flag logic, and the
+per-language JSON parsing notes (Node coverage-summary.json, Rust
+llvm-cov/tarpaulin JSON, Python coverage.json).
+
+**Outputs from Step D** (used by Steps E and F):
+- `AGGREGATE_COVERAGE` — percent string (or `"N/A"` when `ALL_MAIN=true`)
+- `ALL_MAIN` — boolean: `true` when every changed file is `package main`
+- `FILE_REPORT` — per-file table rows (gated rows have empty Notes;
+  info rows carry `excluded from gate (package main)`)
+- `UNCOVERED_FUNCS` — newline-separated `file:func1, func2` entries
+  (Go-only, gated files only — see issue #143)
+- `INFO_COUNT` — number of `package main` files included in the report
+
+## Step E: Coverage Gate Decision
+
+**MANDATORY RULE — NO EXCEPTIONS:** When coverage is below
+`COVERAGE_THRESHOLD`, display the report, generate tests for the uncovered
+changed-source behavior, and rerun the gate. If coverage still misses the
+threshold, stop incomplete. No driver may skip, waive, rationalize, or proceed
+with low coverage.
+
+**Design philosophy: "if you touch it, you own it."** The entire file's
+coverage counts, regardless of which lines you changed. The carve-out for
+`package main` (Go only) is detected by the package clause and is the only
+exception — see Step B and issue #143.
+
+→ Read `step-e-gate.md` for the exact report formats (Go 4-column with the
+`ALL_MAIN`-conditional footer; non-Go 3-column), the gate-decision tree (pass /
+`ALL_MAIN` warning / coverage < threshold / no test files / tool failure), test
+generation routing, and the jq blocks that persist success or incomplete
+outcomes.
+
+## Step F: Test Generation for Uncovered Code
+
+When Step E routes here, generate tests for the uncovered functions identified
+in Step D:
+
+- **All uncovered functions** for below-threshold coverage
+- **No-test-files path** when no test files exist anywhere; fall back to
+  extracting exported signatures from `CHANGED_SRC` directly
+
+After generation, rerun Steps C through E once. If the gate still fails, Step E
+persists the incomplete reason and stops.
+
+→ Read `step-f-test-generation.md` for: the `CHANGED_FUNC_NAMES` extraction
+bash, per-language test-writing conventions (Go table-driven, vitest/jest,
+Rust `#[test]`, pytest parametrize), and the `coverage_tests_generated`
+state-file write at the end.
+
+## Further Reading
+
+- `step-b-detect-changed-files.md` — `CHANGED_FILES` collector, per-language source filters, `get_pkg` extractor, gated/info partitioning
+- `step-c-run-coverage.md` — per-language coverage invocations and JSON shapes
+- `step-d-analyze.md` — statement-weighted Go parser, `ALL_MAIN` logic, per-language JSON parsing
+- `step-e-gate.md` — report formats, gate decision tree, hard-stop outcomes, state-file persistence
+- `step-f-test-generation.md` — mode selection, `CHANGED_FUNC_NAMES` extraction, per-language test generation, final state-file write
