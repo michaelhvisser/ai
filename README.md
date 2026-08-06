@@ -29,6 +29,8 @@ Issue-to-PR workflow automation with git worktree management for TypeScript/Java
 - **`/ts-workflow:ship`** — verify locally, push, open PR, watch CI and review bots, merge
 - **`/ts-workflow:review-deep`** — deep review of a PR or branch with issue context; fixes and commits actionable findings
 - **`/ts-workflow:address-review`** — fetch human/bot review feedback and resolve it in a fix loop
+- **`/ts-workflow:codex-ship`** — triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop) with a second-opinion cross-check, fix only the confirmed-real set, and loop until Codex runs out of genuine value
+- **`/ts-workflow:antagonist-review`** — cross-model adversarial review: a strong finder model and the local Codex CLI fight over every finding, a third model breaks ties, and a human settles only what the models can't
 - **`/ts-workflow:e2e-verify`** — browser-based end-to-end verification of a PR against the dev stack
 - **`/ts-workflow:commit`**, **`/ts-workflow:create-pr`**, **`/ts-workflow:worktree`**, **`/ts-workflow:tmux-start`** — the supporting cast
 
