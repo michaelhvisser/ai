@@ -210,14 +210,9 @@ workspaces, so never `cd` into a package to run them.
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-if [ -f pnpm-lock.yaml ]; then PM=pnpm; PMX="pnpm exec"
-elif [ -f yarn.lock ]; then PM=yarn; PMX="yarn exec"
-elif [ -f bun.lock ] || [ -f bun.lockb ]; then PM=bun; PMX=bunx
-else PM=npm; PMX=npx
-fi
-
-# True when package.json declares the named script.
-has_script() { jq -e --arg s "$1" '.scripts[$s] // empty' package.json >/dev/null 2>&1; }
+# Sets PM/PMX/IS_MONOREPO and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$REPO_ROOT"
 
 echo "Package manager: $PM"
 ```

@@ -139,11 +139,9 @@ Read `test-generation.md` for full test generation guidelines including testabil
 Detect the package manager once, from the repository root:
 
 ```bash
-PM=$(cd "$WORKTREE_PATH" && \
-  if [ -f pnpm-lock.yaml ]; then echo pnpm
-  elif [ -f yarn.lock ]; then echo yarn
-  elif [ -f bun.lock ] || [ -f bun.lockb ]; then echo bun
-  else echo npm; fi)
+# Sets PM/PMX/IS_MONOREPO and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$WORKTREE_PATH"
 echo "Package manager: $PM"
 ```
 
@@ -151,7 +149,7 @@ echo "Package manager: $PM"
 available scripts so you only run checks the repo actually defines:
 
 ```bash
-(cd "$WORKTREE_PATH" && jq -r '.scripts // {} | keys[]' package.json 2>/dev/null)
+jq -r '.scripts // {} | keys[]' "$WORKTREE_PATH/package.json" 2>/dev/null
 ```
 
 **Every applicable check must pass before proceeding:**
@@ -160,7 +158,7 @@ available scripts so you only run checks the repo actually defines:
 |---|---|
 | Build | `(cd "$WORKTREE_PATH" && $PM run build)` — only when a `build` script exists |
 | Type-check | `(cd "$WORKTREE_PATH" && $PM run type-check)` when that script exists; otherwise `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` is present |
-| Test | `(cd "$WORKTREE_PATH" && $PM test)` when a `test` script exists; otherwise the detected runner — `(cd "$WORKTREE_PATH" && npx vitest run)` or `(cd "$WORKTREE_PATH" && npx jest)` |
+| Test | `(cd "$WORKTREE_PATH" && $PM run test)` when a `test` script exists; otherwise the detected runner — `(cd "$WORKTREE_PATH" && npx vitest run)` or `(cd "$WORKTREE_PATH" && npx jest)` |
 | Lint | `(cd "$WORKTREE_PATH" && $PM run lint)` — only when a `lint` script exists |
 
 With `bun`, invoke scripts as `bun run <script>` (bare `bun test` runs Bun's own

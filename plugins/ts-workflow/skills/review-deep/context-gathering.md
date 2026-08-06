@@ -144,16 +144,9 @@ once here so those checks are applied only where they are relevant:
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-if [ -f pnpm-lock.yaml ]; then PM=pnpm
-elif [ -f yarn.lock ]; then PM=yarn
-elif [ -f bun.lock ] || [ -f bun.lockb ]; then PM=bun
-else PM=npm
-fi
-
-IS_MONOREPO=no
-if [ -f turbo.json ] || [ -f nx.json ] || [ -f pnpm-workspace.yaml ]; then
-  IS_MONOREPO=yes
-fi
+# Sets PM/PMX/IS_MONOREPO (true/false) and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$REPO_ROOT"
 
 # Dependency names across the root manifest and any workspace manifests.
 DEPS=$(git ls-files '*package.json' ':!:**/node_modules/**' | while read -r m; do

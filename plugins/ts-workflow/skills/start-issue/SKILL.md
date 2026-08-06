@@ -228,17 +228,12 @@ Detect the package manager once; every build, test, type-check, and lint
 command below uses `$PM`:
 
 ```bash
-if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm
-elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn
-elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun
-else PM=npm
-fi
-IS_MONOREPO=false
-if [ -f "$WORKTREE_PATH/turbo.json" ] || [ -f "$WORKTREE_PATH/nx.json" ] || [ -f "$WORKTREE_PATH/pnpm-workspace.yaml" ]; then
-  IS_MONOREPO=true
-fi
+# Sets PM/PMX/IS_MONOREPO and defines has_script(). Falls back to the
+# current directory when $WORKTREE_PATH is not set yet.
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$WORKTREE_PATH"
 echo "Package manager: $PM | monorepo: $IS_MONOREPO"
-jq -r '.scripts // {} | keys[]' "$WORKTREE_PATH/package.json" 2>/dev/null
+jq -r '.scripts // {} | keys[]' "$PM_ROOT/package.json" 2>/dev/null
 ```
 
 The script list above is the authority for which verification commands exist.
@@ -441,7 +436,7 @@ verify → coverage → security → submit → watch CI.
 Before outputting `<done>COMPLETE</done>`, every claim MUST have FRESH evidence
 from THIS session — actual command output, not narrative:
 
-- **"Tests pass"** → `(cd "$WORKTREE_PATH" && $PM test)` — or the detected runner (`npx vitest run`, `npx jest`) — output with zero failures
+- **"Tests pass"** → `(cd "$WORKTREE_PATH" && $PM run test)` — or the detected runner (`npx vitest run`, `npx jest`) — output with zero failures
 - **"Build succeeds"** → `(cd "$WORKTREE_PATH" && $PM run build)` exit 0 (if the `build` script exists)
 - **"Types check"** → `(cd "$WORKTREE_PATH" && $PM run type-check)` if the script exists, else `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` exists
 - **"Lint clean"** → `(cd "$WORKTREE_PATH" && $PM run lint)` output (skip if the script does not exist)
@@ -479,7 +474,7 @@ does not emit a terminal marker.
 **DO NOT output `<done>COMPLETE</done>` until ALL of these are TRUE:**
 
 1. Code changes implemented and address the issue
-2. Tests written and ALL PASS (`(cd "$WORKTREE_PATH" && $PM test)` or the detected runner) — with output shown above
+2. Tests written and ALL PASS (`(cd "$WORKTREE_PATH" && $PM run test)` or the detected runner) — with output shown above
 3. Coverage verified for changed source files, or not applicable because the
    diff is source-free / contains no gated source files
 4. Type-check and linting pass (`(cd "$WORKTREE_PATH" && $PM run type-check)` — or `npx tsc --noEmit` — and `(cd "$WORKTREE_PATH" && $PM run lint)`, each if the script exists) — with output shown above

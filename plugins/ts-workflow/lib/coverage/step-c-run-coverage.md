@@ -10,25 +10,9 @@ Every command below runs through the repo's own package manager. Detect it from
 the lockfile at `WORKTREE_PATH`:
 
 ```bash
-detect_pm() {
-  if   [ -f "$1/pnpm-lock.yaml" ]; then echo pnpm
-  elif [ -f "$1/yarn.lock" ]; then echo yarn
-  elif [ -f "$1/bun.lock" ] || [ -f "$1/bun.lockb" ]; then echo bun
-  else echo npm
-  fi
-}
-PM=$(detect_pm "$WORKTREE_PATH")
-
-# Monorepo? Root scripts are the entry point — never cd into a package to run them.
-IS_MONOREPO=false
-if [ -f "$WORKTREE_PATH/turbo.json" ] || [ -f "$WORKTREE_PATH/nx.json" ] || [ -f "$WORKTREE_PATH/pnpm-workspace.yaml" ]; then
-  IS_MONOREPO=true
-fi
-
-# True when package.json declares the named script.
-has_script() {
-  node -e 'const p=require(process.argv[1]+"/package.json");process.exit((p.scripts||{})[process.argv[2]]?0:1)' "$WORKTREE_PATH" "$1" 2>/dev/null
-}
+# Sets PM/PMX/IS_MONOREPO and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$WORKTREE_PATH"
 ```
 
 `package-lock.json` or no lockfile at all → `npm`. On a monorepo, run the root
@@ -56,10 +40,10 @@ elif [ -f "$WORKTREE_PATH/vitest.config.ts" ] || [ -f "$WORKTREE_PATH/vitest.con
 elif [ -f "$WORKTREE_PATH/jest.config.ts" ] || [ -f "$WORKTREE_PATH/jest.config.js" ] || grep -q '"jest"' "$WORKTREE_PATH/package.json" 2>/dev/null; then
   (cd "$WORKTREE_PATH" && npx jest --coverage --coverageReporters=json-summary --coverageReporters=json 2>&1) || true
 elif grep -q '"c8"' "$WORKTREE_PATH/package.json" 2>/dev/null || grep -q '"nyc"' "$WORKTREE_PATH/package.json" 2>/dev/null; then
-  (cd "$WORKTREE_PATH" && npx c8 --reporter=json-summary --reporter=json "$PM" test 2>&1) || true
+  (cd "$WORKTREE_PATH" && npx c8 --reporter=json-summary --reporter=json "$PM" run test 2>&1) || true
 elif has_script "test"; then
   # Unknown runner (node:test, mocha, ...) — wrap it in c8 for V8 coverage.
-  (cd "$WORKTREE_PATH" && npx c8 --reporter=json-summary --reporter=json "$PM" test 2>&1) || true
+  (cd "$WORKTREE_PATH" && npx c8 --reporter=json-summary --reporter=json "$PM" run test 2>&1) || true
 fi
 
 # Locate the summary. Monorepos emit one per package; merge-free approach:

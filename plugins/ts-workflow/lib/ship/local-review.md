@@ -407,22 +407,15 @@ or `pnpm-workspace.yaml` at the repo root), run root scripts from the repo root
 rather than from an individual package directory.
 
 ```bash
-if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm
-elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn
-elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun
-else PM=npm
-fi
-
-# has_script <name> — true when package.json defines that script
-has_script() {
-  [ -f "$WORKTREE_PATH/package.json" ] || return 1
-  jq -e --arg s "$1" '.scripts[$s] // empty' "$WORKTREE_PATH/package.json" >/dev/null 2>&1
-}
+# Sets PM/PMX/IS_MONOREPO and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$WORKTREE_PATH"
 ```
 
-`$PM run <script>` is valid for all four managers. Test runners are invoked as
-`$PM test` (npm/pnpm/yarn/bun all accept it) or, when no `test` script exists,
-via the detected runner (`npx vitest run`, `npx jest`).
+`$PM run <script>` is valid for all four managers — use `$PM run test` (never
+bare `bun test`, which invokes bun's built-in runner instead of the script).
+When no `test` script exists, fall back to the detected runner
+(`npx vitest run`, `npx jest`).
 
 ### Codegen drift check (projects with a generate/codegen step)
 
@@ -479,7 +472,7 @@ verification or commit.
 
 | Language | Build / Type-check / Test / Lint |
 |---|---|
-| **Node/TS** (`package.json`) | Run each step that applies, from `$WORKTREE_PATH`, using the detected `$PM`:<br>• **build** — `$PM run build` when `has_script build`<br>• **type-check** — `$PM run type-check` when that script exists (also accept `typecheck`); otherwise `npx tsc --noEmit` when `tsconfig.json` exists<br>• **test** — `$PM test` when `has_script test`; otherwise `npx vitest run` / `npx jest` per the detected runner; skip when neither a script nor a runner is configured<br>• **lint** — `$PM run lint` when `has_script lint`; otherwise `npx eslint .` only when an ESLint config is present |
+| **Node/TS** (`package.json`) | Run each step that applies, from `$WORKTREE_PATH`, using the detected `$PM`:<br>• **build** — `$PM run build` when `has_script build`<br>• **type-check** — `$PM run type-check` when that script exists (also accept `typecheck`); otherwise `npx tsc --noEmit` when `tsconfig.json` exists<br>• **test** — `$PM run test` when `has_script test`; otherwise `npx vitest run` / `npx jest` per the detected runner; skip when neither a script nor a runner is configured<br>• **lint** — `$PM run lint` when `has_script lint`; otherwise `npx eslint .` only when an ESLint config is present |
 | **Go** (`go.mod`) | `go -C "$WORKTREE_PATH" build ./... && go -C "$WORKTREE_PATH" test ./...`; run `(cd "$WORKTREE_PATH" && golangci-lint run)` when installed |
 | **Rust** (`Cargo.toml`) | `(cd "$WORKTREE_PATH" && cargo build && cargo test)`; run `(cd "$WORKTREE_PATH" && cargo clippy)` when `(cd "$WORKTREE_PATH" && cargo clippy --version)` succeeds or the repository explicitly configures Clippy |
 | **Python** (`pyproject.toml`/`setup.py`) | `(cd "$WORKTREE_PATH" && pytest)` or `(cd "$WORKTREE_PATH" && python -m pytest)`; run installed linters from the same worktree-scoped group |

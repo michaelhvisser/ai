@@ -214,19 +214,10 @@ lint command below uses `$PM`. In a monorepo (`turbo.json`, `nx.json`, or
 always run them from the repository root — never `cd` into a package.
 
 ```bash
-if [ -f "$WORKTREE_PATH/pnpm-lock.yaml" ]; then PM=pnpm; PMX="pnpm exec"
-elif [ -f "$WORKTREE_PATH/yarn.lock" ]; then PM=yarn; PMX="yarn exec"
-elif [ -f "$WORKTREE_PATH/bun.lock" ] || [ -f "$WORKTREE_PATH/bun.lockb" ]; then PM=bun; PMX=bunx
-else PM=npm; PMX=npx
-fi
-IS_MONOREPO=false
-if [ -f "$WORKTREE_PATH/turbo.json" ] || [ -f "$WORKTREE_PATH/nx.json" ] || [ -f "$WORKTREE_PATH/pnpm-workspace.yaml" ]; then
-  IS_MONOREPO=true
-fi
+# Sets PM/PMX/IS_MONOREPO and defines has_script().
+source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+pm_detect "$WORKTREE_PATH"
 echo "Package manager: $PM | monorepo: $IS_MONOREPO"
-
-# True when package.json declares the named script.
-has_script() { jq -e --arg s "$1" '.scripts[$s] // empty' "$WORKTREE_PATH/package.json" >/dev/null 2>&1; }
 ```
 
 The `scripts` block in `package.json` is the authority for which verification

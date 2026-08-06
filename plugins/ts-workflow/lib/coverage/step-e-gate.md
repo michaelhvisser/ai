@@ -56,7 +56,7 @@ would leave the calling skill (e.g. `$ts-workflow:ship`) unable to render the co
 summary line.
 
 ```
-⚠️  Coverage gate skipped: all changed files are entrypoint/wiring modules (config, middleware, layout/error shells, schema declarations — typically bootstrap code that's untestable in practice). See issue #143 for rationale.
+⚠️  Coverage gate skipped: all changed files are entrypoint/wiring modules (config, layout/error shells, schema declarations — typically bootstrap code that's untestable in practice). See issue #143 for rationale.
 ```
 
 ### Branch 2 — Coverage >= `COVERAGE_THRESHOLD`

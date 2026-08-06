@@ -205,7 +205,7 @@ Run the full verification checklist. **All must pass before proceeding:**
 - **Codegen** (Convex repos only): `(cd "$WORKTREE_PATH" && npx convex codegen)` to refresh `convex/_generated/` before type-checking. Never hand-edit `convex/_generated/`.
 - **Build**: `(cd "$WORKTREE_PATH" && $PM run build)` (if the `build` script exists)
 - **Type-check**: `(cd "$WORKTREE_PATH" && $PM run type-check)` if the script exists, else `(cd "$WORKTREE_PATH" && npx tsc --noEmit)` when a `tsconfig.json` exists. This is the repo-wide check the implementers deliberately skipped.
-- **All tests**: `(cd "$WORKTREE_PATH" && $PM test)`, or the runner reported in `STACK` (`npx vitest run`, `npx jest`)
+- **All tests**: `(cd "$WORKTREE_PATH" && $PM run test)`, or the runner reported in `STACK` (`npx vitest run`, `npx jest`)
 - **Lint**: `(cd "$WORKTREE_PATH" && $PM run lint)` (if the script exists)
 - **Build logs**: if a dev server is running, check its log output for errors
 

@@ -97,7 +97,8 @@ is_entrypoint() {
     # convex/convex.config.ts, convex/auth.config.ts, ...
     *.config.ts|*.config.tsx|*.config.js|*.config.jsx|*.config.mjs|*.config.cjs) return 0 ;;
     # Runtime entry shims registered by the framework, not called by app code.
-    middleware.ts|middleware.js|*/middleware.ts|*/middleware.js) return 0 ;;
+    # NOTE: middleware.ts is deliberately NOT exempt — Next.js middleware
+    # routinely holds real auth/redirect logic that deserves the coverage gate.
     instrumentation.ts|instrumentation.js|*/instrumentation.ts|*/instrumentation.js) return 0 ;;
     instrumentation-client.ts|*/instrumentation-client.ts) return 0 ;;
     main.ts|main.tsx|*/main.ts|*/main.tsx) return 0 ;;
@@ -131,14 +132,14 @@ On the Rust, Python, and Go fallback paths the carve-out does not apply: set
 ## Why exclude entrypoint/wiring modules?
 
 These modules are the JS/TS analogue of a thin `func main()` shim: config
-objects the bundler reads, a `middleware.ts` the framework mounts, a `layout.tsx`
-that only nests providers, a `schema.ts` that only declares tables. There is
-little to assert against, and what's left is awkward to test without refactoring
-purely to satisfy the metric.
+objects the bundler reads, a `layout.tsx` that only nests providers, a
+`schema.ts` that only declares tables. There is little to assert against, and
+what's left is awkward to test without refactoring purely to satisfy the metric.
 
 This is an **entrypoint-only** carve-out — touching a route handler, a Convex
 query/mutation, a hook, or a component with real logic still trips the gate (the
-"if you touch it, you own it" rule is unchanged). `page.tsx`, `route.ts`, and
-`convex/http.ts` are deliberately **not** carved out: they routinely hold real
-behavior. See [#143](https://github.com/gopherguides/gopher-ai/issues/143) for
+"if you touch it, you own it" rule is unchanged). `page.tsx`, `route.ts`,
+`middleware.ts`, and `convex/http.ts` are deliberately **not** carved out: they
+routinely hold real behavior (middleware in particular tends to carry auth and
+redirect logic). See [#143](https://github.com/gopherguides/gopher-ai/issues/143) for
 the full rationale and external references behind the carve-out.

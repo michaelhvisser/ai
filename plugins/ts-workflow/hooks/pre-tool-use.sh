@@ -43,7 +43,7 @@ check_tool_availability() {
         printf '{"decision":"block","reason":"GitHub CLI (gh) is not installed. Install from https://cli.github.com/"}\n'
         exit 0
       fi
-      if echo "$cmd_text" | grep -qE '^node |[|&;] *node |npx |npm ' && ! command -v node &>/dev/null; then
+      if echo "$cmd_text" | grep -qE '^node |[|&;] *node |npx |npm |pnpm |yarn |bunx |[^a-z]bun ' && ! command -v node &>/dev/null; then
         printf '{"decision":"block","reason":"Node.js is not installed. Install from https://nodejs.org/"}\n'
         exit 0
       fi
