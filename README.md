@@ -40,7 +40,7 @@ Works with any Node repo. Detects your package manager (pnpm / npm / yarn / bun)
 
 Turn reaction-flagged Slack feedback into researched GitHub issues on a Projects v2 board.
 
-- **`/triage-slack`** — read the messages your team flagged with an emoji, research each one against the codebase, and file the ones that survive as properly-evidenced issues with board status and priority set
+- **`/slack-triage:triage-slack`** — read the messages your team flagged with an emoji, research each one against the codebase, and file the ones that survive as properly-evidenced issues with board status and priority set
 
 React with `:ticket:` and the message becomes a candidate; the tool adds a done reaction and replies in-thread with the issue link, so Slack itself records what has been processed and re-running is always safe. Because that reaction is a deliberate human decision, filing straight into an active board state is safe for workflows that would otherwise require manual triage — and a report the research pass can't substantiate is filed as `Blocked` with the missing context instead of being handed to an agent as a spec.
 

@@ -13,7 +13,7 @@ research is not. Establishing whether a report is real needs the repo checked
 out, its `AGENTS.md` in context, its issue conventions, and read access to its
 own datastores. A hosted service could only enqueue work — and the board already
 is the queue. So the plumbing ships as a shared plugin and the judgement stays
-per-repo, in the `/triage-slack` command.
+per-repo, in the `/slack-triage:triage-slack` command.
 
 ## How it decides what to work on
 
@@ -35,9 +35,11 @@ queue an agent.
 
 Do this once for the whole fleet.
 
-1. At <https://api.slack.com/apps>, open or create the workspace's app. If you
-   already have one posting notifications via an incoming webhook, extend that
-   one — a webhook cannot read a channel, so it needs a bot token regardless.
+1. At <https://api.slack.com/apps>, **create a dedicated app** for triage.
+   Resist extending an app that already posts notifications through an incoming
+   webhook: adding scopes requires reinstalling, and that puts a live webhook in
+   the blast radius. The bot token and a webhook URL are unrelated credentials,
+   so sharing one app buys nothing.
 2. **OAuth & Permissions** → **Bot Token Scopes**:
 
    | Scope | Why |
@@ -124,15 +126,15 @@ Boards without a `Priority` field work fine — filing just skips it.
 ## Running it
 
 ```
-/triage-slack
-/triage-slack --dry-run                        # research and print, create nothing
-/triage-slack --channel #product-feedback --days 3
+/slack-triage:triage-slack
+/slack-triage:triage-slack --dry-run                        # research and print, create nothing
+/slack-triage:triage-slack --channel #product-feedback --days 3
 ```
 
 Headless, for a scheduled run:
 
 ```bash
-claude -p "/triage-slack" --permission-mode acceptEdits
+claude -p "/slack-triage:triage-slack" --permission-mode acceptEdits
 ```
 
 The plumbing is usable on its own:

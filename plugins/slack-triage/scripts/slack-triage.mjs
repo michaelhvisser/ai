@@ -3,7 +3,7 @@
  * Slack -> GitHub issue triage plumbing.
  *
  * Deterministic halves of the pipeline only. Everything judgement-shaped
- * (is this real, what is the fix, how urgent) lives in the `/triage-slack`
+ * (is this real, what is the fix, how urgent) lives in the `/slack-triage:triage-slack`
  * command, because it needs the repo checked out and its conventions in
  * context — which is exactly why this is a per-repo plugin rather than a
  * hosted service.
