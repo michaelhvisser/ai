@@ -173,26 +173,56 @@ async function slackApi(token, method, params = {}, httpMethod = "GET") {
   return payload;
 }
 
-/** Accepts a raw channel ID or a `#name`, returning the ID. */
-async function resolveChannelId(token, channel) {
-  if (/^[CGD][A-Z0-9]{6,}$/.test(channel)) return channel;
-  const name = channel.replace(/^#/, "");
-
+async function listChannels(token, types) {
+  const channels = [];
   let cursor;
+
   do {
     const page = await slackApi(token, "conversations.list", {
-      types: "public_channel,private_channel",
+      types,
       exclude_archived: true,
       limit: 200,
       cursor,
     });
-    const match = page.channels.find((entry) => entry.name === name);
-    if (match) return match.id;
+    channels.push(...page.channels);
     cursor = page.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
+  return channels;
+}
+
+/**
+ * Accepts a raw channel ID or a `#name`, returning the ID.
+ *
+ * Private channels are only searched when the token carries `groups:read`.
+ * Asking for them unconditionally would make that scope mandatory for every
+ * workspace, including those whose feedback channel is public, so a missing
+ * scope narrows the search instead of failing it.
+ */
+async function resolveChannelId(token, channel) {
+  if (/^[CGD][A-Z0-9]{6,}$/.test(channel)) return channel;
+  const name = channel.replace(/^#/, "");
+
+  let channels;
+  let searchedPrivate = true;
+
+  try {
+    channels = await listChannels(token, "public_channel,private_channel");
+  } catch (error) {
+    if (!/missing_scope/.test(error.message)) throw error;
+    searchedPrivate = false;
+    channels = await listChannels(token, "public_channel");
+  }
+
+  const match = channels.find((entry) => entry.name === name);
+  if (match) return match.id;
+
   throw new TriageError(
-    `Channel ${channel} not found. If it is private, invite the bot to it first.`,
+    searchedPrivate
+      ? `Channel ${channel} not found. Invite the bot to it first.`
+      : `Channel ${channel} not found among public channels, and this token ` +
+          "cannot see private ones. If it is private, add the groups:read and " +
+          "groups:history scopes, then reinstall the app.",
   );
 }
 

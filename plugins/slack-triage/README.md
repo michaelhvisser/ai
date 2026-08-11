@@ -49,7 +49,10 @@ Do this once for the whole fleet.
    | `chat:write` | Reply in-thread with the issue link |
    | `users:read` | Resolve user IDs to names for attribution |
 
-   For **private** channels also add `groups:history` and `groups:read`.
+   For **private** channels also add `groups:history` and `groups:read`. They
+   are genuinely optional: without them the channel lookup narrows to public
+   channels rather than failing, so a public-channel workspace never has to
+   grant private-channel access.
 3. **Install to Workspace** — reinstall if the app already existed, since new
    scopes do not apply until you do — and copy the **Bot User OAuth Token**
    (`xoxb-…`).
