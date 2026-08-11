@@ -18,7 +18,7 @@
  * been processed — no local watermark to lose — so re-running is safe.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -330,12 +330,37 @@ async function fetchCandidates(config, overrides) {
 /* GitHub                                                                      */
 /* -------------------------------------------------------------------------- */
 
-async function gh(args, input) {
-  const options = { maxBuffer: 32 * 1024 * 1024 };
-  if (input !== undefined) options.input = input;
+/**
+ * Runs `gh`, optionally piping `input` to its stdin.
+ *
+ * The stdin path uses spawn rather than execFile: execFile has no `input`
+ * option (that belongs to the *Sync variants), so passing one is silently
+ * ignored and `gh --input -` blocks forever on a stdin nothing ever closes.
+ */
+function ghWithStdin(args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("gh", args);
+    let stdout = "";
+    let stderr = "";
 
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr.trim() || `gh exited with code ${code}`));
+    });
+
+    child.stdin.end(input);
+  });
+}
+
+async function gh(args, input) {
   try {
-    const { stdout } = await execFileAsync("gh", args, options);
+    if (input !== undefined) return await ghWithStdin(args, input);
+    const { stdout } = await execFileAsync("gh", args, {
+      maxBuffer: 32 * 1024 * 1024,
+    });
     return stdout;
   } catch (error) {
     throw new TriageError(
