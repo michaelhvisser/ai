@@ -1,0 +1,135 @@
+---
+argument-hint: "[--channel #name] [--days 14] [--dry-run]"
+description: "Turn reaction-flagged Slack feedback into researched GitHub issues on the project board"
+allowed-tools: ["Bash(*slack-triage.mjs*)", "Bash(git:*)", "Bash(gh:*)", "Read", "Grep", "Glob", "Write", "Agent"]
+---
+
+# Triage Slack feedback into GitHub issues
+
+Pass through any `--channel` / `--days` / `--dry-run` arguments given: $ARGUMENTS
+
+## What you are doing
+
+A teammate reacted to a Slack message with the trigger emoji. That reaction is
+the human prioritization decision — it is what makes filing directly into an
+active board state legitimate. Treat it as authorization to *investigate*, never
+as a claim that the report is accurate.
+
+Your job is to establish whether the report survives contact with the code, and
+to file an issue good enough that a coding agent can act on it without a human
+re-explaining it.
+
+**Read the repo's own guidance first** — `AGENTS.md`, `CLAUDE.md`, and
+`WORKFLOW.md` if they exist. They define the board states, the verification
+gate, and any security invariants. Where this command and the repo disagree, the
+repo wins.
+
+## Step 1 — Fetch
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch [--channel …] [--days …]
+```
+
+Emits a JSON array. Empty: say so and stop. Non-empty: work oldest first, and
+finish each candidate completely before starting the next.
+
+## Step 2 — Research each candidate
+
+Pin your reading to one commit so the issue's references stay meaningful:
+
+```bash
+git fetch origin && git rev-parse --short origin/HEAD
+```
+
+Delegate the search to an `Explore` subagent. Give it the Slack text and thread
+verbatim, and ask it to establish:
+
+- Which files and functions the report implicates, as `file:line`.
+- Whether the code actually behaves as described. Quote the lines that decide it.
+- Whether it is already fixed on the integration branch, or covered by an open
+  issue (`gh issue list --state open`) or PR.
+- What tests cover the area today, and whether the repo's test setup can even
+  verify a fix of this kind.
+
+Check claims against live data where the repo gives you a read-only way to do so
+(a database MCP, a logs tool, an analytics query). Never mutate anything while
+researching.
+
+## Step 3 — Classify
+
+Pick exactly one:
+
+- **Substantiated** — you can point at the code or data that makes it true. File it.
+- **Feature request** — coherent and well-scoped, no defect. File it.
+- **Already fixed / duplicate** — do not file. Reply in the Slack thread with the
+  commit, issue, or PR that covers it, then add the done reaction so it stops
+  resurfacing.
+- **Cannot substantiate** — the code does not behave as described, or the report
+  is too vague to scope. File with status `Blocked` and state the *exact* missing
+  context. Never invent scope to make something fileable.
+
+## Step 4 — Write the issue
+
+Match the repo's existing conventions rather than a generic template. Read the
+two or three most recent substantive issues (`gh issue list --state all --limit 5`)
+and follow their structure — typically **Summary**, **Evidence**, **Impact**,
+**Proposed fix**, **Verification**.
+
+- Lead with the conclusion, not the story of your investigation.
+- Every code reference is `file:line`, pinned to the commit from step 2.
+- Add a `## Provenance` section with the Slack permalink and who reported it.
+- **Strip PII.** Slack feedback routinely names people and quotes emails, and an
+  issue outlives the request. Refer to roles ("an org admin") and use slugs or
+  IDs rather than contact details. If the repo declares a no-PII invariant, this
+  is that invariant.
+- Quote the original report only as much as preserves intent. The issue must
+  stand on your research, not on the Slack message.
+
+**Priority** — use the board's own options (the config caches them):
+
+| Priority | Use for |
+| --- | --- |
+| `Urgent` | Data exposure, cross-tenant leakage, auth bypass, or an unusable app |
+| `High` | A broken user-facing workflow with no workaround |
+| `Medium` | Default — real but survivable |
+| `Low` | Cosmetic, copy, or internal-only |
+
+If the repo documents per-issue agent overrides (effort, model) and the change
+touches auth, authorization, tenant isolation, or a shared schema, add that
+block — but consult the repo's own docs for the current syntax rather than
+reproducing one from memory.
+
+## Step 5 — File
+
+Write the draft to a scratch file:
+
+```jsonc
+{
+  "slack": { "channel": "C…", "ts": "…", "permalink": "https://…" },
+  "title": "…",
+  "body": "…",
+  "labels": ["bug"],          // existing labels only; check `gh label list`
+  "priority": "Medium",
+  "status": "Todo"            // or "Blocked" / "Backlog"
+}
+```
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input <draft.json>
+```
+
+Honour `--dry-run` if passed: print what would be filed and stop.
+
+The script creates the issue, places it on the board, sets Status and Priority,
+adds the done reaction, and replies in the Slack thread with the issue link. It
+refuses to run when the shared GraphQL quota is below its reserve — if you hit
+that, stop and report. The flags stay unprocessed and the next run picks them up.
+
+## Step 6 — Report
+
+One line per candidate: Slack author → classification → issue link, status,
+priority. Call out anything filed as `Blocked` and what it needs, and anything
+you deliberately did not file.
+
+If the repo runs a single-lane agent queue, say how many issues you just put in
+`Todo` and in what order they will run — that is the queue you committed.

@@ -36,6 +36,16 @@ Issue-to-PR workflow automation with git worktree management for TypeScript/Java
 
 Works with any Node repo. Detects your package manager (pnpm / npm / yarn / bun), monorepo tooling (Turborepo / Nx / workspaces), and test runner (vitest / jest / Playwright), with framework-aware guidance for Next.js (App Router, React 19), Astro, and Convex.
 
+### slack-triage
+
+Turn reaction-flagged Slack feedback into researched GitHub issues on a Projects v2 board.
+
+- **`/triage-slack`** — read the messages your team flagged with an emoji, research each one against the codebase, and file the ones that survive as properly-evidenced issues with board status and priority set
+
+React with `:ticket:` and the message becomes a candidate; the tool adds a done reaction and replies in-thread with the issue link, so Slack itself records what has been processed and re-running is always safe. Because that reaction is a deliberate human decision, filing straight into an active board state is safe for workflows that would otherwise require manual triage — and a report the research pass can't substantiate is filed as `Blocked` with the missing context instead of being handed to an agent as a spec.
+
+One Slack app and one bot token serve every repo; onboarding another is a `slack-triage.json`. Issue creation goes over REST and board writes honour a configurable GraphQL reserve, because that quota is per-user and shared across every repo on the account.
+
 ## Credits
 
 `ts-workflow` is forked from [go-workflow](https://github.com/gopherguides/gopher-ai) by Gopher Guides (MIT) and adapted for the TypeScript/JavaScript ecosystem. If you write Go, go use the original — it's excellent.
