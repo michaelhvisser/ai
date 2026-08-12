@@ -18,6 +18,11 @@ HOOK_INPUT=$(cat)
 
 # Extract transcript path from hook input
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
+HOOK_SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+TRANSCRIPT_SESSION_ID=""
+if [ -n "$TRANSCRIPT_PATH" ]; then
+  TRANSCRIPT_SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
+fi
 
 # Source shared library for state management
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,7 +46,16 @@ block_stop() {
     '{"decision": "block", "reason": $reason, "systemMessage": $msg}'
 }
 
-# Find any active loop state file
+transcript_has_loop_init_marker() {
+  local loop_name="$1"
+  local transcript="$2"
+  local marker="Loop initialized: $loop_name"
+  grep -Fxq "$marker" "$transcript" || grep -Fq "${marker}\\n" "$transcript"
+}
+
+# Find active loop state files, then narrow them to the stopping session before
+# resolving ambiguity. Repository-scoped storage may contain a live loop from a
+# different linked worktree/session; foreign state is not an active loop here.
 STATE_FILES=$(find_active_loops)
 
 if [ -z "$STATE_FILES" ]; then
@@ -49,16 +63,54 @@ if [ -z "$STATE_FILES" ]; then
   exit 0
 fi
 
-STATE_COUNT=$(printf '%s\n' "$STATE_FILES" | wc -l | tr -d ' ')
+OWNED_STATE_FILES=""
+while IFS= read -r candidate_state; do
+  [ -n "$candidate_state" ] || continue
+  if ! jq -e 'type == "object"' "$candidate_state" >/dev/null 2>&1; then
+    loop_log "stop-hook: ignoring unidentifiable state: $candidate_state"
+    continue
+  fi
+  candidate_loop=$(jq -r '.loop_name // empty' "$candidate_state")
+  candidate_session=$(jq -r '.session_id // empty' "$candidate_state")
+  candidate_owned=false
+  if [ -n "$candidate_session" ]; then
+    if { [ -n "$HOOK_SESSION_ID" ] && [ "$candidate_session" = "$HOOK_SESSION_ID" ]; } ||
+       { [ -n "$TRANSCRIPT_SESSION_ID" ] && [ "$candidate_session" = "$TRANSCRIPT_SESSION_ID" ]; }; then
+      candidate_owned=true
+    fi
+  elif [ -n "$candidate_loop" ] && [ -n "$TRANSCRIPT_PATH" ] &&
+       [ -f "$TRANSCRIPT_PATH" ] &&
+       transcript_has_loop_init_marker "$candidate_loop" "$TRANSCRIPT_PATH"; then
+    candidate_owned=true
+  fi
+
+  if [ "$candidate_owned" = true ]; then
+    if [ -n "$OWNED_STATE_FILES" ]; then
+      OWNED_STATE_FILES="$OWNED_STATE_FILES
+$candidate_state"
+    else
+      OWNED_STATE_FILES="$candidate_state"
+    fi
+  else
+    loop_log "stop-hook: ignoring foreign loop '$candidate_loop' from $candidate_state"
+  fi
+done <<< "$STATE_FILES"
+
+if [ -z "$OWNED_STATE_FILES" ]; then
+  loop_log "stop-hook: no active loops belong to this session"
+  exit 0
+fi
+
+STATE_COUNT=$(printf '%s\n' "$OWNED_STATE_FILES" | wc -l | tr -d ' ')
 if [ "$STATE_COUNT" -ne 1 ]; then
-  MULTIPLE_REASON=$(printf 'Multiple active loop states were found; ownership is ambiguous:\n%s' "$STATE_FILES")
-  loop_log "stop-hook: refusing ambiguous active loops: $STATE_FILES"
+  MULTIPLE_REASON=$(printf 'Multiple active loop states belong to this session; ownership is ambiguous:\n%s' "$OWNED_STATE_FILES")
+  loop_log "stop-hook: refusing ambiguous owned loops: $OWNED_STATE_FILES"
   block_stop "$MULTIPLE_REASON" \
     "$MULTIPLE_REASON Cancel the orphaned loop states or restore one caller-owned state before continuing."
   exit 0
 fi
 
-STATE_FILE="$STATE_FILES"
+STATE_FILE="$OWNED_STATE_FILES"
 
 # Verify state file exists and is readable
 if [ ! -f "$STATE_FILE" ] || [ ! -r "$STATE_FILE" ]; then
@@ -90,53 +142,52 @@ if ! read_loop_state "$STATE_FILE" '[]' 2>/dev/null; then
   exit 0
 fi
 
-# LOCAL PATCH (upstream gopherguides/gopher-ai#309): ownership by transcript evidence.
-# setup-loop.sh prints "Loop initialized: <loop_name>" to stdout, so that exact line
-# exists in the OWNER session's transcript (as Bash tool output) and in no other
-# session's transcript. Loop state is repo-scoped, so without this guard every
-# concurrent session in the repo gets blocked by (and increments) a loop it never
-# started. Fail-open: if the owner's transcript is compacted and loses the marker,
-# the owner stops being nagged -- strictly better than hijacking every other session.
-if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ] &&
-   ! grep -Fq "Loop initialized: $LOOP_NAME" "$TRANSCRIPT_PATH"; then
-  loop_log "stop-hook: session does not own loop '$LOOP_NAME' (no init marker in transcript), skipping"
-  exit 0
-fi
-
-# Check if loop is stale (from a previous session)
-# Primary: Compare session ID (portable, instant)
+# LOCAL PATCH (upstream gopherguides/gopher-ai#309): bind repo-scoped loop state
+# to the session that initialized it. Legacy state and drivers without a supported
+# session environment may still have an empty session_id. Their first legitimate
+# Stop proves ownership through setup-loop.sh's unique
+# "Loop initialized: <loop_name>" transcript marker and persists the transcript
+# session id. Later owner stops no longer depend on that marker surviving
+# compaction. Foreign or unidentifiable sessions fail open: they do not block,
+# increment, pause, or delete another session's loop.
 STORED_SESSION_ID=$(jq -r '.session_id // empty' "$STATE_FILE")
 
-if [ -n "$STORED_SESSION_ID" ] && [ -n "$TRANSCRIPT_PATH" ]; then
-  CURRENT_SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
-  if [ -n "$CURRENT_SESSION_ID" ] && [ "$STORED_SESSION_ID" != "$CURRENT_SESSION_ID" ]; then
-    # LOCAL PATCH (upstream #309): not our loop -- skip, do not delete the owner's state.
-    # A session mismatch means "not mine", not "stale from a dead run". Reclamation
-    # belongs in the explicit cancel-loop path.
-    loop_log "stop-hook: session mismatch (stored=$STORED_SESSION_ID current=$CURRENT_SESSION_ID), skipping without cleanup"
+if [ -n "$STORED_SESSION_ID" ]; then
+  if [ -z "$HOOK_SESSION_ID" ] && [ -z "$TRANSCRIPT_SESSION_ID" ]; then
+    loop_log "stop-hook: cannot prove ownership of loop '$LOOP_NAME' without a current session id, skipping"
     exit 0
   fi
-fi
-
-# Fallback: Timestamp-based stale detection
-if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-  STARTED_AT=$(jq -r '.started_at // empty' "$STATE_FILE")
-  if [ -n "$STARTED_AT" ]; then
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      TRANSCRIPT_BIRTH=$(stat -f %B "$TRANSCRIPT_PATH" 2>/dev/null || echo "0")
-      LOOP_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STARTED_AT" +%s 2>/dev/null || echo "0")
-    else
-      TRANSCRIPT_BIRTH=$(stat -c %W "$TRANSCRIPT_PATH" 2>/dev/null || echo "0")
-      LOOP_EPOCH=$(date -d "$STARTED_AT" +%s 2>/dev/null || echo "0")
-    fi
-    if [ "$LOOP_EPOCH" -gt 0 ] && [ "$TRANSCRIPT_BIRTH" -gt 0 ] && [ "$TRANSCRIPT_BIRTH" -gt "$LOOP_EPOCH" ]; then
-      # LOCAL PATCH (upstream #309): not our loop -- skip, do not delete the owner's state.
-      # A transcript created after the loop started just means this session is newer,
-      # not that the loop is dead.
-      loop_log "stop-hook: transcript newer than loop start (loop=$STARTED_AT transcript_birth=$TRANSCRIPT_BIRTH), skipping without cleanup"
-      exit 0
-    fi
+  if [ "$STORED_SESSION_ID" != "$HOOK_SESSION_ID" ] &&
+     [ "$STORED_SESSION_ID" != "$TRANSCRIPT_SESSION_ID" ]; then
+    loop_log "stop-hook: session mismatch (stored=$STORED_SESSION_ID hook=$HOOK_SESSION_ID transcript=$TRANSCRIPT_SESSION_ID), skipping without cleanup"
+    exit 0
   fi
+else
+  if [ -z "$TRANSCRIPT_SESSION_ID" ] || [ -z "$TRANSCRIPT_PATH" ] ||
+     [ ! -f "$TRANSCRIPT_PATH" ]; then
+    loop_log "stop-hook: unowned loop '$LOOP_NAME' has no usable session evidence, skipping"
+    exit 0
+  fi
+  if ! transcript_has_loop_init_marker "$LOOP_NAME" "$TRANSCRIPT_PATH"; then
+    loop_log "stop-hook: session does not own loop '$LOOP_NAME' (no init marker in transcript), skipping"
+    exit 0
+  fi
+
+  BIND_TMP="${STATE_FILE}.session.$$"
+  if ! jq --arg current "$TRANSCRIPT_SESSION_ID" '
+    if ((.session_id // "") == "") or .session_id == $current then
+      .session_id = $current
+    else
+      error("loop session was claimed concurrently")
+    end
+  ' "$STATE_FILE" > "$BIND_TMP"; then
+    rm -f "$BIND_TMP"
+    loop_log "stop-hook: loop '$LOOP_NAME' was claimed by another session, skipping"
+    exit 0
+  fi
+  mv "$BIND_TMP" "$STATE_FILE"
+  STORED_SESSION_ID="$TRANSCRIPT_SESSION_ID"
+  loop_log "stop-hook: bound loop '$LOOP_NAME' to transcript session $TRANSCRIPT_SESSION_ID"
 fi
 
 # Validate iteration is a number

@@ -98,7 +98,11 @@ if [ "$ACTIVE_COUNT" -ne 0 ]; then
 fi
 
 SESSION_ID=""
-if [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  SESSION_ID="$CLAUDE_CODE_SESSION_ID"
+elif [ -n "${CODEX_COMPANION_SESSION_ID:-}" ]; then
+  SESSION_ID="$CODEX_COMPANION_SESSION_ID"
+elif [ -n "${CLAUDE_SESSION_ID:-}" ]; then
   SESSION_ID="$CLAUDE_SESSION_ID"
 elif [ -d ".claude" ]; then
   LATEST_TRANSCRIPT=$(find .claude -maxdepth 1 -name '*.jsonl' 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)
