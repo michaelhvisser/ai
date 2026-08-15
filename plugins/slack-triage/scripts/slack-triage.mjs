@@ -277,8 +277,32 @@ const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
  * that message is filed, so screenshots of client-facing pages do not outlive
  * the triage that needed them. A custom directory is the operator's to manage.
  */
+const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{6,}$/;
+const SLACK_TS = /^\d+\.\d+$/;
+
 function defaultAttachmentsRoot(channelId) {
   return path.join(os.tmpdir(), "slack-triage", channelId);
+}
+
+/**
+ * Deletes one message's attachment directory in the default location — and
+ * only there. The channel and ts come from a draft the agent wrote, so they
+ * are re-validated here and the resolved path is checked against the root
+ * before anything recursive runs; a value that would escape is refused, not
+ * "cleaned up".
+ */
+async function removeDefaultAttachments(channelId, ts) {
+  if (!SLACK_CHANNEL_ID.test(channelId) || !SLACK_TS.test(ts)) {
+    throw new TriageError(
+      `Refusing to delete attachments for channel=${channelId} ts=${ts}: not Slack identifiers`,
+    );
+  }
+  const root = path.resolve(os.tmpdir(), "slack-triage");
+  const target = path.resolve(defaultAttachmentsRoot(channelId), ts);
+  if (!target.startsWith(root + path.sep)) {
+    throw new TriageError(`Refusing to delete ${target}: outside ${root}`);
+  }
+  await rm(target, { recursive: true, force: true });
 }
 
 /**
@@ -633,8 +657,14 @@ function validateDraft(draft, config) {
   }
   if (!draft.title?.trim()) problems.push("title is required");
   if (!draft.body?.trim()) problems.push("body is required");
-  if (!draft.slack?.channel || !draft.slack?.ts) {
-    problems.push("slack.channel and slack.ts are required");
+  // These two also name the attachment directory that filing deletes, so
+  // they must be Slack identifiers and nothing else — a draft is written by
+  // the agent, and the agent reads Slack.
+  if (!SLACK_CHANNEL_ID.test(draft.slack?.channel ?? "")) {
+    problems.push("slack.channel must be a Slack channel ID (C…, G…, or D…)");
+  }
+  if (!SLACK_TS.test(draft.slack?.ts ?? "")) {
+    problems.push("slack.ts must be a Slack message timestamp (seconds.fraction)");
   }
 
   if (!config.fileableStates.has(draft.status)) {
@@ -725,10 +755,7 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
 
   // The issue exists, so the screenshots fetch pulled for it have done their
   // job; do not leave copies of client-facing pages sitting in tmp.
-  await rm(
-    path.join(defaultAttachmentsRoot(draft.slack.channel), draft.slack.ts),
-    { recursive: true, force: true },
-  );
+  await removeDefaultAttachments(draft.slack.channel, draft.slack.ts);
 
   // Slack is marked last and best-effort. A failure here re-surfaces the
   // message on the next run, which risks a duplicate issue — noisy but
