@@ -34,6 +34,16 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch [--channel …] [--d
 Emits a JSON array. Empty: say so and stop. Non-empty: work oldest first, and
 finish each candidate completely before starting the next.
 
+Each message and each thread reply carries a `files` array. A file with a
+`path` has been downloaded — **open it with the Read tool** (screenshots are
+the usual case, and "the page pictured below" means nothing without them) and
+treat what it shows as part of the report. A file with an `error` could not
+be fetched: `missing_scope` means the Slack app lacks `files:read` — say so in
+the run report so the operator can add it, and note in the issue that a
+screenshot existed but was not seen. Never guess at what an unseen image shows.
+Do not attach the image to the issue: it may carry client PII, and the Slack
+permalink in `## Provenance` already leads back to it.
+
 ## Step 2 — Research each candidate
 
 Pin your reading to one commit so the issue's references stay meaningful:
@@ -43,7 +53,9 @@ git fetch origin && git rev-parse --short origin/HEAD
 ```
 
 Delegate the search to an `Explore` subagent. Give it the Slack text and thread
-verbatim, and ask it to establish:
+verbatim, plus what each downloaded attachment shows (the subagent cannot see
+the images, so describe them — which page, which controls, any visible values
+that are not PII), and ask it to establish:
 
 - Which files and functions the report implicates, as `file:line`.
 - Whether the code actually behaves as described. Quote the lines that decide it.

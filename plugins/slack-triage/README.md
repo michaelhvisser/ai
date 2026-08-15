@@ -30,6 +30,19 @@ the operator grants per draft after seeing it. A draft nobody confirms files
 into `Backlog`, where board workflows expect a human to promote it. Unflagged
 chatter is never read.
 
+Attachments on a flagged message — and on the replies under it — are fetched
+too. Feedback arrives as "the page pictured below" more often than not, and a
+screenshot the researcher cannot open turns a precise report into a guess.
+Images, PDFs and text files under 20 MB are downloaded next to the run
+(`<tmpdir>/slack-triage/<channel>/<ts>/`, or `--attachments-dir`) and each
+one's local path is reported on the message; anything else is listed with its
+Slack permalink so a human can look. The download needs `files:read`. Without
+it the fetch still succeeds — the text is still worth triaging — and each file
+is reported with `missing_scope` instead of a path, so the command can say
+plainly that a screenshot existed and was not seen. Attachments never leave
+the machine: the command is told not to upload them to the issue, because a
+screenshot of a client-facing page is exactly where client PII shows up.
+
 Be clear-eyed about what that flag is: a tripwire and an audit trail, not
 authentication. The agent running the command executes shell as the operator,
 so no check inside the script can prove a human approved — a steered or
@@ -67,6 +80,7 @@ Do this once for the whole fleet.
    | `reactions:write` | Add the done reaction so a message is filed once |
    | `chat:write` | Reply in-thread with the issue link |
    | `users:read` | Resolve user IDs to names for attribution |
+   | `files:read` | Download screenshots and other attachments so research can see them |
 
    For **private** channels also add `groups:history` and `groups:read`. They
    are genuinely optional: without them the channel lookup narrows to public
@@ -170,9 +184,14 @@ scheduled run actually filed, the same way you would review its issues.
 The plumbing is usable on its own:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch
+node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch [--attachments-dir path]
 node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input draft.json [--dry-run] [--confirmed]
 ```
+
+`fetch` emits one record per flagged message: `text`, `thread` (replies with
+`author`, `text`, `files`), and its own `files`. Each file record carries `id`,
+`name`, `mimetype`, `size`, `permalink`, and either `path` (downloaded) or
+`error` (why not).
 
 ## What filing does
 
@@ -217,6 +236,8 @@ gh api rate_limit --jq '.resources.graphql'
 | `Filing into … hands the issue to an agent` | Draft targets a `confirmRequiredStates` state. Show the operator and re-run with `--confirmed`, or file it as `Backlog` |
 | `GraphQL quota at N, below the … reserve` | Wait for the reset in `gh api rate_limit` |
 | Message filed twice | The done reaction failed on the first run; that run's output names the issue URL |
+| `Attachments could not be downloaded` / a file's `error` is `missing_scope` | Add `files:read`, then **reinstall** the app; the messages were still fetched |
+| A file's `error` is `not downloaded (unsupported type)` or `(over 20 MB)` | Only images, PDFs and text under 20 MB are fetched; open the `permalink` by hand |
 
 ## Rotating the token
 

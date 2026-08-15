@@ -19,7 +19,8 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -257,11 +258,98 @@ function hasReaction(message, emoji) {
   return (message.reactions ?? []).some((reaction) => reaction.name === emoji);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Attachments                                                                 */
+/* -------------------------------------------------------------------------- */
+
+// Only kinds the researcher can actually open. Screenshots are the common case
+// — "the page pictured below" is meaningless without them.
+const DOWNLOADABLE_MIMETYPES = /^(image\/|application\/pdf$|text\/)/;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Downloads a message's files into `directory` and returns one record per file.
+ *
+ * Reading file contents needs the `files:read` scope, which the rest of the
+ * pipeline does not. A token without it must not break the fetch — the text
+ * is still worth triaging — so a failed download is reported on the record
+ * (`error`) instead of thrown, and the record still carries the Slack
+ * permalink so a human can look. Slack answers an unauthorised private-file
+ * URL with an HTML sign-in page and a 200, so the content type is the check,
+ * not the status.
+ */
+function createAttachmentFetcher(token, directory) {
+  let scopeWarned = false;
+
+  return async function fetchAttachments(message) {
+    const files = message.files ?? [];
+    if (files.length === 0) return [];
+
+    return Promise.all(
+      files.map(async (file) => {
+        const record = {
+          id: file.id,
+          name: file.name ?? file.title ?? file.id,
+          mimetype: file.mimetype ?? "unknown",
+          size: file.size ?? null,
+          permalink: file.permalink ?? null,
+        };
+
+        // Slack hides deleted or otherwise unavailable files behind a stub
+        // (`mode: "hidden_by_limit"`, `"tombstone"`) with no URL to fetch.
+        const url = file.url_private_download ?? file.url_private;
+        if (!url) return { ...record, error: `unavailable (${file.mode ?? "no url"})` };
+        if (!DOWNLOADABLE_MIMETYPES.test(record.mimetype)) {
+          return { ...record, error: "not downloaded (unsupported type)" };
+        }
+        if (record.size && record.size > MAX_ATTACHMENT_BYTES) {
+          return { ...record, error: "not downloaded (over 20 MB)" };
+        }
+
+        try {
+          const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const contentType = response.headers.get("content-type") ?? "";
+          if (!response.ok) {
+            await response.body?.cancel();
+            return { ...record, error: `download failed: HTTP ${response.status}` };
+          }
+          if (/text\/html/.test(contentType)) {
+            // An unread body keeps the socket — and the event loop — alive
+            // after main() returns, so the process never exits.
+            await response.body?.cancel();
+            if (!scopeWarned) {
+              scopeWarned = true;
+              console.error(
+                "Attachments could not be downloaded — the token is missing the " +
+                  "files:read scope. Add it and reinstall the app; the messages " +
+                  "were still fetched.",
+              );
+            }
+            return { ...record, error: "missing_scope (needs scope: files:read)" };
+          }
+
+          await mkdir(directory, { recursive: true });
+          const safeName = record.name.replace(/[^\w.-]+/g, "_");
+          const filePath = path.join(directory, `${file.id}-${safeName}`);
+          await writeFile(filePath, Buffer.from(await response.arrayBuffer()));
+          return { ...record, path: filePath };
+        } catch (error) {
+          return { ...record, error: `download failed: ${error.message}` };
+        }
+      }),
+    );
+  };
+}
+
 async function fetchCandidates(config, overrides) {
   const settings = { ...config.slack, ...overrides };
   const token = await resolveSlackToken(settings.keychainService);
   const channelId = await resolveChannelId(token, settings.channel);
   const resolveUser = createUserResolver(token);
+  const attachmentsRoot =
+    settings.attachmentsDir ?? path.join(os.tmpdir(), "slack-triage", channelId);
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
   const messages = [];
@@ -290,8 +378,16 @@ async function fetchCandidates(config, overrides) {
       message_ts: message.ts,
     });
 
+    // One directory per flagged message, so a run's screenshots don't collide
+    // and a re-run overwrites rather than accumulates.
+    const fetchAttachments = createAttachmentFetcher(
+      token,
+      path.join(attachmentsRoot, message.ts),
+    );
+
     // Feedback is usually argued out in the thread, so the replies are often
-    // where the actual reproduction detail lives.
+    // where the actual reproduction detail lives — and the screenshots are
+    // usually attached to a reply, not the flagged post.
     let thread = [];
     if (message.thread_ts && (message.reply_count ?? 0) > 0) {
       const { messages: replies } = await slackApi(
@@ -305,6 +401,7 @@ async function fetchCandidates(config, overrides) {
           .map(async (reply) => ({
             author: await resolveUser(reply.user),
             text: reply.text,
+            files: await fetchAttachments(reply),
           })),
       );
     }
@@ -324,6 +421,7 @@ async function fetchCandidates(config, overrides) {
       postedAt: new Date(Number(message.ts) * 1000).toISOString(),
       flaggedBy: reactors,
       text: message.text,
+      files: await fetchAttachments(message),
       thread,
     });
   }
@@ -704,10 +802,13 @@ function parseArguments(argv) {
 const USAGE = `Usage:
   slack-triage.mjs init --repo owner/name --project-id PVT_… --channel '#name'
   slack-triage.mjs refresh-board [--config path]
-  slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14]
+  slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14] [--attachments-dir path]
   slack-triage.mjs file --input draft.json [--dry-run] [--confirmed]
 
-Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).`;
+Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).
+fetch downloads message attachments (images, PDFs, text; needs files:read) under
+--attachments-dir, default <tmpdir>/slack-triage/<channel>/<ts>/, and reports each
+one's local path — or the reason it could not be fetched — on the message.`;
 
 async function main() {
   const [subcommand, ...rest] = process.argv.slice(2);
@@ -729,6 +830,9 @@ async function main() {
         ...(options.emoji ? { triggerEmoji: options.emoji } : {}),
         ...(options["done-emoji"] ? { doneEmoji: options["done-emoji"] } : {}),
         ...(options.days ? { lookbackDays: Number(options.days) } : {}),
+        ...(options["attachments-dir"]
+          ? { attachmentsDir: path.resolve(options["attachments-dir"]) }
+          : {}),
       });
       console.log(JSON.stringify(candidates, null, 2));
       break;
