@@ -22,10 +22,27 @@ yet carry the **done** reaction. Slack is therefore the record of what has been
 processed — there is no local watermark to lose or reset, and re-running is
 always safe.
 
-That reaction is also the human prioritization signal. Workflows that reserve a
-`Backlog` state for "not yet triaged" can accept issues from this tool directly
-into an active state precisely because a human already made that call. Unflagged
+The reaction is a nomination, not a dispatch decision — anyone in the channel
+can react. Filing into a state an agent picks up automatically (default:
+`Todo`, via `confirmRequiredStates`) therefore takes a second human decision:
+the script refuses those drafts unless the call carries `--confirmed`, which
+the operator grants per draft after seeing it. A draft nobody confirms files
+into `Backlog`, where board workflows expect a human to promote it. Unflagged
 chatter is never read.
+
+Be clear-eyed about what that flag is: a tripwire and an audit trail, not
+authentication. The agent running the command executes shell as the operator,
+so no check inside the script can prove a human approved — a steered or
+misbehaving model *could* pass `--confirmed` itself, attended or not. The one
+guarantee the script enforces is that no draft reaches a dispatching state
+silently: getting there always takes the explicit flag, so a bypass is a
+single auditable act you can find afterwards — the flag in the session
+transcript, the issue on the board. Everything beyond that (the operator ask,
+the Backlog fallback) is instructed behavior, held up by the command's prompt
+and your review, not by code. If a dispatching-state issue appears that you
+never approved, treat it as an incident — pull it back on the board and read
+that transcript. The enforceable containment for adversarial Slack content
+remains running triage attended, and auditing what a run filed.
 
 Pick a trigger emoji nobody uses conversationally. `:ticket:` is safe; `:eyes:`
 and `:+1:` are not — people react with those by reflex, and every one would
@@ -106,6 +123,7 @@ Find the project ID with `gh project list --owner <org> --format json`.
     "priorityOptions": { "High": "…" }
   },
   "fileableStates": ["Todo", "Blocked", "Backlog"],
+  "confirmRequiredStates": ["Todo"],
   "graphqlMinRemainingReserve": 1000
 }
 ```
@@ -119,7 +137,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" refresh-board
 ```
 
 `fileableStates` is the safety rail: triage may only file into these. Everything
-else on the board belongs to the workflow, not to intake.
+else on the board belongs to the workflow, not to intake. `confirmRequiredStates`
+is the second rail inside the first: any of these states additionally needs the
+operator's per-draft `--confirmed`. List every state your orchestrator treats as
+active; a state in `confirmRequiredStates` but not `fileableStates` is
+unreachable anyway.
 
 Boards without a `Priority` field work fine — filing just skips it.
 
@@ -137,11 +159,19 @@ Headless, for a scheduled run:
 claude -p "/slack-triage:triage-slack" --permission-mode acceptEdits
 ```
 
+A headless run has no operator to grant `--confirmed`, so the command is
+instructed to file everything bound for a `confirmRequiredStates` state into
+`Backlog` instead — research done, dispatch still a human's call from the
+board. That degradation is the point: do not "fix" it by scripting the flag
+into an unattended run. And because it is instructed rather than enforced
+(nothing can stop an unattended agent from passing the flag), review what a
+scheduled run actually filed, the same way you would review its issues.
+
 The plumbing is usable on its own:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch
-node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input draft.json [--dry-run]
+node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input draft.json [--dry-run] [--confirmed]
 ```
 
 ## What filing does
@@ -184,6 +214,7 @@ gh api rate_limit --jq '.resources.graphql'
 | `No Slack bot token` | Keychain entry missing, or a different `keychainService` in config |
 | `No slack-triage.json found` | Run `init` from the repo root |
 | `config is missing board field IDs` | Run `refresh-board` |
+| `Filing into … hands the issue to an agent` | Draft targets a `confirmRequiredStates` state. Show the operator and re-run with `--confirmed`, or file it as `Backlog` |
 | `GraphQL quota at N, below the … reserve` | Wait for the reset in `gh api rate_limit` |
 | Message filed twice | The done reaction failed on the first run; that run's output names the issue URL |
 
@@ -198,3 +229,11 @@ security add-generic-password -s slack-triage -a "$USER" -w xoxb-new-token
 ```
 
 One token, so this is a single rotation for the whole fleet.
+
+That single token is a deliberate trade-off, not an oversight. The whole fleet
+runs on one machine under one user, so per-repo tokens would live side by side
+in the same keychain — anything that can read one entry can enumerate them all,
+and splitting buys no isolation there. What actually bounds exposure is channel
+membership: the bot reads only the channels it has been invited to, so keep it
+out of anything sensitive. Revisit per-repo apps only if the fleet ever spans
+hosts, where a lifted token really would be scoped to one machine's repos.

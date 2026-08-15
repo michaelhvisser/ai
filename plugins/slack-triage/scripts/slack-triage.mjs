@@ -36,6 +36,11 @@ const DEFAULTS = {
   // `Blocked` and `Backlog` are the escape hatches when research cannot
   // substantiate the report. The rest belong to the workflow, not to intake.
   fileableStates: ["Todo", "Blocked", "Backlog"],
+  // States that hand the issue to an agent the moment it lands. Filing into
+  // one is a per-draft human decision, so `file` refuses these without
+  // --confirmed. The reaction alone is a nomination, not that decision — the
+  // safe target for an unconfirmed draft is Backlog.
+  confirmRequiredStates: ["Todo"],
   // Detent sets github_graphql_min_remaining_reserve: 1000 so no single project
   // can drain the per-user GraphQL quota the whole fleet shares. This script is
   // not Detent but draws on the same quota, so it honours the same floor rather
@@ -106,6 +111,9 @@ async function loadConfig(explicitPath) {
     slack,
     board: config.board ?? {},
     fileableStates: new Set(config.fileableStates ?? DEFAULTS.fileableStates),
+    confirmRequiredStates: new Set(
+      config.confirmRequiredStates ?? DEFAULTS.confirmRequiredStates,
+    ),
     graphqlMinRemainingReserve:
       config.graphqlMinRemainingReserve ?? DEFAULTS.graphqlMinRemainingReserve,
   };
@@ -512,9 +520,31 @@ function validateDraft(draft, config) {
   }
 }
 
-async function fileDraft(draft, config, { dryRun }) {
+async function fileDraft(draft, config, { dryRun, confirmed }) {
   validateDraft(draft, config);
   const { board } = config;
+
+  // Not folded into validateDraft: this is not a malformed draft, it is a
+  // well-formed draft missing a human decision. Dry runs create nothing, so
+  // they stay exempt.
+  //
+  // The flag is a tripwire, not authentication. The script cannot know who
+  // set it, and an agent filing drafts already runs with the operator's own
+  // authority, so no in-process check can bind approval to a human — an
+  // unattended agent could pass the flag too, instructions notwithstanding.
+  // What this enforces is narrower and real: no draft reaches a dispatching
+  // state silently. Reaching one always requires this explicit flag, which
+  // makes any bypass a single auditable act rather than a default.
+  if (!dryRun && !confirmed && config.confirmRequiredStates.has(draft.status)) {
+    throw new TriageError(
+      `Filing into ${draft.status} hands the issue to an agent, and the ` +
+        `trigger reaction alone does not authorize that.\n` +
+        `Show the operator this draft and re-run with --confirmed once they ` +
+        `approve it. If no operator can answer — a headless or scheduled ` +
+        `run — file it as Backlog instead. Never pass --confirmed on your ` +
+        `own authority.`,
+    );
+  }
 
   if (dryRun) {
     console.log("DRY RUN — nothing was created.\n");
@@ -624,6 +654,7 @@ async function runInit(options) {
     },
     board,
     fileableStates: DEFAULTS.fileableStates,
+    confirmRequiredStates: DEFAULTS.confirmRequiredStates,
     graphqlMinRemainingReserve: DEFAULTS.graphqlMinRemainingReserve,
   });
 
@@ -661,6 +692,8 @@ function parseArguments(argv) {
     const key = argument.slice(2);
     if (key === "dry-run") {
       options.dryRun = true;
+    } else if (key === "confirmed") {
+      options.confirmed = true;
     } else {
       options[key] = argv[++index];
     }
@@ -672,7 +705,7 @@ const USAGE = `Usage:
   slack-triage.mjs init --repo owner/name --project-id PVT_… --channel '#name'
   slack-triage.mjs refresh-board [--config path]
   slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14]
-  slack-triage.mjs file --input draft.json [--dry-run]
+  slack-triage.mjs file --input draft.json [--dry-run] [--confirmed]
 
 Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).`;
 
@@ -705,7 +738,10 @@ async function main() {
       if (!options.input) throw new TriageError("file requires --input <path>");
       const config = await loadConfig(options.config);
       const draft = await readJsonFile(options.input, "draft");
-      await fileDraft(draft, config, { dryRun: Boolean(options.dryRun) });
+      await fileDraft(draft, config, {
+        dryRun: Boolean(options.dryRun),
+        confirmed: Boolean(options.confirmed),
+      });
       break;
     }
 

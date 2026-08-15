@@ -1,7 +1,7 @@
 ---
 argument-hint: "[--channel #name] [--days 14] [--dry-run]"
 description: "Turn reaction-flagged Slack feedback into researched GitHub issues on the project board"
-allowed-tools: ["Bash(*slack-triage.mjs*)", "Bash(git:*)", "Bash(gh:*)", "Read", "Grep", "Glob", "Write", "Agent"]
+allowed-tools: ["Bash(*slack-triage.mjs*)", "Bash(git:*)", "Bash(gh:*)", "Read", "Grep", "Glob", "Write", "Agent", "AskUserQuestion"]
 ---
 
 # Triage Slack feedback into GitHub issues
@@ -10,10 +10,11 @@ Pass through any `--channel` / `--days` / `--dry-run` arguments given: $ARGUMENT
 
 ## What you are doing
 
-A teammate reacted to a Slack message with the trigger emoji. That reaction is
-the human prioritization decision — it is what makes filing directly into an
-active board state legitimate. Treat it as authorization to *investigate*, never
-as a claim that the report is accurate.
+A teammate reacted to a Slack message with the trigger emoji. That reaction
+nominates the report: it is authorization to *investigate*, never a claim that
+the report is accurate — and never, by itself, the decision that hands work to
+an agent. Anyone in the channel can react; only the operator running this
+command can approve a filing that dispatches (step 5). Two keys, both human.
 
 Your job is to establish whether the report survives contact with the code, and
 to file an issue good enough that a coding agent can act on it without a human
@@ -119,6 +120,19 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input <draft.json>
 ```
 
 Honour `--dry-run` if passed: print what would be filed and stop.
+
+The script refuses a status in the config's `confirmRequiredStates` (default:
+`Todo` — the states an agent picks up automatically) unless the call carries
+`--confirmed`. That flag is the operator's per-draft approval, and it is never
+yours to grant:
+
+1. Present the draft with AskUserQuestion: title, target status, priority, one
+   line of what the research established, and the Slack permalink.
+2. Approved → re-run the same `file` call with `--confirmed`.
+3. Declined — or nobody can answer, as in a headless or scheduled run → set the
+   draft's `status` to `"Backlog"` and file that instead, so a human promotes
+   it from the board. Never pass `--confirmed` unprompted, and never edit
+   `confirmRequiredStates` to route around the refusal.
 
 The script creates the issue, places it on the board, sets Status and Priority,
 adds the done reaction, and replies in the Slack thread with the issue link. It
