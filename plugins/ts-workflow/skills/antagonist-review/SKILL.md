@@ -209,9 +209,41 @@ fi
   mitigation, not a guarantee — always run both guards above.
 - Parse the `-o` output file, not scraped stdout. A tiny `-o` file (a few hundred bytes) is the
   tell-tale sign the run did something other than your task; check it before trusting a verdict.
-- `xhigh` runs are slow: give every codex call the shell tool's maximum timeout; for large
-  diffs run it as a background task and continue when it completes. **Do not wrap the call in
-  `timeout`** — that command does not exist on macOS (exit 127).
+- **Budget one hour per codex pass, and detach to get it.** `xhigh` over a real diff runs far
+  past ten minutes, and **both** obvious ways to run it are capped at 600s: the shell tool's own
+  maximum timeout, *and* its background mode, whose tasks are reaped at that same 600s ceiling.
+  A reaped run loses everything, because `-o` is only written at the end — so an under-budgeted
+  run is strictly worse than a slow one. Do not work around this by lowering effort or slicing
+  the diff into scoped passes: both quietly reduce this role to a shallower reviewer, which
+  defeats the point of a second model family. Detach the process so it outlives the tool call:
+
+  ```bash
+  # 1. wrap the codex call in a script that ALWAYS drops a marker, even on failure
+  cat > "$SP/run-pass.sh" <<'SH'
+  #!/bin/bash
+  trap 'echo "exit=$?" > "$SP/pass.done"' EXIT     # marker on every path, including error
+  codex exec -s read-only --skip-git-repo-check \
+    -c sandbox_mode="read-only" -c approval_policy="never" \
+    -c model_reasoning_effort="$CODEX_EFFORT" \
+    -o "$SP/codex-pass.txt" "$PROMPT" < /dev/null
+  SH
+  chmod +x "$SP/run-pass.sh"
+
+  # 2. launch DETACHED — plain nohup, log kept, stdin closed
+  nohup "$SP/run-pass.sh" > "$SP/pass.log" 2>&1 < /dev/null &
+
+  # 3. confirm it actually started before walking away
+  sleep 5; grep -q "OpenAI Codex" "$SP/pass.log" || echo "LAUNCH FAILED — read pass.log"
+
+  # 4. wait in a SEPARATE short background task; relaunch it freely, the codex run survives reaps
+  until [ -f "$SP/pass.done" ]; do sleep 20; done; echo READY; wc -c "$SP/codex-pass.txt"
+  ```
+
+  **`setsid` does not exist on macOS** — `setsid nohup …` fails, and silently if stderr went to
+  `/dev/null`, leaving no process and no log. Use plain `nohup` and always keep the log.
+  **Do not wrap the call in `timeout`** either — also absent on macOS (exit 127).
+- **Append `< /dev/null` to every codex call.** Without it the process blocks forever on
+  `Reading additional input from stdin...` and never writes `-o`, even with a positional prompt.
 - **Do not pin a model with `-m`** — availability shifts; let the CLI route. `--effort` is the knob.
 - Effort defaults to `xhigh`. If the user lowered it via `--effort`, still raise this call
   back to `xhigh` when any open finding is `security`/`data-loss` class.
@@ -357,6 +389,7 @@ list it so the user can open issues.
 | Condition | Cap | On bail |
 |-----------|-----|---------|
 | Codex CLI missing/erroring | 1 retry | Stop — the skill needs both model families |
+| Codex pass killed at 600s (exit 143/144, no `-o`) | — | Not a codex failure: the launch was not detached. Relaunch with the `nohup` recipe in Step B — do NOT respond by lowering effort or slicing the diff |
 | Rebuttal exchanges per finding | 1 | → quorum juror |
 | Repeat of a dismissed finding | — | → human (standing disagreement, not a vote) |
 | Ledger unchanged for a full round | — | ESCALATE with ledger |
