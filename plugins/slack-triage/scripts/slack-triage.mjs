@@ -19,9 +19,12 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -285,61 +288,76 @@ function createAttachmentFetcher(token, directory) {
     const files = message.files ?? [];
     if (files.length === 0) return [];
 
-    return Promise.all(
-      files.map(async (file) => {
-        const record = {
-          id: file.id,
-          name: file.name ?? file.title ?? file.id,
-          mimetype: file.mimetype ?? "unknown",
-          size: file.size ?? null,
-          permalink: file.permalink ?? null,
-        };
+    // One at a time, streamed to disk: a thread can carry a hundred replies
+    // and every one may hold a screenshot, so downloading them all at once and
+    // buffering each whole would let one busy thread exhaust the process.
+    const records = [];
+    for (const file of files) {
+      const record = {
+        id: file.id,
+        name: file.name ?? file.title ?? file.id,
+        mimetype: file.mimetype ?? "unknown",
+        size: file.size ?? null,
+        permalink: file.permalink ?? null,
+      };
 
-        // Slack hides deleted or otherwise unavailable files behind a stub
-        // (`mode: "hidden_by_limit"`, `"tombstone"`) with no URL to fetch.
-        const url = file.url_private_download ?? file.url_private;
-        if (!url) return { ...record, error: `unavailable (${file.mode ?? "no url"})` };
-        if (!DOWNLOADABLE_MIMETYPES.test(record.mimetype)) {
-          return { ...record, error: "not downloaded (unsupported type)" };
-        }
-        if (record.size && record.size > MAX_ATTACHMENT_BYTES) {
-          return { ...record, error: "not downloaded (over 20 MB)" };
-        }
+      // Slack hides deleted or otherwise unavailable files behind a stub
+      // (`mode: "hidden_by_limit"`, `"tombstone"`) with no URL to fetch.
+      const url = file.url_private_download ?? file.url_private;
+      if (!url) {
+        records.push({ ...record, error: `unavailable (${file.mode ?? "no url"})` });
+        continue;
+      }
+      if (!DOWNLOADABLE_MIMETYPES.test(record.mimetype)) {
+        records.push({ ...record, error: "not downloaded (unsupported type)" });
+        continue;
+      }
+      if (record.size && record.size > MAX_ATTACHMENT_BYTES) {
+        records.push({ ...record, error: "not downloaded (over 20 MB)" });
+        continue;
+      }
 
-        try {
-          const response = await fetch(url, {
-            headers: { Authorization: `Bearer ${token}` },
-          });
-          const contentType = response.headers.get("content-type") ?? "";
-          if (!response.ok) {
-            await response.body?.cancel();
-            return { ...record, error: `download failed: HTTP ${response.status}` };
+      try {
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          await response.body?.cancel();
+          records.push({ ...record, error: `download failed: HTTP ${response.status}` });
+          continue;
+        }
+        if (/text\/html/.test(contentType)) {
+          // An unread body keeps the socket — and the event loop — alive
+          // after main() returns, so the process never exits.
+          await response.body?.cancel();
+          if (!scopeWarned) {
+            scopeWarned = true;
+            console.error(
+              "Attachments could not be downloaded — the token is missing the " +
+                "files:read scope. Add it and reinstall the app; the messages " +
+                "were still fetched.",
+            );
           }
-          if (/text\/html/.test(contentType)) {
-            // An unread body keeps the socket — and the event loop — alive
-            // after main() returns, so the process never exits.
-            await response.body?.cancel();
-            if (!scopeWarned) {
-              scopeWarned = true;
-              console.error(
-                "Attachments could not be downloaded — the token is missing the " +
-                  "files:read scope. Add it and reinstall the app; the messages " +
-                  "were still fetched.",
-              );
-            }
-            return { ...record, error: "missing_scope (needs scope: files:read)" };
-          }
-
-          await mkdir(directory, { recursive: true });
-          const safeName = record.name.replace(/[^\w.-]+/g, "_");
-          const filePath = path.join(directory, `${file.id}-${safeName}`);
-          await writeFile(filePath, Buffer.from(await response.arrayBuffer()));
-          return { ...record, path: filePath };
-        } catch (error) {
-          return { ...record, error: `download failed: ${error.message}` };
+          records.push({ ...record, error: "missing_scope (needs scope: files:read)" });
+          continue;
         }
-      }),
-    );
+
+        // Owner-only: on a shared host os.tmpdir() is /tmp, and these are
+        // screenshots of client-facing pages.
+        await mkdir(directory, { recursive: true, mode: 0o700 });
+        const safeName = record.name.replace(/[^\w.-]+/g, "_");
+        const filePath = path.join(directory, `${file.id}-${safeName}`);
+        await pipeline(
+          Readable.fromWeb(response.body),
+          createWriteStream(filePath, { mode: 0o600 }),
+        );
+        records.push({ ...record, path: filePath });
+      } catch (error) {
+        records.push({ ...record, error: `download failed: ${error.message}` });
+      }
+    }
+    return records;
   };
 }
 
@@ -395,15 +413,14 @@ async function fetchCandidates(config, overrides) {
         "conversations.replies",
         { channel: channelId, ts: message.thread_ts, limit: 100 },
       );
-      thread = await Promise.all(
-        replies
-          .filter((reply) => reply.ts !== message.ts)
-          .map(async (reply) => ({
-            author: await resolveUser(reply.user),
-            text: reply.text,
-            files: await fetchAttachments(reply),
-          })),
-      );
+      for (const reply of replies) {
+        if (reply.ts === message.ts) continue;
+        thread.push({
+          author: await resolveUser(reply.user),
+          text: reply.text,
+          files: await fetchAttachments(reply),
+        });
+      }
     }
 
     const reactors = await Promise.all(
