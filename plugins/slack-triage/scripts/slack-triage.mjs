@@ -527,6 +527,13 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
   // Not folded into validateDraft: this is not a malformed draft, it is a
   // well-formed draft missing a human decision. Dry runs create nothing, so
   // they stay exempt.
+  //
+  // The flag is a tripwire, not authentication. The script cannot know who
+  // set it, and an agent filing drafts already runs with the operator's own
+  // authority, so no in-process check can bind approval to a human. What
+  // this enforces is narrower and real: no draft reaches a dispatching
+  // state by default or in an unattended run, and a filing that bypassed
+  // the operator exists only as one explicit, auditable act.
   if (!dryRun && !confirmed && config.confirmRequiredStates.has(draft.status)) {
     throw new TriageError(
       `Filing into ${draft.status} hands the issue to an agent, and the ` +

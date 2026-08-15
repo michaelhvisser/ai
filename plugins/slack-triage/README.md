@@ -26,9 +26,20 @@ The reaction is a nomination, not a dispatch decision — anyone in the channel
 can react. Filing into a state an agent picks up automatically (default:
 `Todo`, via `confirmRequiredStates`) therefore takes a second human decision:
 the script refuses those drafts unless the call carries `--confirmed`, which
-the operator grants per draft after seeing it. Two keys, both human. A draft
-nobody confirms files into `Backlog`, where board workflows expect a human to
-promote it. Unflagged chatter is never read.
+the operator grants per draft after seeing it. A draft nobody confirms files
+into `Backlog`, where board workflows expect a human to promote it. Unflagged
+chatter is never read.
+
+Be clear-eyed about what that flag is: a tripwire and an audit trail, not
+authentication. The agent running the command executes shell as the operator,
+so no check inside the script can prove a human approved — a steered or
+misbehaving model *could* pass `--confirmed` itself. What the gate guarantees
+is that no draft reaches a dispatching state by default, by accident, or in an
+unattended run, and that a bypass is a single explicit act you can find
+afterwards: the flag in the session transcript, the issue on the board. If a
+dispatching-state issue appears that you never approved, treat it as an
+incident — pull it back on the board and read that transcript. The enforceable
+containment for adversarial Slack content remains running triage attended.
 
 Pick a trigger emoji nobody uses conversationally. `:ticket:` is safe; `:eyes:`
 and `:+1:` are not — people react with those by reflex, and every one would
