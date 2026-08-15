@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -271,6 +271,17 @@ const DOWNLOADABLE_MIMETYPES = /^(image\/|application\/pdf$|text\/)/;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 /**
+ * Where fetch puts a channel's attachments unless --attachments-dir says
+ * otherwise. Only this default location is ever deleted by the script: fetch
+ * clears it at the start of a run and file removes a message's directory once
+ * that message is filed, so screenshots of client-facing pages do not outlive
+ * the triage that needed them. A custom directory is the operator's to manage.
+ */
+function defaultAttachmentsRoot(channelId) {
+  return path.join(os.tmpdir(), "slack-triage", channelId);
+}
+
+/**
  * Downloads a message's files into `directory` and returns one record per file.
  *
  * Reading file contents needs the `files:read` scope, which the rest of the
@@ -327,7 +338,16 @@ function createAttachmentFetcher(token, directory) {
           records.push({ ...record, error: `download failed: HTTP ${response.status}` });
           continue;
         }
-        if (/text\/html/.test(contentType)) {
+        // Without files:read Slack does not 403; it 302s to the workspace
+        // sign-in page (`https://<team>.slack.com/?redir=/files-pri/…`) and
+        // serves that as HTML with a 200. The redirect is the tell — an
+        // attachment that is itself an HTML file arrives with the same
+        // content type but from files.slack.com directly.
+        const signInPage =
+          /text\/html/.test(contentType) &&
+          response.redirected &&
+          /[?&]redir=/.test(response.url);
+        if (signInPage) {
           // An unread body keeps the socket — and the event loop — alive
           // after main() returns, so the process never exits.
           await response.body?.cancel();
@@ -367,7 +387,10 @@ async function fetchCandidates(config, overrides) {
   const channelId = await resolveChannelId(token, settings.channel);
   const resolveUser = createUserResolver(token);
   const attachmentsRoot =
-    settings.attachmentsDir ?? path.join(os.tmpdir(), "slack-triage", channelId);
+    settings.attachmentsDir ?? defaultAttachmentsRoot(channelId);
+  if (!settings.attachmentsDir) {
+    await rm(attachmentsRoot, { recursive: true, force: true });
+  }
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
   const messages = [];
@@ -698,6 +721,13 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
   console.log(
     `Board: Status=${draft.status}` +
       (draft.priority ? ` Priority=${draft.priority}` : ""),
+  );
+
+  // The issue exists, so the screenshots fetch pulled for it have done their
+  // job; do not leave copies of client-facing pages sitting in tmp.
+  await rm(
+    path.join(defaultAttachmentsRoot(draft.slack.channel), draft.slack.ts),
+    { recursive: true, force: true },
   );
 
   // Slack is marked last and best-effort. A failure here re-surfaces the

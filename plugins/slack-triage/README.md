@@ -41,7 +41,13 @@ it the fetch still succeeds — the text is still worth triaging — and each fi
 is reported with `missing_scope` instead of a path, so the command can say
 plainly that a screenshot existed and was not seen. Attachments never leave
 the machine: the command is told not to upload them to the issue, because a
-screenshot of a client-facing page is exactly where client PII shows up.
+screenshot of a client-facing page is exactly where client PII shows up — and
+for the same reason they do not linger. In the default location, `file`
+deletes a message's attachments the moment its issue exists, and the next
+`fetch` clears whatever an abandoned run left behind. Files are owner-only
+(`0700` directories, `0600` files) for the shared-`/tmp` case. A custom
+`--attachments-dir` is never deleted by the script; if you point it somewhere,
+retention there is yours.
 
 Be clear-eyed about what that flag is: a tripwire and an audit trail, not
 authentication. The agent running the command executes shell as the operator,
