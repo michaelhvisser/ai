@@ -530,10 +530,11 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
   //
   // The flag is a tripwire, not authentication. The script cannot know who
   // set it, and an agent filing drafts already runs with the operator's own
-  // authority, so no in-process check can bind approval to a human. What
-  // this enforces is narrower and real: no draft reaches a dispatching
-  // state by default or in an unattended run, and a filing that bypassed
-  // the operator exists only as one explicit, auditable act.
+  // authority, so no in-process check can bind approval to a human — an
+  // unattended agent could pass the flag too, instructions notwithstanding.
+  // What this enforces is narrower and real: no draft reaches a dispatching
+  // state silently. Reaching one always requires this explicit flag, which
+  // makes any bypass a single auditable act rather than a default.
   if (!dryRun && !confirmed && config.confirmRequiredStates.has(draft.status)) {
     throw new TriageError(
       `Filing into ${draft.status} hands the issue to an agent, and the ` +

@@ -33,13 +33,16 @@ chatter is never read.
 Be clear-eyed about what that flag is: a tripwire and an audit trail, not
 authentication. The agent running the command executes shell as the operator,
 so no check inside the script can prove a human approved — a steered or
-misbehaving model *could* pass `--confirmed` itself. What the gate guarantees
-is that no draft reaches a dispatching state by default, by accident, or in an
-unattended run, and that a bypass is a single explicit act you can find
-afterwards: the flag in the session transcript, the issue on the board. If a
-dispatching-state issue appears that you never approved, treat it as an
-incident — pull it back on the board and read that transcript. The enforceable
-containment for adversarial Slack content remains running triage attended.
+misbehaving model *could* pass `--confirmed` itself, attended or not. The one
+guarantee the script enforces is that no draft reaches a dispatching state
+silently: getting there always takes the explicit flag, so a bypass is a
+single auditable act you can find afterwards — the flag in the session
+transcript, the issue on the board. Everything beyond that (the operator ask,
+the Backlog fallback) is instructed behavior, held up by the command's prompt
+and your review, not by code. If a dispatching-state issue appears that you
+never approved, treat it as an incident — pull it back on the board and read
+that transcript. The enforceable containment for adversarial Slack content
+remains running triage attended, and auditing what a run filed.
 
 Pick a trigger emoji nobody uses conversationally. `:ticket:` is safe; `:eyes:`
 and `:+1:` are not — people react with those by reflex, and every one would
@@ -156,10 +159,13 @@ Headless, for a scheduled run:
 claude -p "/slack-triage:triage-slack" --permission-mode acceptEdits
 ```
 
-A headless run has no operator to grant `--confirmed`, so everything it would
-have filed into a `confirmRequiredStates` state lands in `Backlog` instead —
-research done, dispatch still a human's call from the board. That degradation
-is the point: do not "fix" it by scripting the flag into an unattended run.
+A headless run has no operator to grant `--confirmed`, so the command is
+instructed to file everything bound for a `confirmRequiredStates` state into
+`Backlog` instead — research done, dispatch still a human's call from the
+board. That degradation is the point: do not "fix" it by scripting the flag
+into an unattended run. And because it is instructed rather than enforced
+(nothing can stop an unattended agent from passing the flag), review what a
+scheduled run actually filed, the same way you would review its issues.
 
 The plumbing is usable on its own:
 
