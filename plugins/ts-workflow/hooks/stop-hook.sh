@@ -53,10 +53,11 @@ transcript_has_loop_init_marker() {
   grep -Fxq "$marker" "$transcript" || grep -Fq "${marker}\\n" "$transcript"
 }
 
-# Find active loop state files, then narrow them to the stopping session before
-# resolving ambiguity. Repository-scoped storage may contain a live loop from a
-# different linked worktree/session; foreign state is not an active loop here.
-STATE_FILES=$(find_active_loops)
+# Find every loop state file (finished ones included, so an owner's <done> still
+# removes its record), then narrow them to the stopping session before resolving
+# ambiguity. Repository-scoped storage may contain a live loop from a different
+# linked worktree/session; foreign state is not an active loop here.
+STATE_FILES=$(find_loop_state_files)
 
 if [ -z "$STATE_FILES" ]; then
   loop_log "stop-hook: no active loops found"

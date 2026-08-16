@@ -169,8 +169,8 @@ ensure_loop_state_schema() {
 }
 
 normalize_workflow_state_path() {
-  local path="${1:-${WORKFLOW_STATE_PATH:-[]}}"
-  if ! printf '%s\n' "$path" | jq -ce '
+  local state_path="${1:-${WORKFLOW_STATE_PATH:-[]}}"
+  if ! printf '%s\n' "$state_path" | jq -ce '
     select(type == "array" and all(.[]; type == "string" and length > 0))
   ' 2>/dev/null; then
     printf 'WORKFLOW_STATE_PATH must be a JSON array of non-empty strings.\n' >&2
@@ -179,9 +179,9 @@ normalize_workflow_state_path() {
 }
 
 validate_workflow_field_update() {
-  local path="$1"
+  local state_path="$1"
   local field="$2"
-  if [ "$path" = "[]" ]; then
+  if [ "$state_path" = "[]" ]; then
     case "$field" in
       schema_version|owner_workflow|loop_name|completion_promise|terminal_promises|components)
         printf "Root loop field '%s' must be updated by its dedicated helper.\n" "$field" >&2
@@ -205,18 +205,18 @@ child_workflow_path() {
 
 initialize_workflow_state() {
   local state_file="$1"
-  local path
+  local state_path
   local tmp_file
-  path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  state_path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
   ensure_loop_state_schema "$state_file" || return 1
-  if ! jq -e --argjson path "$path" '
+  if ! jq -e --argjson path "$state_path" '
     (getpath($path) == null) or (getpath($path) | type == "object")
   ' "$state_file" >/dev/null 2>&1; then
-    printf 'Workflow state path does not resolve to an object: %s\n' "$path" >&2
+    printf 'Workflow state path does not resolve to an object: %s\n' "$state_path" >&2
     return 1
   fi
   tmp_file="${state_file}.tmp.$$"
-  jq --argjson path "$path" '
+  jq --argjson path "$state_path" '
     setpath($path; (getpath($path) // {})) |
     setpath($path + ["components"]; (getpath($path + ["components"]) // {}))
   ' "$state_file" > "$tmp_file" && mv "$tmp_file" "$state_file"
@@ -224,8 +224,8 @@ initialize_workflow_state() {
 
 read_loop_state() {
   local state_file="$1"
-  local path
-  path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  local state_path
+  state_path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
   ensure_loop_state_schema "$state_file" || return 1
   ITERATION=$(jq -r '.iteration // 0' "$state_file")
   MAX_ITERATIONS=$(jq -r '.max_iterations // empty' "$state_file")
@@ -233,7 +233,7 @@ read_loop_state() {
   TERMINAL_PROMISES=$(jq -c '.terminal_promises' "$state_file")
   LOOP_NAME=$(jq -r '.loop_name // empty' "$state_file")
   OWNER_WORKFLOW=$(jq -r '.owner_workflow // empty' "$state_file")
-  PHASE=$(jq -r --argjson path "$path" 'getpath($path + ["phase"]) // empty' "$state_file")
+  PHASE=$(jq -r --argjson path "$state_path" 'getpath($path + ["phase"]) // empty' "$state_file")
   ORIGINAL_PROMPT=$(jq -r '.original_prompt // empty' "$state_file")
   AWAITING_DRIVER_INPUT=$(jq -r '.awaiting_driver_input // false' "$state_file")
   DRIVER_INPUT_REASON=$(jq -r '.driver_input_reason // empty' "$state_file")
@@ -251,22 +251,22 @@ increment_iteration() {
 set_loop_phase() {
   local state_file="$1"
   local new_phase="$2"
-  local path
+  local state_path
   local tmp_file="${state_file}.tmp.$$"
-  path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
-  initialize_workflow_state "$state_file" "$path" || return 1
-  jq --argjson path "$path" --arg phase "$new_phase" \
+  state_path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  initialize_workflow_state "$state_file" "$state_path" || return 1
+  jq --argjson path "$state_path" --arg phase "$new_phase" \
     'setpath($path + ["phase"]; $phase)' "$state_file" > "$tmp_file" && mv "$tmp_file" "$state_file"
-  loop_log "set_loop_phase: file=$state_file path=$path phase=$new_phase"
+  loop_log "set_loop_phase: file=$state_file path=$state_path phase=$new_phase"
 }
 
 get_loop_field() {
   local state_file="$1"
   local field="$2"
-  local path
-  path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  local state_path
+  state_path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
   ensure_loop_state_schema "$state_file" || return 1
-  jq -r --argjson path "$path" --arg field "$field" \
+  jq -r --argjson path "$state_path" --arg field "$field" \
     'getpath($path + [$field]) // empty' "$state_file"
 }
 
@@ -274,12 +274,12 @@ set_loop_field() {
   local state_file="$1"
   local field="$2"
   local value="$3"
-  local path
+  local state_path
   local tmp_file="${state_file}.tmp.$$"
-  path=$(normalize_workflow_state_path "${4:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
-  validate_workflow_field_update "$path" "$field" || return 1
-  initialize_workflow_state "$state_file" "$path" || return 1
-  jq --argjson path "$path" --arg field "$field" --arg value "$value" \
+  state_path=$(normalize_workflow_state_path "${4:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  validate_workflow_field_update "$state_path" "$field" || return 1
+  initialize_workflow_state "$state_file" "$state_path" || return 1
+  jq --argjson path "$state_path" --arg field "$field" --arg value "$value" \
     'setpath($path + [$field]; $value)' "$state_file" > "$tmp_file" && mv "$tmp_file" "$state_file"
 }
 
@@ -287,42 +287,42 @@ set_loop_json_field() {
   local state_file="$1"
   local field="$2"
   local value="$3"
-  local path
+  local state_path
   local compact_value
   local tmp_file="${state_file}.tmp.$$"
-  path=$(normalize_workflow_state_path "${4:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
-  validate_workflow_field_update "$path" "$field" || return 1
+  state_path=$(normalize_workflow_state_path "${4:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  validate_workflow_field_update "$state_path" "$field" || return 1
   if ! compact_value=$(printf '%s\n' "$value" | jq -ce . 2>/dev/null); then
     printf 'Loop field value must be valid JSON.\n' >&2
     return 1
   fi
-  initialize_workflow_state "$state_file" "$path" || return 1
-  jq --argjson path "$path" --arg field "$field" --argjson value "$compact_value" \
+  initialize_workflow_state "$state_file" "$state_path" || return 1
+  jq --argjson path "$state_path" --arg field "$field" --argjson value "$compact_value" \
     'setpath($path + [$field]; $value)' "$state_file" > "$tmp_file" && mv "$tmp_file" "$state_file"
 }
 
 delete_loop_field() {
   local state_file="$1"
   local field="$2"
-  local path
+  local state_path
   local tmp_file="${state_file}.tmp.$$"
-  path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
-  validate_workflow_field_update "$path" "$field" || return 1
+  state_path=$(normalize_workflow_state_path "${3:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  validate_workflow_field_update "$state_path" "$field" || return 1
   ensure_loop_state_schema "$state_file" || return 1
-  jq --argjson path "$path" --arg field "$field" \
+  jq --argjson path "$state_path" --arg field "$field" \
     'delpaths([$path + [$field]])' "$state_file" > "$tmp_file" && mv "$tmp_file" "$state_file"
 }
 
 set_workflow_result() {
   local state_file="$1"
-  local path
+  local state_path
   local result="$3"
   local reason="$4"
   local phase="$5"
   local tmp_file="${state_file}.tmp.$$"
-  path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
-  initialize_workflow_state "$state_file" "$path" || return 1
-  jq --argjson path "$path" --arg result "$result" --arg reason "$reason" --arg phase "$phase" '
+  state_path=$(normalize_workflow_state_path "${2:-${WORKFLOW_STATE_PATH:-[]}}") || return 1
+  initialize_workflow_state "$state_file" "$state_path" || return 1
+  jq --argjson path "$state_path" --arg result "$result" --arg reason "$reason" --arg phase "$phase" '
     setpath($path + ["result"]; $result) |
     setpath($path + ["reason"]; $reason) |
     setpath($path + ["phase"]; $phase) |
@@ -438,12 +438,75 @@ check_completion_promise() {
   return 1
 }
 
-find_active_loops() {
+# A loop is finished once its root workflow_result is set: set_loop_terminal_result
+# and root-path set_workflow_result are the only writers, and both run right before
+# the workflow emits its <done> marker. Legacy pre-schema states carry the same
+# field. Such a file is a leftover the owning session's stop hook never removed —
+# it must not hold the singleton lane.
+loop_state_is_terminal() {
+  local state_file="$1"
+  [ -f "$state_file" ] || return 1
+  jq -e '
+    type == "object" and
+    ((.workflow_result // "") | type == "string" and length > 0)
+  ' "$state_file" >/dev/null 2>&1
+}
+
+current_loop_session_id() {
+  if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    printf '%s\n' "$CLAUDE_CODE_SESSION_ID"
+  elif [ -n "${CODEX_COMPANION_SESSION_ID:-}" ]; then
+    printf '%s\n' "$CODEX_COMPANION_SESSION_ID"
+  elif [ -n "${CLAUDE_SESSION_ID:-}" ]; then
+    printf '%s\n' "$CLAUDE_SESSION_ID"
+  fi
+}
+
+# True only when the state records a session id and it is this session's.
+loop_state_owned_by_current_session() {
+  local state_file="$1"
+  local stored_session
+  local current_session
+  [ -f "$state_file" ] || return 1
+  stored_session=$(jq -r 'if (.session_id | type) == "string" then .session_id else "" end' "$state_file" 2>/dev/null)
+  current_session=$(current_loop_session_id)
+  [ -n "$stored_session" ] && [ -n "$current_session" ] && [ "$stored_session" = "$current_session" ]
+}
+
+# Every loop state file, finished or not. The stop hook and cancel-all use this
+# so finished states still get cleaned up.
+find_loop_state_files() {
   local state_dir="${1:-$(loop_state_directory)}"
   if [ ! -d "$state_dir" ]; then
     return 0
   fi
   find "$state_dir" -maxdepth 1 -name '*.loop.local.json' 2>/dev/null | LC_ALL=C sort
+}
+
+# Only loops that are still running. Finished states are excluded so a leftover
+# from a completed run cannot wedge the singleton guard in setup-loop.sh.
+find_active_loops() {
+  local state_dir="${1:-$(loop_state_directory)}"
+  local state_file
+  while IFS= read -r state_file; do
+    [ -n "$state_file" ] || continue
+    if loop_state_is_terminal "$state_file"; then
+      continue
+    fi
+    printf '%s\n' "$state_file"
+  done < <(find_loop_state_files "$state_dir")
+}
+
+# Finished states, the complement of find_active_loops.
+find_terminal_loops() {
+  local state_dir="${1:-$(loop_state_directory)}"
+  local state_file
+  while IFS= read -r state_file; do
+    [ -n "$state_file" ] || continue
+    if loop_state_is_terminal "$state_file"; then
+      printf '%s\n' "$state_file"
+    fi
+  done < <(find_loop_state_files "$state_dir")
 }
 
 count_active_loops() {

@@ -20,10 +20,20 @@ single-workflow legacy E2E states migrate additively.
 Run during "Loop Initialization & Re-entry". Detects re-entry and skips
 `setup-loop.sh` when a phase already exists; otherwise creates the state file.
 
+A finished standalone state (`workflow_result` set) is a leftover from a run
+whose `<done>` was never reaped. Only the session that produced it may re-enter
+it — that is the stop-hook re-feed path, including the recoverable
+generated-commit transaction below. From any other session it is stale: discard
+it and start fresh instead of replaying the old outcome.
+
 ```bash
 if [ "$EMBEDDED_WORKFLOW" = "true" ]; then
   EXISTING_PHASE=$(get_loop_field "$STATE_FILE" "phase" "$WORKFLOW_STATE_PATH")
   echo "Embedded E2E state phase: ${EXISTING_PHASE:-<none>}"
+elif [ -f "$STATE_FILE" ] && loop_state_is_terminal "$STATE_FILE" &&
+     ! loop_state_owned_by_current_session "$STATE_FILE"; then
+  echo "Discarding finished E2E state from a previous session ($(jq -r '.workflow_result' "$STATE_FILE")) — starting fresh."
+  rm -f "$STATE_FILE"
 elif [ -f "$STATE_FILE" ]; then
   read_loop_state "$STATE_FILE" "$WORKFLOW_STATE_PATH"
   EXISTING_PHASE="$PHASE"

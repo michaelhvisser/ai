@@ -60,6 +60,22 @@ release_setup_lock() {
 }
 trap release_setup_lock EXIT
 
+# Finished states are leftovers whose owning session's stop hook never removed
+# them (a foreign session cannot). Setup is only reached for a fresh start, so
+# clear them here instead of letting them hold the singleton lane forever.
+TERMINAL_STATE_FILES=$(find_terminal_loops "$OWNER_STATE_DIR")
+if [ -n "$TERMINAL_STATE_FILES" ]; then
+  while IFS= read -r finished_state; do
+    [ -n "$finished_state" ] || continue
+    finished_loop=$(jq -r '.loop_name // "unknown"' "$finished_state" 2>/dev/null || echo "unknown")
+    finished_result=$(jq -r '.workflow_result // ""' "$finished_state" 2>/dev/null || true)
+    printf "Discarding finished loop state '%s' (%s): %s\n" \
+      "$finished_loop" "$finished_result" "$finished_state"
+    loop_log "setup-loop: discarding finished loop state: file=$finished_state loop=$finished_loop result=$finished_result"
+    rm -f "$finished_state"
+  done <<< "$TERMINAL_STATE_FILES"
+fi
+
 STATE_FILES=$(find_active_loops "$OWNER_STATE_DIR")
 ACTIVE_COUNT=$(count_active_loops "$OWNER_STATE_DIR")
 if [ -f "$STATE_FILE" ]; then

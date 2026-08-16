@@ -25,7 +25,7 @@ if [ -n "$LOOP_NAME" ]; then
   fi
 else
   # Clean up all loops
-  LOOP_FILES=$(find_active_loops "$STATE_DIR")
+  LOOP_FILES=$(find_loop_state_files "$STATE_DIR")
 
   if [ -z "$LOOP_FILES" ]; then
     echo "No active loops found."
