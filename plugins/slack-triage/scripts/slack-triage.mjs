@@ -19,8 +19,12 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -257,11 +261,402 @@ function hasReaction(message, emoji) {
   return (message.reactions ?? []).some((reaction) => reaction.name === emoji);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Attachments                                                                 */
+/* -------------------------------------------------------------------------- */
+
+// Only kinds the researcher can actually open. Screenshots are the common case
+// — "the page pictured below" is meaningless without them.
+const DOWNLOADABLE_MIMETYPES = /^(image\/|application\/pdf$|text\/)/;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// Aggregate cap for one fetch run, across every message. Enough for dozens of
+// screenshots; a run that hits it keeps listing files by permalink instead of
+// filling a small tmpfs before any candidate is emitted.
+const MAX_RUN_ATTACHMENT_BYTES = 200 * 1024 * 1024;
+
+/**
+ * Where fetch puts a channel's attachments unless --attachments-dir says
+ * otherwise. Only this default location is ever deleted by the script: fetch
+ * clears it at the start of a run and file removes a message's directory once
+ * that message is filed, so screenshots of client-facing pages do not outlive
+ * the triage that needed them. A custom directory is the operator's to manage.
+ */
+const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{6,}$/;
+const SLACK_TS = /^\d+\.\d+$/;
+
+function defaultAttachmentsRoot(channelId) {
+  return path.join(os.tmpdir(), "slack-triage", channelId);
+}
+
+/**
+ * Walks the components of `directory` below `base`, refusing a symlink, a
+ * non-directory, or another user's directory anywhere on the way. Returns
+ * false when a component does not exist yet (nothing there), true when the
+ * whole chain is a real, owned directory path. Both the write path and the
+ * delete paths use this — `rm` resolves through a symlinked ancestor exactly
+ * like `open` does, so a planted /tmp/slack-triage link would otherwise turn
+ * cleanup into deletion inside whatever it points at.
+ */
+async function verifyOwnedChain(base, directory) {
+  const relative = path.relative(base, directory);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new TriageError(`${directory} is not below ${base}`);
+  }
+  let current = base;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch (error) {
+      // Only a genuinely absent component means "nothing there". EACCES or
+      // a transient filesystem error must surface — a cleanup that silently
+      // skips its rm leaves attachments on disk while reporting nothing.
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+      throw new TriageError(`cannot inspect ${current}: ${error.code ?? error.message}`);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TriageError(`${current} is not a directory — refusing to touch it`);
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new TriageError(`${current} is owned by another user — refusing to touch it`);
+    }
+    // Ownership alone is not enough: an operator-owned 0777 directory lets
+    // any local account swap a child between our check and our write.
+    if ((stat.mode & 0o022) !== 0) {
+      throw new TriageError(
+        `${current} is writable by other users — refusing to touch it`,
+      );
+    }
+  }
+  return true;
+}
+
+/**
+ * Deletes one message's attachment directory in the default location — and
+ * only there. The channel and ts come from a draft the agent wrote, so they
+ * are re-validated here and the resolved path is checked against the root
+ * before anything recursive runs; a value that would escape is refused, not
+ * "cleaned up".
+ */
+async function removeDefaultAttachments(channelId, ts) {
+  if (!SLACK_CHANNEL_ID.test(channelId) || !SLACK_TS.test(ts)) {
+    throw new TriageError(
+      `Refusing to delete attachments for channel=${channelId} ts=${ts}: not Slack identifiers`,
+    );
+  }
+  const target = path.join(defaultAttachmentsRoot(channelId), ts);
+  if (await verifyOwnedChain(os.tmpdir(), target)) {
+    await rm(target, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Creates `directory` owner-only, one component at a time below `base`,
+ * checking each is a real directory this user owns before descending into it
+ * — not a symlink or a directory somebody else planted under a predictable
+ * name in a shared /tmp. `mkdir -p` would walk straight through either.
+ * `base` must already exist and is not itself checked: on a shared host it is
+ * /tmp, world-writable and root-owned by design. Refusing is the safe answer:
+ * the fetch still emits the message text and the file's permalink.
+ */
+async function ensurePrivateDirectory(base, directory) {
+  const relative = path.relative(base, directory);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new TriageError(`${directory} is not below ${base}`);
+  }
+  let current = base;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    try {
+      await mkdir(current, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    // Checked before descending: one mkdir through a symlinked component
+    // would already land in whatever it points at.
+    await verifyOwnedChain(base, current);
+  }
+}
+
+/**
+ * Resolves a custom --attachments-dir to a trusted physical base plus the
+ * root to create under it. The operator's path is realpath-resolved once, up
+ * front, so any symlink in it is followed while it still means what the
+ * operator meant — repointing a link afterwards cannot move our writes,
+ * because only the resolved path is ever used again. Every component of the
+ * resolved chain, from the filesystem root down, must then be a directory
+ * owned by this uid or by root, and must either deny group/world writes or
+ * carry the sticky bit — the /tmp arrangement, where others can create
+ * siblings but cannot replace a root-owned directory's entries. Anything
+ * else lets another local account swap a component between our check and
+ * our open.
+ */
+async function resolveAttachmentsBase(attachmentsRoot) {
+  let existing = path.resolve(attachmentsRoot);
+  for (;;) {
+    try {
+      await lstat(existing);
+      break;
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      existing = parent;
+    }
+  }
+
+  const base = await realpath(existing);
+  const fsRoot = path.parse(base).root;
+  const components = path.relative(fsRoot, base).split(path.sep).filter(Boolean);
+  let current = fsRoot;
+  for (const component of ["", ...components]) {
+    current = component ? path.join(current, component) : current;
+    const stat = await lstat(current);
+    if (!stat.isDirectory()) {
+      throw new TriageError(`${current} is not a directory — refusing it as the attachments base`);
+    }
+    if (
+      typeof process.getuid === "function" &&
+      stat.uid !== process.getuid() &&
+      stat.uid !== 0
+    ) {
+      throw new TriageError(`${current} is owned by another user — refusing it as the attachments base`);
+    }
+    const otherWritable = (stat.mode & 0o022) !== 0;
+    const sticky = (stat.mode & 0o1000) !== 0;
+    if (otherWritable && !sticky) {
+      throw new TriageError(
+        `${current} is writable by other users and not sticky — refusing it as the attachments base`,
+      );
+    }
+  }
+
+  return {
+    base,
+    root: path.join(base, path.relative(existing, path.resolve(attachmentsRoot))),
+  };
+}
+
+/**
+ * The on-disk name for a Slack file: id-prefixed, sanitized to ASCII, then
+ * bounded — a filename near the filesystem's 255-byte component limit would
+ * otherwise fail the open with ENAMETOOLONG once the id is prefixed.
+ */
+function boundedFileName(file) {
+  const name = file.name ?? file.title ?? file.id;
+  const sanitized = `${file.id}-${name}`.replace(/[^\w.-]+/g, "_");
+  const extension = path.extname(sanitized).slice(0, 16);
+  return sanitized.length > 200
+    ? sanitized.slice(0, 200 - extension.length) + extension
+    : sanitized;
+}
+
+/**
+ * Removes entries in a message's attachment directory that none of the
+ * message's current files — parent post and thread replies together — would
+ * write. The retention sweep keeps the whole directory while the message is
+ * flagged, so this is where a dead run's .part file or a download of an
+ * attachment since deleted in Slack gets cleaned up. Runs once per message,
+ * before any download: parent and replies share the directory, so a per-call
+ * sweep would delete one reply's downloads while handling the next. The
+ * ownership walk guards it exactly like a write — an unverified or absent
+ * directory is left alone.
+ */
+async function sweepMessageDirectory(base, directory, expected) {
+  if (!(await verifyOwnedChain(base, directory))) return;
+  for (const entry of await readdir(directory)) {
+    if (expected.has(entry)) continue;
+    const part = entry.match(/\.part-(\d+)$/);
+    if (part) {
+      try {
+        process.kill(Number(part[1]), 0);
+        // The pid is alive — but pids get reused, so alone that only proves
+        // some process exists, not that a fetch does. A real transfer is
+        // being written right now; one whose file has not changed in an
+        // hour is an abandoned download wearing a recycled pid.
+        const age = Date.now() - (await lstat(path.join(directory, entry))).mtimeMs;
+        if (age < 60 * 60 * 1000) continue;
+      } catch {
+        // Not a running process — an abandoned transfer.
+      }
+    }
+    await rm(path.join(directory, entry), { force: true }).catch((error) =>
+      console.error(
+        `WARNING: could not remove orphan ${path.join(directory, entry)}: ${error.code ?? error.message}`,
+      ),
+    );
+  }
+}
+
+function createAttachmentFetcher(token, base, directory, budget, disabledReason) {
+  let scopeWarned = false;
+
+  return async function fetchAttachments(message) {
+    const files = message.files ?? [];
+    if (files.length === 0) return [];
+
+    if (disabledReason) {
+      return files.map((file) => ({
+        id: file.id,
+        name: file.name ?? file.title ?? file.id,
+        mimetype: file.mimetype ?? "unknown",
+        size: file.size ?? null,
+        permalink: file.permalink ?? null,
+        error: `not downloaded (${disabledReason})`,
+      }));
+    }
+
+    // One at a time, streamed to disk: a thread can carry a hundred replies
+    // and every one may hold a screenshot, so downloading them all at once and
+    // buffering each whole would let one busy thread exhaust the process.
+    const records = [];
+    for (const file of files) {
+      const record = {
+        id: file.id,
+        name: file.name ?? file.title ?? file.id,
+        mimetype: file.mimetype ?? "unknown",
+        size: file.size ?? null,
+        permalink: file.permalink ?? null,
+      };
+
+      // Slack hides deleted or otherwise unavailable files behind a stub
+      // (`mode: "hidden_by_limit"`, `"tombstone"`) with no URL to fetch.
+      const url = file.url_private_download ?? file.url_private;
+      if (!url) {
+        records.push({ ...record, error: `unavailable (${file.mode ?? "no url"})` });
+        continue;
+      }
+      if (!DOWNLOADABLE_MIMETYPES.test(record.mimetype)) {
+        records.push({ ...record, error: "not downloaded (unsupported type)" });
+        continue;
+      }
+      if (record.size && record.size > MAX_ATTACHMENT_BYTES) {
+        records.push({ ...record, error: "not downloaded (over 20 MB)" });
+        continue;
+      }
+      if ((record.size ?? MAX_ATTACHMENT_BYTES) > budget.remaining) {
+        records.push({ ...record, error: "not downloaded (run attachment budget exhausted)" });
+        continue;
+      }
+
+      let response;
+      let partPath;
+      try {
+        response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          await response.body?.cancel();
+          records.push({ ...record, error: `download failed: HTTP ${response.status}` });
+          continue;
+        }
+        // Without files:read Slack does not 403; it 302s to the workspace
+        // sign-in page (`https://<team>.slack.com/?redir=/files-pri/…`) and
+        // serves that as HTML with a 200. The redirect is the tell — an
+        // attachment that is itself an HTML file arrives with the same
+        // content type but from files.slack.com directly.
+        const signInPage =
+          /text\/html/.test(contentType) &&
+          response.redirected &&
+          /[?&]redir=/.test(response.url);
+        if (signInPage) {
+          // An unread body keeps the socket — and the event loop — alive
+          // after main() returns, so the process never exits.
+          await response.body?.cancel();
+          if (!scopeWarned) {
+            scopeWarned = true;
+            console.error(
+              "Attachments could not be downloaded — the token is missing the " +
+                "files:read scope. Add it and reinstall the app; the messages " +
+                "were still fetched.",
+            );
+          }
+          records.push({ ...record, error: "missing_scope (needs scope: files:read)" });
+          continue;
+        }
+
+        // Owner-only: on a shared host os.tmpdir() is /tmp, and these are
+        // screenshots of client-facing pages. `wx` creates exclusively, so a
+        // link planted at the path beforehand fails the open rather than
+        // being followed.
+        await ensurePrivateDirectory(base, directory);
+        const filePath = path.join(directory, boundedFileName(file));
+        // Streamed to a per-process part file, then renamed into place.
+        // The rename is atomic, so a retained file from an earlier run — or
+        // another fetch of the same channel running right now — is replaced
+        // whole, never observed half-written; and rename replaces a link at
+        // the destination rather than following it.
+        partPath = `${filePath}.part-${process.pid}`;
+        // Slack's size metadata is advisory — absent, zero, or stale it
+        // passes the preflight checks, so the caps are enforced on the bytes
+        // actually delivered, aborting mid-stream rather than measuring a
+        // file that already filled the disk.
+        const limit = Math.min(MAX_ATTACHMENT_BYTES, budget.remaining);
+        let written = 0;
+        await pipeline(
+          Readable.fromWeb(response.body),
+          async function* enforceLimit(source) {
+            for await (const chunk of source) {
+              written += chunk.length;
+              if (written > limit) {
+                throw new TriageError(`body exceeded ${limit} bytes mid-stream`);
+              }
+              yield chunk;
+            }
+          },
+          createWriteStream(partPath, { flags: "wx", mode: 0o600 }),
+        );
+        await rename(partPath, filePath);
+        budget.remaining -= written;
+        records.push({ ...record, path: filePath });
+      } catch (error) {
+        // A body left unconsumed here — say, the directory check refused —
+        // holds its socket open and fetch never exits, exactly like the
+        // sign-in branch above.
+        await response?.body?.cancel().catch(() => {});
+        // A transfer that died mid-stream leaves a part file that consumed
+        // disk the budget never saw. Remove it; the final path was never
+        // created.
+        if (partPath) await rm(partPath, { force: true }).catch(() => {});
+        records.push({ ...record, error: `download failed: ${error.message}` });
+      }
+    }
+    return records;
+  };
+}
+
 async function fetchCandidates(config, overrides) {
   const settings = { ...config.slack, ...overrides };
   const token = await resolveSlackToken(settings.keychainService);
   const channelId = await resolveChannelId(token, settings.channel);
   const resolveUser = createUserResolver(token);
+  let attachmentsRoot =
+    settings.attachmentsDir ?? defaultAttachmentsRoot(channelId);
+  // Where the owner-checked directory walk starts: the OS temp dir for the
+  // default location, or whatever already exists above a custom one. An
+  // unsafe root — say, /tmp/slack-triage planted by another account before
+  // the first run — disables downloads for this run rather than aborting it:
+  // the message text is still worth fetching, and every file is listed with
+  // its permalink and the reason.
+  let attachmentsBase = os.tmpdir();
+  let attachmentsDisabled = null;
+  try {
+    // The default base is the environment's choice, not ours — a TMPDIR
+    // pointed at a writable non-sticky directory deserves exactly the same
+    // scrutiny as a custom --attachments-dir, so both go through the same
+    // resolve-and-walk.
+    ({ base: attachmentsBase, root: attachmentsRoot } =
+      await resolveAttachmentsBase(attachmentsRoot));
+  } catch (error) {
+    if (!(error instanceof TriageError)) throw error;
+    attachmentsDisabled = error.message;
+    console.error(
+      `WARNING: attachment downloads disabled for this run: ${error.message}\n` +
+        "Messages are still fetched; attachments are listed by permalink only.",
+    );
+  }
+  const attachmentBudget = { remaining: MAX_RUN_ATTACHMENT_BYTES };
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
   const messages = [];
@@ -277,11 +672,51 @@ async function fetchCandidates(config, overrides) {
     cursor = page.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
-  const flagged = messages.filter(
-    (message) =>
-      hasReaction(message, settings.triggerEmoji) &&
-      !hasReaction(message, settings.doneEmoji),
-  );
+  const flagged = messages
+    .filter(
+      (message) =>
+        hasReaction(message, settings.triggerEmoji) &&
+        !hasReaction(message, settings.doneEmoji),
+    )
+    // Oldest first before anything downloads: candidates are emitted oldest
+    // first and the operator is told to finish them in that order, so the run
+    // budget has to be spent in the same order — Slack hands history back
+    // newest first, which would starve exactly the message triage does first.
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+  // Retention sweep, now that the live set is known: in the default location,
+  // remove only message directories that no current candidate owns. Clearing
+  // the whole root here would pull attachment paths out from under a
+  // concurrent run (a scheduled fetch overlapping a manual one) that emitted
+  // them moments ago.
+  if (!settings.attachmentsDir && !attachmentsDisabled) {
+    const live = new Set(flagged.map((message) => message.ts));
+    let entries = [];
+    try {
+      entries = await readdir(attachmentsRoot);
+    } catch (error) {
+      // Only an absent root means nothing to sweep; anything else is a
+      // retention guarantee silently not being kept, which the operator
+      // should hear about.
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        console.error(
+          `WARNING: could not sweep stale attachments in ${attachmentsRoot}: ${error.code ?? error.message}`,
+        );
+      }
+    }
+    for (const entry of entries) {
+      if (!live.has(entry)) {
+        await rm(path.join(attachmentsRoot, entry), {
+          recursive: true,
+          force: true,
+        }).catch((error) =>
+          console.error(
+            `WARNING: could not remove stale attachments ${path.join(attachmentsRoot, entry)}: ${error.code ?? error.message}`,
+          ),
+        );
+      }
+    }
+  }
 
   const candidates = [];
   for (const message of flagged) {
@@ -291,22 +726,53 @@ async function fetchCandidates(config, overrides) {
     });
 
     // Feedback is usually argued out in the thread, so the replies are often
-    // where the actual reproduction detail lives.
-    let thread = [];
+    // where the actual reproduction detail lives — and the screenshots are
+    // usually attached to a reply, not the flagged post. Listed before
+    // anything downloads, because the orphan sweep needs the full expected
+    // set: parent and replies share one directory.
+    let replyMessages = [];
     if (message.thread_ts && (message.reply_count ?? 0) > 0) {
       const { messages: replies } = await slackApi(
         token,
         "conversations.replies",
         { channel: channelId, ts: message.thread_ts, limit: 100 },
       );
-      thread = await Promise.all(
-        replies
-          .filter((reply) => reply.ts !== message.ts)
-          .map(async (reply) => ({
-            author: await resolveUser(reply.user),
-            text: reply.text,
-          })),
+      replyMessages = replies.filter((reply) => reply.ts !== message.ts);
+    }
+
+    // One directory per flagged message, so a run's screenshots don't collide
+    // and a re-run overwrites rather than accumulates.
+    const directory = path.join(attachmentsRoot, message.ts);
+    // Never in a custom --attachments-dir: retention there is documented as
+    // the operator's, and a sweep would delete files they chose to keep.
+    if (!attachmentsDisabled && !settings.attachmentsDir) {
+      const expected = new Set(
+        [message, ...replyMessages]
+          .flatMap((entry) => entry.files ?? [])
+          .map(boundedFileName),
       );
+      await sweepMessageDirectory(attachmentsBase, directory, expected).catch(
+        (error) =>
+          console.error(
+            `WARNING: could not sweep ${directory}: ${error.message}`,
+          ),
+      );
+    }
+    const fetchAttachments = createAttachmentFetcher(
+      token,
+      attachmentsBase,
+      directory,
+      attachmentBudget,
+      attachmentsDisabled,
+    );
+
+    const thread = [];
+    for (const reply of replyMessages) {
+      thread.push({
+        author: await resolveUser(reply.user),
+        text: reply.text,
+        files: await fetchAttachments(reply),
+      });
     }
 
     const reactors = await Promise.all(
@@ -324,13 +790,13 @@ async function fetchCandidates(config, overrides) {
       postedAt: new Date(Number(message.ts) * 1000).toISOString(),
       flaggedBy: reactors,
       text: message.text,
+      files: await fetchAttachments(message),
       thread,
     });
   }
 
-  // Oldest first, so a run that files several issues queues them in the order
-  // the requests actually arrived.
-  candidates.sort((a, b) => Number(a.ts) - Number(b.ts));
+  // Already oldest first — flagged was sorted before the downloads so the
+  // attachment budget is spent in emission order.
   return candidates;
 }
 
@@ -495,8 +961,14 @@ function validateDraft(draft, config) {
   }
   if (!draft.title?.trim()) problems.push("title is required");
   if (!draft.body?.trim()) problems.push("body is required");
-  if (!draft.slack?.channel || !draft.slack?.ts) {
-    problems.push("slack.channel and slack.ts are required");
+  // These two also name the attachment directory that filing deletes, so
+  // they must be Slack identifiers and nothing else — a draft is written by
+  // the agent, and the agent reads Slack.
+  if (!SLACK_CHANNEL_ID.test(draft.slack?.channel ?? "")) {
+    problems.push("slack.channel must be a Slack channel ID (C…, G…, or D…)");
+  }
+  if (!SLACK_TS.test(draft.slack?.ts ?? "")) {
+    problems.push("slack.ts must be a Slack message timestamp (seconds.fraction)");
   }
 
   if (!config.fileableStates.has(draft.status)) {
@@ -584,6 +1056,19 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
     `Board: Status=${draft.status}` +
       (draft.priority ? ` Priority=${draft.priority}` : ""),
   );
+
+  // The issue exists, so the screenshots fetch pulled for it have done their
+  // job; do not leave copies of client-facing pages sitting in tmp. A failure
+  // here is reported, not thrown — aborting now would skip the Slack marker
+  // below and the next run would file this message again.
+  try {
+    await removeDefaultAttachments(draft.slack.channel, draft.slack.ts);
+  } catch (error) {
+    console.error(
+      `WARNING: could not remove downloaded attachments: ${error.message}\n` +
+        `Delete ${path.join(defaultAttachmentsRoot(draft.slack.channel), draft.slack.ts)} by hand.`,
+    );
+  }
 
   // Slack is marked last and best-effort. A failure here re-surfaces the
   // message on the next run, which risks a duplicate issue — noisy but
@@ -704,10 +1189,13 @@ function parseArguments(argv) {
 const USAGE = `Usage:
   slack-triage.mjs init --repo owner/name --project-id PVT_… --channel '#name'
   slack-triage.mjs refresh-board [--config path]
-  slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14]
+  slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14] [--attachments-dir path]
   slack-triage.mjs file --input draft.json [--dry-run] [--confirmed]
 
-Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).`;
+Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).
+fetch downloads message attachments (images, PDFs, text; needs files:read) under
+--attachments-dir, default <tmpdir>/slack-triage/<channel>/<ts>/, and reports each
+one's local path — or the reason it could not be fetched — on the message.`;
 
 async function main() {
   const [subcommand, ...rest] = process.argv.slice(2);
@@ -729,6 +1217,9 @@ async function main() {
         ...(options.emoji ? { triggerEmoji: options.emoji } : {}),
         ...(options["done-emoji"] ? { doneEmoji: options["done-emoji"] } : {}),
         ...(options.days ? { lookbackDays: Number(options.days) } : {}),
+        ...(options["attachments-dir"]
+          ? { attachmentsDir: path.resolve(options["attachments-dir"]) }
+          : {}),
       });
       console.log(JSON.stringify(candidates, null, 2));
       break;

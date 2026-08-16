@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "AI coding assistant plugins for TypeScript/JavaScript builders \u2014 Next.js, Astro, Convex, and beyond. By Michael Visser.",
-    "version": "0.3.6"
+    "version": "0.3.7"
   },
   "plugins": [
     {
@@ -30,7 +30,7 @@
       "name": "slack-triage",
       "source": "./plugins/slack-triage",
       "description": "Turn reaction-flagged Slack feedback into researched GitHub issues on a Projects v2 board",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "keywords": [
         "slack",
         "github",
