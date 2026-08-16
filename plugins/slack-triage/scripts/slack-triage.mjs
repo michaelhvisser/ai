@@ -451,36 +451,40 @@ function boundedFileName(file) {
     : sanitized;
 }
 
+/**
+ * Removes entries in a message's attachment directory that none of the
+ * message's current files — parent post and thread replies together — would
+ * write. The retention sweep keeps the whole directory while the message is
+ * flagged, so this is where a dead run's .part file or a download of an
+ * attachment since deleted in Slack gets cleaned up. Runs once per message,
+ * before any download: parent and replies share the directory, so a per-call
+ * sweep would delete one reply's downloads while handling the next. The
+ * ownership walk guards it exactly like a write — an unverified or absent
+ * directory is left alone.
+ */
+async function sweepMessageDirectory(base, directory, expected) {
+  if (!(await verifyOwnedChain(base, directory))) return;
+  for (const entry of await readdir(directory)) {
+    if (expected.has(entry)) continue;
+    const part = entry.match(/\.part-(\d+)$/);
+    if (part) {
+      try {
+        process.kill(Number(part[1]), 0);
+        continue; // A still-running process — another live fetch's transfer.
+      } catch {
+        // Not a running process — an abandoned transfer.
+      }
+    }
+    await rm(path.join(directory, entry), { force: true }).catch(() => {});
+  }
+}
+
 function createAttachmentFetcher(token, base, directory, budget, disabledReason) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
     const files = message.files ?? [];
     if (files.length === 0) return [];
-
-    // The retention sweep keeps this whole directory while the message is
-    // flagged, so orphans inside it — a dead run's .part file, a download of
-    // an attachment since deleted or renamed in Slack — are removed here,
-    // where the current attachment list is known. A .part file belonging to
-    // a process that is still running is another live fetch's transfer.
-    const expected = new Set(files.map((file) => boundedFileName(file)));
-    try {
-      for (const entry of await readdir(directory)) {
-        if (expected.has(entry)) continue;
-        const part = entry.match(/\.part-(\d+)$/);
-        if (part) {
-          try {
-            process.kill(Number(part[1]), 0);
-            continue;
-          } catch {
-            // Not a running process — an abandoned transfer.
-          }
-        }
-        await rm(path.join(directory, entry), { force: true }).catch(() => {});
-      }
-    } catch {
-      // Directory does not exist yet — nothing to sweep.
-    }
 
     if (disabledReason) {
       return files.map((file) => ({
@@ -701,34 +705,49 @@ async function fetchCandidates(config, overrides) {
       message_ts: message.ts,
     });
 
-    // One directory per flagged message, so a run's screenshots don't collide
-    // and a re-run overwrites rather than accumulates.
-    const fetchAttachments = createAttachmentFetcher(
-      token,
-      attachmentsBase,
-      path.join(attachmentsRoot, message.ts),
-      attachmentBudget,
-      attachmentsDisabled,
-    );
-
     // Feedback is usually argued out in the thread, so the replies are often
     // where the actual reproduction detail lives — and the screenshots are
-    // usually attached to a reply, not the flagged post.
-    let thread = [];
+    // usually attached to a reply, not the flagged post. Listed before
+    // anything downloads, because the orphan sweep needs the full expected
+    // set: parent and replies share one directory.
+    let replyMessages = [];
     if (message.thread_ts && (message.reply_count ?? 0) > 0) {
       const { messages: replies } = await slackApi(
         token,
         "conversations.replies",
         { channel: channelId, ts: message.thread_ts, limit: 100 },
       );
-      for (const reply of replies) {
-        if (reply.ts === message.ts) continue;
-        thread.push({
-          author: await resolveUser(reply.user),
-          text: reply.text,
-          files: await fetchAttachments(reply),
-        });
-      }
+      replyMessages = replies.filter((reply) => reply.ts !== message.ts);
+    }
+
+    // One directory per flagged message, so a run's screenshots don't collide
+    // and a re-run overwrites rather than accumulates.
+    const directory = path.join(attachmentsRoot, message.ts);
+    if (!attachmentsDisabled) {
+      const expected = new Set(
+        [message, ...replyMessages]
+          .flatMap((entry) => entry.files ?? [])
+          .map(boundedFileName),
+      );
+      await sweepMessageDirectory(attachmentsBase, directory, expected).catch(
+        () => {}, // Best-effort: an unsafe directory is refused by the walk.
+      );
+    }
+    const fetchAttachments = createAttachmentFetcher(
+      token,
+      attachmentsBase,
+      directory,
+      attachmentBudget,
+      attachmentsDisabled,
+    );
+
+    const thread = [];
+    for (const reply of replyMessages) {
+      thread.push({
+        author: await resolveUser(reply.user),
+        text: reply.text,
+        files: await fetchAttachments(reply),
+      });
     }
 
     const reactors = await Promise.all(
