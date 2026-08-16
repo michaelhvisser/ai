@@ -317,6 +317,13 @@ async function verifyOwnedChain(base, directory) {
     if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       throw new TriageError(`${current} is owned by another user — refusing to touch it`);
     }
+    // Ownership alone is not enough: an operator-owned 0777 directory lets
+    // any local account swap a child between our check and our write.
+    if ((stat.mode & 0o022) !== 0) {
+      throw new TriageError(
+        `${current} is writable by other users — refusing to touch it`,
+      );
+    }
   }
   return true;
 }
@@ -520,11 +527,26 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
         } catch {
           // Nothing at the path — the common case.
         }
+        // Slack's size metadata is advisory — absent, zero, or stale it
+        // passes the preflight checks, so the caps are enforced on the bytes
+        // actually delivered, aborting mid-stream rather than measuring a
+        // file that already filled the disk.
+        const limit = Math.min(MAX_ATTACHMENT_BYTES, budget.remaining);
+        let written = 0;
         await pipeline(
           Readable.fromWeb(response.body),
+          async function* enforceLimit(source) {
+            for await (const chunk of source) {
+              written += chunk.length;
+              if (written > limit) {
+                throw new TriageError(`body exceeded ${limit} bytes mid-stream`);
+              }
+              yield chunk;
+            }
+          },
           createWriteStream(filePath, { flags: "wx", mode: 0o600 }),
         );
-        budget.remaining -= (await lstat(filePath)).size;
+        budget.remaining -= written;
         records.push({ ...record, path: filePath });
       } catch (error) {
         // A body left unconsumed here — say, the directory check refused —
