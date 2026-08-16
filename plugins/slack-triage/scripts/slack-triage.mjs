@@ -308,8 +308,12 @@ async function verifyOwnedChain(base, directory) {
     let stat;
     try {
       stat = await lstat(current);
-    } catch {
-      return false;
+    } catch (error) {
+      // Only a genuinely absent component means "nothing there". EACCES or
+      // a transient filesystem error must surface — a cleanup that silently
+      // skips its rm leaves attachments on disk while reporting nothing.
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+      throw new TriageError(`cannot inspect ${current}: ${error.code ?? error.message}`);
     }
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new TriageError(`${current} is not a directory — refusing to touch it`);
@@ -433,12 +437,50 @@ async function resolveAttachmentsBase(attachmentsRoot) {
   };
 }
 
+/**
+ * The on-disk name for a Slack file: id-prefixed, sanitized to ASCII, then
+ * bounded — a filename near the filesystem's 255-byte component limit would
+ * otherwise fail the open with ENAMETOOLONG once the id is prefixed.
+ */
+function boundedFileName(file) {
+  const name = file.name ?? file.title ?? file.id;
+  const sanitized = `${file.id}-${name}`.replace(/[^\w.-]+/g, "_");
+  const extension = path.extname(sanitized).slice(0, 16);
+  return sanitized.length > 200
+    ? sanitized.slice(0, 200 - extension.length) + extension
+    : sanitized;
+}
+
 function createAttachmentFetcher(token, base, directory, budget, disabledReason) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
     const files = message.files ?? [];
     if (files.length === 0) return [];
+
+    // The retention sweep keeps this whole directory while the message is
+    // flagged, so orphans inside it — a dead run's .part file, a download of
+    // an attachment since deleted or renamed in Slack — are removed here,
+    // where the current attachment list is known. A .part file belonging to
+    // a process that is still running is another live fetch's transfer.
+    const expected = new Set(files.map((file) => boundedFileName(file)));
+    try {
+      for (const entry of await readdir(directory)) {
+        if (expected.has(entry)) continue;
+        const part = entry.match(/\.part-(\d+)$/);
+        if (part) {
+          try {
+            process.kill(Number(part[1]), 0);
+            continue;
+          } catch {
+            // Not a running process — an abandoned transfer.
+          }
+        }
+        await rm(path.join(directory, entry), { force: true }).catch(() => {});
+      }
+    } catch {
+      // Directory does not exist yet — nothing to sweep.
+    }
 
     if (disabledReason) {
       return files.map((file) => ({
@@ -526,16 +568,7 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
         // link planted at the path beforehand fails the open rather than
         // being followed.
         await ensurePrivateDirectory(base, directory);
-        // Sanitized to ASCII, then bounded: a Slack filename near the
-        // filesystem's 255-byte component limit would otherwise fail the
-        // open with ENAMETOOLONG once the file id is prefixed.
-        const sanitized = `${file.id}-${record.name}`.replace(/[^\w.-]+/g, "_");
-        const extension = path.extname(sanitized).slice(0, 16);
-        const safeName =
-          sanitized.length > 200
-            ? sanitized.slice(0, 200 - extension.length) + extension
-            : sanitized;
-        const filePath = path.join(directory, safeName);
+        const filePath = path.join(directory, boundedFileName(file));
         // Streamed to a per-process part file, then renamed into place.
         // The rename is atomic, so a retained file from an earlier run — or
         // another fetch of the same channel running right now — is replaced
