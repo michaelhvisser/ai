@@ -289,6 +289,39 @@ function defaultAttachmentsRoot(channelId) {
 }
 
 /**
+ * Walks the components of `directory` below `base`, refusing a symlink, a
+ * non-directory, or another user's directory anywhere on the way. Returns
+ * false when a component does not exist yet (nothing there), true when the
+ * whole chain is a real, owned directory path. Both the write path and the
+ * delete paths use this — `rm` resolves through a symlinked ancestor exactly
+ * like `open` does, so a planted /tmp/slack-triage link would otherwise turn
+ * cleanup into deletion inside whatever it points at.
+ */
+async function verifyOwnedChain(base, directory) {
+  const relative = path.relative(base, directory);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new TriageError(`${directory} is not below ${base}`);
+  }
+  let current = base;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    let stat;
+    try {
+      stat = await lstat(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TriageError(`${current} is not a directory — refusing to touch it`);
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new TriageError(`${current} is owned by another user — refusing to touch it`);
+    }
+  }
+  return true;
+}
+
+/**
  * Deletes one message's attachment directory in the default location — and
  * only there. The channel and ts come from a draft the agent wrote, so they
  * are re-validated here and the resolved path is checked against the root
@@ -301,12 +334,10 @@ async function removeDefaultAttachments(channelId, ts) {
       `Refusing to delete attachments for channel=${channelId} ts=${ts}: not Slack identifiers`,
     );
   }
-  const root = path.resolve(os.tmpdir(), "slack-triage");
-  const target = path.resolve(defaultAttachmentsRoot(channelId), ts);
-  if (!target.startsWith(root + path.sep)) {
-    throw new TriageError(`Refusing to delete ${target}: outside ${root}`);
+  const target = path.join(defaultAttachmentsRoot(channelId), ts);
+  if (await verifyOwnedChain(os.tmpdir(), target)) {
+    await rm(target, { recursive: true, force: true });
   }
-  await rm(target, { recursive: true, force: true });
 }
 
 /**
@@ -331,13 +362,9 @@ async function ensurePrivateDirectory(base, directory) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
     }
-    const stat = await lstat(current);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new TriageError(`${current} is not a directory — refusing to write attachments there`);
-    }
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-      throw new TriageError(`${current} is owned by another user — refusing to write attachments there`);
-    }
+    // Checked before descending: one mkdir through a symlinked component
+    // would already land in whatever it points at.
+    await verifyOwnedChain(base, current);
   }
 }
 
@@ -397,6 +424,7 @@ function createAttachmentFetcher(token, base, directory, budget) {
       }
 
       let response;
+      let filePath;
       try {
         response = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
@@ -438,7 +466,22 @@ function createAttachmentFetcher(token, base, directory, budget) {
         // being followed.
         await ensurePrivateDirectory(base, directory);
         const safeName = record.name.replace(/[^\w.-]+/g, "_");
-        const filePath = path.join(directory, `${file.id}-${safeName}`);
+        filePath = path.join(directory, `${file.id}-${safeName}`);
+        // A retained custom --attachments-dir legitimately still holds this
+        // file from an earlier run; replace our own regular file so the rerun
+        // gets a usable path again. Anything else at the path — a link, a
+        // directory, another owner — leaves the exclusive open to refuse it.
+        // (This has to happen before the pipeline: a failed open still
+        // destroys the response stream, which cannot be read twice.)
+        try {
+          const existing = await lstat(filePath);
+          const owned =
+            existing.isFile() &&
+            (typeof process.getuid !== "function" || existing.uid === process.getuid());
+          if (owned) await rm(filePath);
+        } catch {
+          // Nothing at the path — the common case.
+        }
         await pipeline(
           Readable.fromWeb(response.body),
           createWriteStream(filePath, { flags: "wx", mode: 0o600 }),
@@ -450,6 +493,10 @@ function createAttachmentFetcher(token, base, directory, budget) {
         // holds its socket open and fetch never exits, exactly like the
         // sign-in branch above.
         await response?.body?.cancel().catch(() => {});
+        // A transfer that died mid-stream leaves a partial file that a later
+        // run's EEXIST retry would surface as if complete — and that consumed
+        // disk the budget never saw. Remove it.
+        if (filePath) await rm(filePath, { force: true }).catch(() => {});
         records.push({ ...record, error: `download failed: ${error.message}` });
       }
     }
@@ -464,7 +511,7 @@ async function fetchCandidates(config, overrides) {
   const resolveUser = createUserResolver(token);
   const attachmentsRoot =
     settings.attachmentsDir ?? defaultAttachmentsRoot(channelId);
-  if (!settings.attachmentsDir) {
+  if (!settings.attachmentsDir && (await verifyOwnedChain(os.tmpdir(), attachmentsRoot))) {
     await rm(attachmentsRoot, { recursive: true, force: true });
   }
   // Where the owner-checked directory walk starts: the OS temp dir for the
