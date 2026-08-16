@@ -470,7 +470,12 @@ async function sweepMessageDirectory(base, directory, expected) {
     if (part) {
       try {
         process.kill(Number(part[1]), 0);
-        continue; // A still-running process — another live fetch's transfer.
+        // The pid is alive — but pids get reused, so alone that only proves
+        // some process exists, not that a fetch does. A real transfer is
+        // being written right now; one whose file has not changed in an
+        // hour is an abandoned download wearing a recycled pid.
+        const age = Date.now() - (await lstat(path.join(directory, entry))).mtimeMs;
+        if (age < 60 * 60 * 1000) continue;
       } catch {
         // Not a running process — an abandoned transfer.
       }
