@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -306,17 +306,35 @@ async function removeDefaultAttachments(channelId, ts) {
 }
 
 /**
- * Downloads a message's files into `directory` and returns one record per file.
- *
- * Reading file contents needs the `files:read` scope, which the rest of the
- * pipeline does not. A token without it must not break the fetch — the text
- * is still worth triaging — so a failed download is reported on the record
- * (`error`) instead of thrown, and the record still carries the Slack
- * permalink so a human can look. Slack answers an unauthorised private-file
- * URL with an HTML sign-in page and a 200, so the content type is the check,
- * not the status.
+ * Creates `directory` owner-only, one component at a time from `root` down,
+ * checking each is a real directory this user owns before descending into it
+ * — not a symlink or a directory somebody else planted under a predictable
+ * name in a shared /tmp. `mkdir -p` would walk straight through either.
+ * Refusing is the safe answer: the fetch still emits the message text and the
+ * file's permalink.
  */
-function createAttachmentFetcher(token, directory) {
+async function ensurePrivateDirectory(root, directory) {
+  const relative = path.relative(root, directory);
+  const components = relative ? relative.split(path.sep) : [];
+  let current = root;
+  for (const component of ["", ...components]) {
+    current = component ? path.join(current, component) : current;
+    try {
+      await mkdir(current, { mode: 0o700 });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    const stat = await lstat(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TriageError(`${current} is not a directory — refusing to write attachments there`);
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new TriageError(`${current} is owned by another user — refusing to write attachments there`);
+    }
+  }
+}
+
+function createAttachmentFetcher(token, root, directory) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
@@ -388,13 +406,15 @@ function createAttachmentFetcher(token, directory) {
         }
 
         // Owner-only: on a shared host os.tmpdir() is /tmp, and these are
-        // screenshots of client-facing pages.
-        await mkdir(directory, { recursive: true, mode: 0o700 });
+        // screenshots of client-facing pages. `wx` creates exclusively, so a
+        // link planted at the path beforehand fails the open rather than
+        // being followed.
+        await ensurePrivateDirectory(root, directory);
         const safeName = record.name.replace(/[^\w.-]+/g, "_");
         const filePath = path.join(directory, `${file.id}-${safeName}`);
         await pipeline(
           Readable.fromWeb(response.body),
-          createWriteStream(filePath, { mode: 0o600 }),
+          createWriteStream(filePath, { flags: "wx", mode: 0o600 }),
         );
         records.push({ ...record, path: filePath });
       } catch (error) {
@@ -447,6 +467,7 @@ async function fetchCandidates(config, overrides) {
     // and a re-run overwrites rather than accumulates.
     const fetchAttachments = createAttachmentFetcher(
       token,
+      attachmentsRoot,
       path.join(attachmentsRoot, message.ts),
     );
 
@@ -754,8 +775,17 @@ async function fileDraft(draft, config, { dryRun, confirmed }) {
   );
 
   // The issue exists, so the screenshots fetch pulled for it have done their
-  // job; do not leave copies of client-facing pages sitting in tmp.
-  await removeDefaultAttachments(draft.slack.channel, draft.slack.ts);
+  // job; do not leave copies of client-facing pages sitting in tmp. A failure
+  // here is reported, not thrown — aborting now would skip the Slack marker
+  // below and the next run would file this message again.
+  try {
+    await removeDefaultAttachments(draft.slack.channel, draft.slack.ts);
+  } catch (error) {
+    console.error(
+      `WARNING: could not remove downloaded attachments: ${error.message}\n` +
+        `Delete ${path.join(defaultAttachmentsRoot(draft.slack.channel), draft.slack.ts)} by hand.`,
+    );
+  }
 
   // Slack is marked last and best-effort. A failure here re-surfaces the
   // message on the next run, which risks a duplicate issue — noisy but
