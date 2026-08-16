@@ -633,12 +633,12 @@ async function fetchCandidates(config, overrides) {
   let attachmentsBase = os.tmpdir();
   let attachmentsDisabled = null;
   try {
-    if (settings.attachmentsDir) {
-      ({ base: attachmentsBase, root: attachmentsRoot } =
-        await resolveAttachmentsBase(attachmentsRoot));
-    } else {
-      await verifyOwnedChain(attachmentsBase, attachmentsRoot);
-    }
+    // The default base is the environment's choice, not ours — a TMPDIR
+    // pointed at a writable non-sticky directory deserves exactly the same
+    // scrutiny as a custom --attachments-dir, so both go through the same
+    // resolve-and-walk.
+    ({ base: attachmentsBase, root: attachmentsRoot } =
+      await resolveAttachmentsBase(attachmentsRoot));
   } catch (error) {
     if (!(error instanceof TriageError)) throw error;
     attachmentsDisabled = error.message;
@@ -685,8 +685,15 @@ async function fetchCandidates(config, overrides) {
     let entries = [];
     try {
       entries = await readdir(attachmentsRoot);
-    } catch {
-      // Root does not exist yet — nothing to sweep.
+    } catch (error) {
+      // Only an absent root means nothing to sweep; anything else is a
+      // retention guarantee silently not being kept, which the operator
+      // should hear about.
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        console.error(
+          `WARNING: could not sweep stale attachments in ${attachmentsRoot}: ${error.code ?? error.message}`,
+        );
+      }
     }
     for (const entry of entries) {
       if (!live.has(entry)) {
@@ -723,14 +730,19 @@ async function fetchCandidates(config, overrides) {
     // One directory per flagged message, so a run's screenshots don't collide
     // and a re-run overwrites rather than accumulates.
     const directory = path.join(attachmentsRoot, message.ts);
-    if (!attachmentsDisabled) {
+    // Never in a custom --attachments-dir: retention there is documented as
+    // the operator's, and a sweep would delete files they chose to keep.
+    if (!attachmentsDisabled && !settings.attachmentsDir) {
       const expected = new Set(
         [message, ...replyMessages]
           .flatMap((entry) => entry.files ?? [])
           .map(boundedFileName),
       );
       await sweepMessageDirectory(attachmentsBase, directory, expected).catch(
-        () => {}, // Best-effort: an unsafe directory is refused by the walk.
+        (error) =>
+          console.error(
+            `WARNING: could not sweep ${directory}: ${error.message}`,
+          ),
       );
     }
     const fetchAttachments = createAttachmentFetcher(
