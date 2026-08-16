@@ -393,6 +393,19 @@ async function existingAncestor(directory) {
         `${parent} is a link or not a directory — refusing it as the attachments base`,
       );
     }
+    // The base is excluded from the per-component ownership walk, so it must
+    // itself be trustworthy: ours, or root's (as /tmp is). A directory some
+    // other account owns can swap the child we create under it for a symlink
+    // between our check and our write, no matter what mode the child has.
+    if (
+      typeof process.getuid === "function" &&
+      stat.uid !== process.getuid() &&
+      stat.uid !== 0
+    ) {
+      throw new TriageError(
+        `${parent} is owned by another user — refusing it as the attachments base`,
+      );
+    }
     return parent;
   }
 }
