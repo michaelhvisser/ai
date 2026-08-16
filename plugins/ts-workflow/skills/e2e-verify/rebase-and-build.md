@@ -79,16 +79,30 @@ if [ "$CURRENT_BRANCH" != "$PR_HEAD_BRANCH" ] || [ "$LOCAL_HEAD_SHA" != "$PR_HEA
       echo "WORKFLOW_REASON=$WORKFLOW_REASON"
       exit 1
     fi
-    git -C "$WORKTREE_PATH" checkout "$LOCAL_PR_BRANCH"
+    git -C "$WORKTREE_PATH" checkout "$LOCAL_PR_BRANCH" || {
+      WORKFLOW_RESULT=INCOMPLETE
+      WORKFLOW_REASON=pr-branch-checked-out-elsewhere
+      echo "WORKFLOW_RESULT=$WORKFLOW_RESULT"
+      echo "WORKFLOW_REASON=$WORKFLOW_REASON"
+      exit 1
+    }
   else
-    git -C "$WORKTREE_PATH" checkout -b "$LOCAL_PR_BRANCH" "$PR_HEAD_FETCH_REF"
+    git -C "$WORKTREE_PATH" checkout -b "$LOCAL_PR_BRANCH" "$PR_HEAD_FETCH_REF" || {
+      WORKFLOW_RESULT=INCOMPLETE
+      WORKFLOW_REASON=pr-branch-checkout-failed
+      echo "WORKFLOW_RESULT=$WORKFLOW_RESULT"
+      echo "WORKFLOW_REASON=$WORKFLOW_REASON"
+      exit 1
+    }
   fi
 fi
 ```
 
 A divergent local branch is preserved. The workflow uses a dedicated local PR
 branch only when it points to the exact REST-declared head; otherwise it stops
-without moving either existing branch.
+without moving either existing branch. A refused checkout — most commonly the
+branch being held by another worktree — is a hard stop: continuing detached
+would let Step 1c force-push over a branch a concurrent agent has checked out.
 
 ### 1b. Detect Base Branch
 
