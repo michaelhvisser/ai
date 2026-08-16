@@ -1,7 +1,7 @@
 {
   "name": "slack-triage",
   "description": "Turn reaction-flagged Slack feedback into researched GitHub issues on a Projects v2 board",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Michael Visser",
     "email": "michael@threefold.solutions"

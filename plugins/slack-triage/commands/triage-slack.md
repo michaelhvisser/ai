@@ -77,6 +77,22 @@ Pick exactly one:
 - **Already fixed / duplicate** — do not file. Reply in the Slack thread with the
   commit, issue, or PR that covers it, then add the done reaction so it stops
   resurfacing.
+- **Needs clarification** — the report is coherent, but a scoping decision only
+  the reporter can make is missing (what a new thing should contain, which of
+  several behaviors they meant). Do not invent scope and do not file yet. Draft
+  a short, plain-language question that lays out the options, and show the
+  operator the exact text with AskUserQuestion — it posts publicly as the bot,
+  so the wording is theirs to approve. Then:
+
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" clarify \
+    --channel <channel-id> --ts <message-ts> --text "…"
+  ```
+
+  The trigger reaction stays on the message, so the next run re-surfaces it
+  with the reporter's answer already pulled in as thread context — research
+  once more, then file. A headless run has nobody to approve the wording:
+  leave the message unprocessed and say so in the report instead of posting.
 - **Cannot substantiate** — the code does not behave as described, or the report
   is too vague to scope. File with status `Blocked` and state the *exact* missing
   context. Never invent scope to make something fileable.
@@ -154,8 +170,8 @@ that, stop and report. The flags stay unprocessed and the next run picks them up
 ## Step 6 — Report
 
 One line per candidate: Slack author → classification → issue link, status,
-priority. Call out anything filed as `Blocked` and what it needs, and anything
-you deliberately did not file.
+priority. Call out anything filed as `Blocked` and what it needs, anything
+waiting on a clarification reply, and anything you deliberately did not file.
 
 If the repo runs a single-lane agent queue, say how many issues you just put in
 `Todo` and in what order they will run — that is the queue you committed.

@@ -191,8 +191,17 @@ The plumbing is usable on its own:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" fetch [--attachments-dir path]
+node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" clarify --channel C… --ts <ts> --text "question"
 node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" file --input draft.json [--dry-run] [--confirmed]
 ```
+
+`clarify` is for the report that is coherent but under-specified in a way only
+the reporter can settle: it replies in the flagged message's thread and files
+nothing. The trigger reaction stays, so the message re-surfaces on the next run
+with the answer sitting in the thread — which fetch already hands to research.
+The command asks the operator to approve the exact wording first (it posts
+publicly as the bot), and a headless run is told to skip it rather than post
+unapproved text.
 
 `fetch` emits one record per flagged message: `text`, `thread` (replies with
 `author`, `text`, `files`), and its own `files`. Each file record carries `id`,

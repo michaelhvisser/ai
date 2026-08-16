@@ -1190,9 +1190,13 @@ const USAGE = `Usage:
   slack-triage.mjs init --repo owner/name --project-id PVT_… --channel '#name'
   slack-triage.mjs refresh-board [--config path]
   slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14] [--attachments-dir path]
+  slack-triage.mjs clarify --channel C… --ts <message-ts> --text "question"
   slack-triage.mjs file --input draft.json [--dry-run] [--confirmed]
 
 Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).
+clarify replies in the flagged message's thread without filing or marking done —
+the trigger reaction stays, so the next run re-surfaces the message with the
+reporter's answer pulled in as thread context.
 fetch downloads message attachments (images, PDFs, text; needs files:read) under
 --attachments-dir, default <tmpdir>/slack-triage/<channel>/<ts>/, and reports each
 one's local path — or the reason it could not be fetched — on the message.`;
@@ -1222,6 +1226,37 @@ async function main() {
           : {}),
       });
       console.log(JSON.stringify(candidates, null, 2));
+      break;
+    }
+
+    case "clarify": {
+      const config = await loadConfig(options.config);
+      if (!options.channel || !options.ts || !options.text) {
+        throw new TriageError(
+          'clarify requires --channel <id or #name>, --ts <message-ts>, --text "question"',
+        );
+      }
+      if (!SLACK_TS.test(options.ts)) {
+        throw new TriageError(
+          "clarify --ts must be a Slack message timestamp (seconds.fraction)",
+        );
+      }
+      const token = await resolveSlackToken(config.slack.keychainService);
+      const channelId = await resolveChannelId(token, options.channel);
+      await slackApi(
+        token,
+        "chat.postMessage",
+        {
+          channel: channelId,
+          thread_ts: options.ts,
+          text: options.text,
+          unfurl_links: false,
+        },
+        "POST",
+      );
+      console.log(
+        "Asked in thread. The trigger reaction stays, so the next run picks the message up again with the reply as context.",
+      );
       break;
     }
 
