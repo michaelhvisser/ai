@@ -306,19 +306,22 @@ async function removeDefaultAttachments(channelId, ts) {
 }
 
 /**
- * Creates `directory` owner-only, one component at a time from `root` down,
+ * Creates `directory` owner-only, one component at a time below `base`,
  * checking each is a real directory this user owns before descending into it
  * — not a symlink or a directory somebody else planted under a predictable
  * name in a shared /tmp. `mkdir -p` would walk straight through either.
- * Refusing is the safe answer: the fetch still emits the message text and the
- * file's permalink.
+ * `base` must already exist and is not itself checked: on a shared host it is
+ * /tmp, world-writable and root-owned by design. Refusing is the safe answer:
+ * the fetch still emits the message text and the file's permalink.
  */
-async function ensurePrivateDirectory(root, directory) {
-  const relative = path.relative(root, directory);
-  const components = relative ? relative.split(path.sep) : [];
-  let current = root;
-  for (const component of ["", ...components]) {
-    current = component ? path.join(current, component) : current;
+async function ensurePrivateDirectory(base, directory) {
+  const relative = path.relative(base, directory);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new TriageError(`${directory} is not below ${base}`);
+  }
+  let current = base;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
     try {
       await mkdir(current, { mode: 0o700 });
     } catch (error) {
@@ -334,7 +337,22 @@ async function ensurePrivateDirectory(root, directory) {
   }
 }
 
-function createAttachmentFetcher(token, root, directory) {
+/** Nearest ancestor of `directory` that exists — the point a custom --attachments-dir walk starts from. */
+async function existingAncestor(directory) {
+  let current = path.resolve(directory);
+  for (;;) {
+    const parent = path.dirname(current);
+    try {
+      await lstat(parent);
+      return parent;
+    } catch {
+      if (parent === current) return parent;
+      current = parent;
+    }
+  }
+}
+
+function createAttachmentFetcher(token, base, directory) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
@@ -409,7 +427,7 @@ function createAttachmentFetcher(token, root, directory) {
         // screenshots of client-facing pages. `wx` creates exclusively, so a
         // link planted at the path beforehand fails the open rather than
         // being followed.
-        await ensurePrivateDirectory(root, directory);
+        await ensurePrivateDirectory(base, directory);
         const safeName = record.name.replace(/[^\w.-]+/g, "_");
         const filePath = path.join(directory, `${file.id}-${safeName}`);
         await pipeline(
@@ -435,6 +453,11 @@ async function fetchCandidates(config, overrides) {
   if (!settings.attachmentsDir) {
     await rm(attachmentsRoot, { recursive: true, force: true });
   }
+  // Where the owner-checked directory walk starts: the OS temp dir for the
+  // default location, or whatever already exists above a custom one.
+  const attachmentsBase = settings.attachmentsDir
+    ? await existingAncestor(attachmentsRoot)
+    : os.tmpdir();
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
   const messages = [];
@@ -467,7 +490,7 @@ async function fetchCandidates(config, overrides) {
     // and a re-run overwrites rather than accumulates.
     const fetchAttachments = createAttachmentFetcher(
       token,
-      attachmentsRoot,
+      attachmentsBase,
       path.join(attachmentsRoot, message.ts),
     );
 
