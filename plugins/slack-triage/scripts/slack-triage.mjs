@@ -475,7 +475,11 @@ async function sweepMessageDirectory(base, directory, expected) {
         // Not a running process — an abandoned transfer.
       }
     }
-    await rm(path.join(directory, entry), { force: true }).catch(() => {});
+    await rm(path.join(directory, entry), { force: true }).catch((error) =>
+      console.error(
+        `WARNING: could not remove orphan ${path.join(directory, entry)}: ${error.code ?? error.message}`,
+      ),
+    );
   }
 }
 
@@ -700,7 +704,11 @@ async function fetchCandidates(config, overrides) {
         await rm(path.join(attachmentsRoot, entry), {
           recursive: true,
           force: true,
-        }).catch(() => {});
+        }).catch((error) =>
+          console.error(
+            `WARNING: could not remove stale attachments ${path.join(attachmentsRoot, entry)}: ${error.code ?? error.message}`,
+          ),
+        );
       }
     }
   }
