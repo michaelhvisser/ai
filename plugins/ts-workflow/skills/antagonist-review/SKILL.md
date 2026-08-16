@@ -2,7 +2,6 @@
 name: antagonist-review
 description: "Cross-model adversarial review with quorum tie-breaks: a strong subagent finds defects, the local Codex CLI attacks every finding, a third model breaks ties, and a human settles only what the models genuinely cannot — then, on approval, Codex fixes the confirmed set and the loop re-reviews until clean. Use for high-stakes review of a PR, branch, or working tree. SKIP routine single-pass review; use review-deep."
 argument-hint: "[PR-number] [--base <ref>] [--max-fix-rounds <n>] [--effort low|medium|high|xhigh] [focus ...]"
-disable-model-invocation: true
 ---
 
 # Antagonist Review — cross-model adversarial review with quorum tie-breaks
