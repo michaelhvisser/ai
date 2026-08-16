@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -485,7 +485,7 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
       }
 
       let response;
-      let filePath;
+      let partPath;
       try {
         response = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
@@ -526,23 +526,22 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
         // link planted at the path beforehand fails the open rather than
         // being followed.
         await ensurePrivateDirectory(base, directory);
-        const safeName = `${file.id}-${record.name}`.replace(/[^\w.-]+/g, "_");
-        filePath = path.join(directory, safeName);
-        // A retained custom --attachments-dir legitimately still holds this
-        // file from an earlier run; replace our own regular file so the rerun
-        // gets a usable path again. Anything else at the path — a link, a
-        // directory, another owner — leaves the exclusive open to refuse it.
-        // (This has to happen before the pipeline: a failed open still
-        // destroys the response stream, which cannot be read twice.)
-        try {
-          const existing = await lstat(filePath);
-          const owned =
-            existing.isFile() &&
-            (typeof process.getuid !== "function" || existing.uid === process.getuid());
-          if (owned) await rm(filePath);
-        } catch {
-          // Nothing at the path — the common case.
-        }
+        // Sanitized to ASCII, then bounded: a Slack filename near the
+        // filesystem's 255-byte component limit would otherwise fail the
+        // open with ENAMETOOLONG once the file id is prefixed.
+        const sanitized = `${file.id}-${record.name}`.replace(/[^\w.-]+/g, "_");
+        const extension = path.extname(sanitized).slice(0, 16);
+        const safeName =
+          sanitized.length > 200
+            ? sanitized.slice(0, 200 - extension.length) + extension
+            : sanitized;
+        const filePath = path.join(directory, safeName);
+        // Streamed to a per-process part file, then renamed into place.
+        // The rename is atomic, so a retained file from an earlier run — or
+        // another fetch of the same channel running right now — is replaced
+        // whole, never observed half-written; and rename replaces a link at
+        // the destination rather than following it.
+        partPath = `${filePath}.part-${process.pid}`;
         // Slack's size metadata is advisory — absent, zero, or stale it
         // passes the preflight checks, so the caps are enforced on the bytes
         // actually delivered, aborting mid-stream rather than measuring a
@@ -560,8 +559,9 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
               yield chunk;
             }
           },
-          createWriteStream(filePath, { flags: "wx", mode: 0o600 }),
+          createWriteStream(partPath, { flags: "wx", mode: 0o600 }),
         );
+        await rename(partPath, filePath);
         budget.remaining -= written;
         records.push({ ...record, path: filePath });
       } catch (error) {
@@ -569,10 +569,10 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
         // holds its socket open and fetch never exits, exactly like the
         // sign-in branch above.
         await response?.body?.cancel().catch(() => {});
-        // A transfer that died mid-stream leaves a partial file that a later
-        // run's EEXIST retry would surface as if complete — and that consumed
-        // disk the budget never saw. Remove it.
-        if (filePath) await rm(filePath, { force: true }).catch(() => {});
+        // A transfer that died mid-stream leaves a part file that consumed
+        // disk the budget never saw. Remove it; the final path was never
+        // created.
+        if (partPath) await rm(partPath, { force: true }).catch(() => {});
         records.push({ ...record, error: `download failed: ${error.message}` });
       }
     }
