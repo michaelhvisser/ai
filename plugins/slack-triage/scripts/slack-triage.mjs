@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -376,45 +376,61 @@ async function ensurePrivateDirectory(base, directory) {
 }
 
 /**
- * Nearest ancestor of `directory` that exists — the point a custom
- * --attachments-dir walk starts from. The chain below the base is
- * link-checked, but the base itself is not, so it must not be a link either:
- * an attacker-planted symlink at /tmp/planted with --attachments-dir
- * /tmp/planted/run would otherwise become the trusted base and every write
- * would land wherever it points.
+ * Resolves a custom --attachments-dir to a trusted physical base plus the
+ * root to create under it. The operator's path is realpath-resolved once, up
+ * front, so any symlink in it is followed while it still means what the
+ * operator meant — repointing a link afterwards cannot move our writes,
+ * because only the resolved path is ever used again. Every component of the
+ * resolved chain, from the filesystem root down, must then be a directory
+ * owned by this uid or by root, and must either deny group/world writes or
+ * carry the sticky bit — the /tmp arrangement, where others can create
+ * siblings but cannot replace a root-owned directory's entries. Anything
+ * else lets another local account swap a component between our check and
+ * our open.
  */
-async function existingAncestor(directory) {
-  let current = path.resolve(directory);
+async function resolveAttachmentsBase(attachmentsRoot) {
+  let existing = path.resolve(attachmentsRoot);
   for (;;) {
-    const parent = path.dirname(current);
-    let stat;
     try {
-      stat = await lstat(parent);
+      await lstat(existing);
+      break;
     } catch {
-      if (parent === current) return parent;
-      current = parent;
-      continue;
+      const parent = path.dirname(existing);
+      if (parent === existing) break;
+      existing = parent;
     }
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new TriageError(
-        `${parent} is a link or not a directory — refusing it as the attachments base`,
-      );
+  }
+
+  const base = await realpath(existing);
+  const fsRoot = path.parse(base).root;
+  const components = path.relative(fsRoot, base).split(path.sep).filter(Boolean);
+  let current = fsRoot;
+  for (const component of ["", ...components]) {
+    current = component ? path.join(current, component) : current;
+    const stat = await lstat(current);
+    if (!stat.isDirectory()) {
+      throw new TriageError(`${current} is not a directory — refusing it as the attachments base`);
     }
-    // The base is excluded from the per-component ownership walk, so it must
-    // itself be trustworthy: ours, or root's (as /tmp is). A directory some
-    // other account owns can swap the child we create under it for a symlink
-    // between our check and our write, no matter what mode the child has.
     if (
       typeof process.getuid === "function" &&
       stat.uid !== process.getuid() &&
       stat.uid !== 0
     ) {
+      throw new TriageError(`${current} is owned by another user — refusing it as the attachments base`);
+    }
+    const otherWritable = (stat.mode & 0o022) !== 0;
+    const sticky = (stat.mode & 0o1000) !== 0;
+    if (otherWritable && !sticky) {
       throw new TriageError(
-        `${parent} is owned by another user — refusing it as the attachments base`,
+        `${current} is writable by other users and not sticky — refusing it as the attachments base`,
       );
     }
-    return parent;
   }
+
+  return {
+    base,
+    root: path.join(base, path.relative(existing, path.resolve(attachmentsRoot))),
+  };
 }
 
 function createAttachmentFetcher(token, base, directory, budget, disabledReason) {
@@ -510,8 +526,8 @@ function createAttachmentFetcher(token, base, directory, budget, disabledReason)
         // link planted at the path beforehand fails the open rather than
         // being followed.
         await ensurePrivateDirectory(base, directory);
-        const safeName = record.name.replace(/[^\w.-]+/g, "_");
-        filePath = path.join(directory, `${file.id}-${safeName}`);
+        const safeName = `${file.id}-${record.name}`.replace(/[^\w.-]+/g, "_");
+        filePath = path.join(directory, safeName);
         // A retained custom --attachments-dir legitimately still holds this
         // file from an earlier run; replace our own regular file so the rerun
         // gets a usable path again. Anything else at the path — a link, a
@@ -569,7 +585,7 @@ async function fetchCandidates(config, overrides) {
   const token = await resolveSlackToken(settings.keychainService);
   const channelId = await resolveChannelId(token, settings.channel);
   const resolveUser = createUserResolver(token);
-  const attachmentsRoot =
+  let attachmentsRoot =
     settings.attachmentsDir ?? defaultAttachmentsRoot(channelId);
   // Where the owner-checked directory walk starts: the OS temp dir for the
   // default location, or whatever already exists above a custom one. An
@@ -581,7 +597,8 @@ async function fetchCandidates(config, overrides) {
   let attachmentsDisabled = null;
   try {
     if (settings.attachmentsDir) {
-      attachmentsBase = await existingAncestor(attachmentsRoot);
+      ({ base: attachmentsBase, root: attachmentsRoot } =
+        await resolveAttachmentsBase(attachmentsRoot));
     } else if (await verifyOwnedChain(attachmentsBase, attachmentsRoot)) {
       await rm(attachmentsRoot, { recursive: true, force: true });
     }
