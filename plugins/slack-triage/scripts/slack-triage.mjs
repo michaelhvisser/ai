@@ -368,27 +368,52 @@ async function ensurePrivateDirectory(base, directory) {
   }
 }
 
-/** Nearest ancestor of `directory` that exists — the point a custom --attachments-dir walk starts from. */
+/**
+ * Nearest ancestor of `directory` that exists — the point a custom
+ * --attachments-dir walk starts from. The chain below the base is
+ * link-checked, but the base itself is not, so it must not be a link either:
+ * an attacker-planted symlink at /tmp/planted with --attachments-dir
+ * /tmp/planted/run would otherwise become the trusted base and every write
+ * would land wherever it points.
+ */
 async function existingAncestor(directory) {
   let current = path.resolve(directory);
   for (;;) {
     const parent = path.dirname(current);
+    let stat;
     try {
-      await lstat(parent);
-      return parent;
+      stat = await lstat(parent);
     } catch {
       if (parent === current) return parent;
       current = parent;
+      continue;
     }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TriageError(
+        `${parent} is a link or not a directory — refusing it as the attachments base`,
+      );
+    }
+    return parent;
   }
 }
 
-function createAttachmentFetcher(token, base, directory, budget) {
+function createAttachmentFetcher(token, base, directory, budget, disabledReason) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
     const files = message.files ?? [];
     if (files.length === 0) return [];
+
+    if (disabledReason) {
+      return files.map((file) => ({
+        id: file.id,
+        name: file.name ?? file.title ?? file.id,
+        mimetype: file.mimetype ?? "unknown",
+        size: file.size ?? null,
+        permalink: file.permalink ?? null,
+        error: `not downloaded (${disabledReason})`,
+      }));
+    }
 
     // One at a time, streamed to disk: a thread can carry a hundred replies
     // and every one may hold a screenshot, so downloading them all at once and
@@ -511,14 +536,28 @@ async function fetchCandidates(config, overrides) {
   const resolveUser = createUserResolver(token);
   const attachmentsRoot =
     settings.attachmentsDir ?? defaultAttachmentsRoot(channelId);
-  if (!settings.attachmentsDir && (await verifyOwnedChain(os.tmpdir(), attachmentsRoot))) {
-    await rm(attachmentsRoot, { recursive: true, force: true });
-  }
   // Where the owner-checked directory walk starts: the OS temp dir for the
-  // default location, or whatever already exists above a custom one.
-  const attachmentsBase = settings.attachmentsDir
-    ? await existingAncestor(attachmentsRoot)
-    : os.tmpdir();
+  // default location, or whatever already exists above a custom one. An
+  // unsafe root — say, /tmp/slack-triage planted by another account before
+  // the first run — disables downloads for this run rather than aborting it:
+  // the message text is still worth fetching, and every file is listed with
+  // its permalink and the reason.
+  let attachmentsBase = os.tmpdir();
+  let attachmentsDisabled = null;
+  try {
+    if (settings.attachmentsDir) {
+      attachmentsBase = await existingAncestor(attachmentsRoot);
+    } else if (await verifyOwnedChain(attachmentsBase, attachmentsRoot)) {
+      await rm(attachmentsRoot, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (!(error instanceof TriageError)) throw error;
+    attachmentsDisabled = error.message;
+    console.error(
+      `WARNING: attachment downloads disabled for this run: ${error.message}\n` +
+        "Messages are still fetched; attachments are listed by permalink only.",
+    );
+  }
   const attachmentBudget = { remaining: MAX_RUN_ATTACHMENT_BYTES };
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
@@ -555,6 +594,7 @@ async function fetchCandidates(config, overrides) {
       attachmentsBase,
       path.join(attachmentsRoot, message.ts),
       attachmentBudget,
+      attachmentsDisabled,
     );
 
     // Feedback is usually argued out in the thread, so the replies are often
