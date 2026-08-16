@@ -1,7 +1,7 @@
 {
   "name": "ts-workflow",
   "description": "Issue-to-PR workflow automation with git worktree management for TypeScript/JavaScript projects",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": {
     "name": "Michael Visser",
     "email": "michael@threefold.solutions"

@@ -2,7 +2,6 @@
 name: codex-ship
 description: "Drive a PR to merge-readiness with the Codex GitHub connector: consume existing Codex feedback, judge every finding (real vs. slop) with a strong model, corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value. Use to harden a PR against Codex review before merging. SKIP one-off review-comment cleanup with no loop intent; use address-review."
 argument-hint: "[PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]"
-disable-model-invocation: true
 ---
 
 # Codex Ship — triage-gated Codex↔fix loop
