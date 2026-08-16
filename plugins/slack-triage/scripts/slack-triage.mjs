@@ -269,6 +269,10 @@ function hasReaction(message, emoji) {
 // — "the page pictured below" is meaningless without them.
 const DOWNLOADABLE_MIMETYPES = /^(image\/|application\/pdf$|text\/)/;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// Aggregate cap for one fetch run, across every message. Enough for dozens of
+// screenshots; a run that hits it keeps listing files by permalink instead of
+// filling a small tmpfs before any candidate is emitted.
+const MAX_RUN_ATTACHMENT_BYTES = 200 * 1024 * 1024;
 
 /**
  * Where fetch puts a channel's attachments unless --attachments-dir says
@@ -352,7 +356,7 @@ async function existingAncestor(directory) {
   }
 }
 
-function createAttachmentFetcher(token, base, directory) {
+function createAttachmentFetcher(token, base, directory, budget) {
   let scopeWarned = false;
 
   return async function fetchAttachments(message) {
@@ -387,9 +391,14 @@ function createAttachmentFetcher(token, base, directory) {
         records.push({ ...record, error: "not downloaded (over 20 MB)" });
         continue;
       }
+      if ((record.size ?? MAX_ATTACHMENT_BYTES) > budget.remaining) {
+        records.push({ ...record, error: "not downloaded (run attachment budget exhausted)" });
+        continue;
+      }
 
+      let response;
       try {
-        const response = await fetch(url, {
+        response = await fetch(url, {
           headers: { Authorization: `Bearer ${token}` },
         });
         const contentType = response.headers.get("content-type") ?? "";
@@ -434,8 +443,13 @@ function createAttachmentFetcher(token, base, directory) {
           Readable.fromWeb(response.body),
           createWriteStream(filePath, { flags: "wx", mode: 0o600 }),
         );
+        budget.remaining -= (await lstat(filePath)).size;
         records.push({ ...record, path: filePath });
       } catch (error) {
+        // A body left unconsumed here — say, the directory check refused —
+        // holds its socket open and fetch never exits, exactly like the
+        // sign-in branch above.
+        await response?.body?.cancel().catch(() => {});
         records.push({ ...record, error: `download failed: ${error.message}` });
       }
     }
@@ -458,6 +472,7 @@ async function fetchCandidates(config, overrides) {
   const attachmentsBase = settings.attachmentsDir
     ? await existingAncestor(attachmentsRoot)
     : os.tmpdir();
+  const attachmentBudget = { remaining: MAX_RUN_ATTACHMENT_BYTES };
   const oldest = Math.floor(Date.now() / 1000) - settings.lookbackDays * 86_400;
 
   const messages = [];
@@ -492,6 +507,7 @@ async function fetchCandidates(config, overrides) {
       token,
       attachmentsBase,
       path.join(attachmentsRoot, message.ts),
+      attachmentBudget,
     );
 
     // Feedback is usually argued out in the thread, so the replies are often
