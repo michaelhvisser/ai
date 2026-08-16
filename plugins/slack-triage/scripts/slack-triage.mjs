@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -599,8 +599,8 @@ async function fetchCandidates(config, overrides) {
     if (settings.attachmentsDir) {
       ({ base: attachmentsBase, root: attachmentsRoot } =
         await resolveAttachmentsBase(attachmentsRoot));
-    } else if (await verifyOwnedChain(attachmentsBase, attachmentsRoot)) {
-      await rm(attachmentsRoot, { recursive: true, force: true });
+    } else {
+      await verifyOwnedChain(attachmentsBase, attachmentsRoot);
     }
   } catch (error) {
     if (!(error instanceof TriageError)) throw error;
@@ -626,11 +626,40 @@ async function fetchCandidates(config, overrides) {
     cursor = page.response_metadata?.next_cursor || undefined;
   } while (cursor);
 
-  const flagged = messages.filter(
-    (message) =>
-      hasReaction(message, settings.triggerEmoji) &&
-      !hasReaction(message, settings.doneEmoji),
-  );
+  const flagged = messages
+    .filter(
+      (message) =>
+        hasReaction(message, settings.triggerEmoji) &&
+        !hasReaction(message, settings.doneEmoji),
+    )
+    // Oldest first before anything downloads: candidates are emitted oldest
+    // first and the operator is told to finish them in that order, so the run
+    // budget has to be spent in the same order — Slack hands history back
+    // newest first, which would starve exactly the message triage does first.
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+
+  // Retention sweep, now that the live set is known: in the default location,
+  // remove only message directories that no current candidate owns. Clearing
+  // the whole root here would pull attachment paths out from under a
+  // concurrent run (a scheduled fetch overlapping a manual one) that emitted
+  // them moments ago.
+  if (!settings.attachmentsDir && !attachmentsDisabled) {
+    const live = new Set(flagged.map((message) => message.ts));
+    let entries = [];
+    try {
+      entries = await readdir(attachmentsRoot);
+    } catch {
+      // Root does not exist yet — nothing to sweep.
+    }
+    for (const entry of entries) {
+      if (!live.has(entry)) {
+        await rm(path.join(attachmentsRoot, entry), {
+          recursive: true,
+          force: true,
+        }).catch(() => {});
+      }
+    }
+  }
 
   const candidates = [];
   for (const message of flagged) {
@@ -689,9 +718,8 @@ async function fetchCandidates(config, overrides) {
     });
   }
 
-  // Oldest first, so a run that files several issues queues them in the order
-  // the requests actually arrived.
-  candidates.sort((a, b) => Number(a.ts) - Number(b.ts));
+  // Already oldest first — flagged was sorted before the downloads so the
+  // attachment budget is spent in emission order.
   return candidates;
 }
 
