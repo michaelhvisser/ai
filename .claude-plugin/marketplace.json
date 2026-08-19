@@ -13,7 +13,7 @@
       "name": "ts-workflow",
       "source": "./plugins/ts-workflow",
       "description": "Issue-to-PR workflow automation with worktree management for TypeScript/JavaScript projects",
-      "version": "0.2.4",
+      "version": "0.2.7",
       "keywords": [
         "workflow",
         "github",
