@@ -19,6 +19,11 @@ cross-platform capability-binding rules.
 Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving any workflow
 choice.
 
+Read `${CLAUDE_PLUGIN_ROOT}/lib/finding-bar.md` before any triage: it is the shared bar
+every finding is held to across this plugin's review skills, and the judge and
+second-opinion prompts must carry its full text (paste it — subagents can't resolve the
+plugin path).
+
 Load the shared GitHub REST helpers before any GitHub operation:
 
 ```bash
@@ -102,7 +107,13 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
    gh pr view $PR_NUM --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
    ```
    Store the first as `ISSUE_NUM` (may be empty — that's fine, just note it).
-3. **Resolve the repo's check commands** so we don't burn Codex rounds on lint noise:
+3. **Known non-findings & prior review state:** locate the repo's AGENTS.md/CLAUDE.md and
+   collect any "Not a finding" / accepted-behavior notes, plus any antagonist-review ledger
+   for this PR that is still on disk. These are prior dismissals the judge must honor
+   (finding-bar.md: the same ghost never costs the human twice) — a Codex finding matching
+   one is dismissed with a pointer, not re-litigated, unless the diff changed the facts the
+   dismissal rests on.
+4. **Resolve the repo's check commands** so we don't burn Codex rounds on lint noise:
    ```bash
    source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
    pm_detect
@@ -111,7 +122,7 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
    `$PM run typecheck` if `has_script typecheck`, `$PM run test` if `has_script test`.
    If there is no `package.json`, fall back to `Makefile` targets `lint`/`test`; if neither
    exists, ask the user for the repo's check commands — never guess.
-4. **Local courtesy green:** run `LOCAL_CHECKS`. Fix trivial lint locally (≤5 attempts) and
+5. **Local courtesy green:** run `LOCAL_CHECKS`. Fix trivial lint locally (≤5 attempts) and
    commit+push if needed. Don't chase deep test failures here — that's what the loop is for.
 
 Print: `=== PHASE 0 COMPLETE: preflight clean, checks: <LOCAL_CHECKS>, issue #$ISSUE_NUM ===`
@@ -265,13 +276,26 @@ and look before you re-post or escalate.
 
 ### Step C — Judge (strong model)
 
-Hand the findings + the PR diff + the current ledger to the **Judge** role. For each finding,
+Hand the findings + the PR diff + the current ledger + the **full text of
+`finding-bar.md`** + the Phase 0 known non-findings to the **Judge** role. For each finding,
 return a verdict and a one-line reason:
 
-- `real` — a genuine defect in this diff, in scope, worth fixing.
-- `wrong` — Codex is mistaken (misread the code, false positive).
-- `redundant` — already handled elsewhere in the diff, or a duplicate of a prior finding.
-- `out-of-scope` — real but belongs to a separate issue/PR, not this one.
+- `real` — a genuine defect that clears the finding bar's four points: introduced by this
+  diff, fixable in this PR, survives self-refutation against the actual code, and has a
+  concrete traced failure. Anything on the never-findings list is never `real`.
+- `wrong` — Codex is mistaken (misread the code, false positive), or the finding fails the
+  bar (theoretical, untraced, never-finding class).
+- `redundant` — already handled elsewhere in the diff, a duplicate of a prior finding, or a
+  match to a known non-finding / prior dismissal (dismiss with the pointer).
+- `out-of-scope` — pre-existing on the base branch, or not fixable inside this PR's blast
+  radius. Dismissed on GitHub with that reason (Step E) — never converted into a proposed
+  issue or follow-up.
+
+Two bar rules bind the judge mechanically: a **mechanically-checkable** claim (types, unused
+symbols, null flow, lint) is verdicted by running the relevant tool on the changed files,
+not by reasoning — uncorroborated → `wrong`, corroborated → `real` with no second opinion
+needed; and a claim that something is **missing** requires the judge to verify present state
+before `real`.
 
 Give the judge the ledger so it can spot **re-raised findings**: if Codex re-raises something a
 prior round dismissed *with a recorded reason*, that's a genuine disagreement — flag it, don't
@@ -337,8 +361,11 @@ uncommitted-and-unexplained.
 Tie-break rules:
 - Judge `real` + juror AGREE → **confirmed-real** (fix it).
 - Judge `wrong/redundant/oos` + juror DISAGREE → **confirmed-dismiss** (record reason).
-- **Split** (judge and juror disagree) → treat as real *only* for correctness/security findings;
-  otherwise record as ambiguous and surface at the checkpoint. Never let a split silently drop.
+- **Split** (judge and juror disagree) → treat as real *only* for a correctness/security
+  finding **with a concretely traced failure path** — per finding-bar.md the class label
+  alone elevates nothing, and where a repro is cheap (a failing test, a script), run it and
+  let it settle the split. Otherwise record as ambiguous and surface at the checkpoint.
+  Never let a split silently drop.
 
 Record every finding's `{verdict, second_opinion, decision, reason}` in the ledger.
 

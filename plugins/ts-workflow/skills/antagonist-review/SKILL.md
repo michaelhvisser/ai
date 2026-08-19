@@ -162,42 +162,20 @@ finders over a tiny diff manufacture noise. The full set is for substantial chan
 
 If the user gave focus text, every lens weights it heavily.
 
-Every lens carries the same **bar for entry** — a finding must clear ALL four before it is
-reported, and a lens returning zero findings is a successful outcome, not a failed one; there
-is no quota and no obligation to justify the dispatch:
+Every lens holds every candidate to the shared **finding bar**: read
+`${CLAUDE_PLUGIN_ROOT}/lib/finding-bar.md` and embed its full text in every finder prompt
+(subagents can't resolve the plugin path — paste the content). It defines the four-point bar
+for entry (introduced here, fixable here, self-refuted, traced), the named never-findings
+taxonomy, the mechanically-checkable-claims-defer-to-tools rule, burden of proof, and known
+non-findings. `codex-ship` judges by the same file, so a dismissal here holds at the next
+gate too. Skill-specific wiring on top of it:
 
-1. **Introduced here.** The defect is created or materially worsened by this diff. A defect
-   that already exists on the base branch is not a finding, no matter how real — it enters
-   the ledger only as `status: dismissed, reason: "pre-existing"`, on sight, with no debate.
-2. **Fixable here.** The minimal correct fix lands inside this PR's blast radius. If fixing
-   it means changing a shared component other surfaces depend on, migrating persisted data,
-   or redesigning something the PR merely touches, it is repo-level work, not a finding.
-3. **Self-refuted first.** Before reporting, the lens tries to kill its own finding: read the
-   implicated code as it actually exists (not just the hunk) — upstream guards, validators,
-   sanitizers, callers, tests. If the claim is cheaply checkable (a normalizer, a regex, a
-   validator, state that may already be live), **check it** rather than speculate; and a
-   claim that something is *missing* requires verifying present state, not pattern-matching
-   its absence from the hunk.
-4. **Traced.** A concrete failure scenario: specific input or state → specific wrong outcome,
-   at file:line. "Could be a problem if…" without the trace does not enter the ledger.
-
-**Never-findings** — these shapes are excluded by name, regardless of any score (adapted from
-Anthropic's security-review filtering criteria; models apply a named taxonomy far more
-reliably than a principle):
-
-- DoS, resource exhaustion, or missing rate limiting
-- Missing input validation on non-security-critical fields without a demonstrated consequence
-- Theoretical attacks with no traced reachable path
-- Pedantic style/naming/structure nits; general quality opinions the repo's guidelines don't demand
-- Code under an explicit lint-ignore/suppression comment
-- Anything the repo's own gate (linter, compiler, tests) will catch on its own
-
-**Mechanically-checkable claims defer to the tools.** A finding in a class the toolchain
-decides (type errors, unused symbols, null flow, lint rules) must be corroborated by actually
-running the relevant tool on the changed files — the compiler's verdict outranks model
-reasoning in **both** directions: uncorroborated, the finding is dropped; corroborated, it
-skips the debate and goes straight to `confirmed`. Where a deterministic checker exists for a
-claim class (e.g. semgrep for injection patterns), prefer running it over arguing.
+- A lens returning zero findings is a successful outcome, not a failed one; there is no
+  quota and no obligation to justify the dispatch.
+- Bar-item-1 failures enter the ledger only as `status: dismissed, reason: "pre-existing"`,
+  on sight, with no debate.
+- A tool-corroborated mechanically-checkable finding skips the debate and goes straight to
+  `confirmed`.
 
 Then score survivors with the confidence rubric (0 = false positive under light scrutiny;
 25 = unverified maybe; 50 = real but minor/rare; 75 = verified, likely hit in practice;
