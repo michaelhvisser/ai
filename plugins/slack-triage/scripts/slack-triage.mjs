@@ -32,8 +32,12 @@ const execFileAsync = promisify(execFile);
 const CONFIG_FILENAME = "slack-triage.json";
 
 const DEFAULTS = {
-  triggerEmoji: "ticket",
-  doneEmoji: "white_check_mark",
+  // null: no trigger reaction — every human message in the channel is a
+  // candidate until it carries the done marker.
+  triggerEmoji: null,
+  // Not :white_check_mark: — people tick that reflexively, and a message that
+  // carries the done marker is dropped without a word.
+  doneEmoji: "inbox_tray",
   lookbackDays: 14,
   keychainService: "slack-triage",
   // Only states a triage run may file into. `Todo` dispatches the agent;
@@ -259,6 +263,29 @@ function createUserResolver(token) {
 
 function hasReaction(message, emoji) {
   return (message.reactions ?? []).some((reaction) => reaction.name === emoji);
+}
+
+// Subtypes that are still a person talking in the channel. Everything else —
+// joins, pins, bot posts, the notifier's own messages, this tool's replies —
+// is channel plumbing, never a report.
+const HUMAN_SUBTYPES = new Set([undefined, "file_share", "thread_broadcast"]);
+
+function isHumanMessage(message) {
+  return (
+    HUMAN_SUBTYPES.has(message.subtype) &&
+    !message.bot_id &&
+    typeof message.user === "string" &&
+    (message.text ?? "").trim().length > 0
+  );
+}
+
+// With a trigger configured, a message is a candidate once someone reacts
+// with it; without one, every human message is a candidate. Either way the
+// done marker is what retires it.
+function isCandidate(message, settings) {
+  if (!isHumanMessage(message)) return false;
+  if (hasReaction(message, settings.doneEmoji)) return false;
+  return !settings.triggerEmoji || hasReaction(message, settings.triggerEmoji);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -673,11 +700,7 @@ async function fetchCandidates(config, overrides) {
   } while (cursor);
 
   const flagged = messages
-    .filter(
-      (message) =>
-        hasReaction(message, settings.triggerEmoji) &&
-        !hasReaction(message, settings.doneEmoji),
-    )
+    .filter((message) => isCandidate(message, settings))
     // Oldest first before anything downloads: candidates are emitted oldest
     // first and the operator is told to finish them in that order, so the run
     // budget has to be spent in the same order — Slack hands history back
@@ -775,11 +798,13 @@ async function fetchCandidates(config, overrides) {
       });
     }
 
-    const reactors = await Promise.all(
-      (message.reactions ?? [])
-        .find((reaction) => reaction.name === settings.triggerEmoji)
-        .users.map(resolveUser),
-    );
+    // Who nominated it — empty when the channel itself is the intake.
+    const trigger = settings.triggerEmoji
+      ? (message.reactions ?? []).find(
+          (reaction) => reaction.name === settings.triggerEmoji,
+        )
+      : undefined;
+    const reactors = await Promise.all((trigger?.users ?? []).map(resolveUser));
 
     candidates.push({
       repository: config.repository,
@@ -1191,12 +1216,16 @@ const USAGE = `Usage:
   slack-triage.mjs refresh-board [--config path]
   slack-triage.mjs fetch [--channel #name] [--emoji ticket] [--days 14] [--attachments-dir path]
   slack-triage.mjs clarify --channel C… --ts <message-ts> --text "question"
+  slack-triage.mjs dismiss --channel C… --ts <message-ts> [--text "reason"]
   slack-triage.mjs file --input draft.json [--dry-run] [--confirmed]
 
 Reads ${CONFIG_FILENAME} from the repo root (or any parent of the cwd).
-clarify replies in the flagged message's thread without filing or marking done —
-the trigger reaction stays, so the next run re-surfaces the message with the
-reporter's answer pulled in as thread context.
+fetch lists every human message in the channel that does not yet carry the done
+reaction (or, when slack.triggerEmoji is set, only those also flagged with it).
+clarify replies in a message's thread without filing or marking done, so the
+next run re-surfaces it with the reporter's answer pulled in as thread context.
+dismiss marks a message done without filing — for chatter, duplicates, and
+anything already fixed — optionally saying why in the thread.
 fetch downloads message attachments (images, PDFs, text; needs files:read) under
 --attachments-dir, default <tmpdir>/slack-triage/<channel>/<ts>/, and reports each
 one's local path — or the reason it could not be fetched — on the message.`;
@@ -1255,7 +1284,46 @@ async function main() {
         "POST",
       );
       console.log(
-        "Asked in thread. The trigger reaction stays, so the next run picks the message up again with the reply as context.",
+        "Asked in thread. The message is not marked done, so the next run picks it up again with the reply as context.",
+      );
+      break;
+    }
+
+    case "dismiss": {
+      const config = await loadConfig(options.config);
+      if (!options.channel || !options.ts) {
+        throw new TriageError(
+          'dismiss requires --channel <id or #name> and --ts <message-ts>; --text "reason" is optional',
+        );
+      }
+      if (!SLACK_TS.test(options.ts)) {
+        throw new TriageError(
+          "dismiss --ts must be a Slack message timestamp (seconds.fraction)",
+        );
+      }
+      const token = await resolveSlackToken(config.slack.keychainService);
+      const channelId = await resolveChannelId(token, options.channel);
+      if (options.text) {
+        await slackApi(
+          token,
+          "chat.postMessage",
+          {
+            channel: channelId,
+            thread_ts: options.ts,
+            text: options.text,
+            unfurl_links: false,
+          },
+          "POST",
+        );
+      }
+      await slackApi(
+        token,
+        "reactions.add",
+        { channel: channelId, timestamp: options.ts, name: config.slack.doneEmoji },
+        "POST",
+      );
+      console.log(
+        `Marked :${config.slack.doneEmoji}:${options.text ? " and replied in thread" : ""}. The message will not resurface.`,
       );
       break;
     }

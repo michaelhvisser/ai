@@ -1,6 +1,6 @@
 ---
 argument-hint: "[--channel #name] [--days 14] [--dry-run]"
-description: "Turn reaction-flagged Slack feedback into researched GitHub issues on the project board"
+description: "Turn Slack channel feedback into researched GitHub issues on the project board"
 allowed-tools: ["Bash(*slack-triage.mjs*)", "Bash(git:*)", "Bash(gh:*)", "Read", "Grep", "Glob", "Write", "Agent", "AskUserQuestion"]
 ---
 
@@ -10,11 +10,23 @@ Pass through any `--channel` / `--days` / `--dry-run` arguments given: $ARGUMENT
 
 ## What you are doing
 
-A teammate reacted to a Slack message with the trigger emoji. That reaction
-nominates the report: it is authorization to *investigate*, never a claim that
-the report is accurate — and never, by itself, the decision that hands work to
-an agent. Anyone in the channel can react; only the operator running this
-command can approve a filing that dispatches (step 5). Two keys, both human.
+The channel is the intake. Every human message posted there that does not yet
+carry the done reaction is a candidate — no one has to flag it. Posting in the
+channel is authorization to *investigate*, never a claim that the report is
+accurate, and never, by itself, the decision that hands work to an agent: only
+the operator running this command can approve a filing that dispatches (step
+5). (If the repo's config sets `slack.triggerEmoji`, only messages also carrying
+that reaction are candidates; the rest of this command is unchanged.)
+
+Because nothing pre-filters the channel, part of the job is deciding what is a
+report at all. Status updates, thanks, scheduling, and conversation about an
+issue that is already filed are not — retire them with `dismiss` (step 3) so
+they stop resurfacing, and spend the research on what remains.
+
+Every candidate ends the run in exactly one of three places: filed (done
+reaction added by `file`), dismissed (done reaction added by `dismiss`), or
+waiting on a clarification reply (no reaction; it comes back next run). A
+candidate left in none of these is unfinished work.
 
 Your job is to establish whether the report survives contact with the code, and
 to file an issue good enough that a coding agent can act on it without a human
@@ -74,9 +86,25 @@ Pick exactly one:
 
 - **Substantiated** — you can point at the code or data that makes it true. File it.
 - **Feature request** — coherent and well-scoped, no defect. File it.
-- **Already fixed / duplicate** — do not file. Reply in the Slack thread with the
-  commit, issue, or PR that covers it, then add the done reaction so it stops
-  resurfacing.
+- **Already fixed / duplicate** — do not file. Retire it with the commit, issue,
+  or PR that covers it:
+
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" dismiss \
+    --channel <channel-id> --ts <message-ts> --text "Already covered by #123."
+  ```
+- **Not a report** — chatter, acknowledgements, scheduling, a follow-up inside
+  a conversation whose original request is already filed or dismissed. Retire
+  it silently so it never comes back:
+
+  ```bash
+  node "${CLAUDE_PLUGIN_ROOT}/scripts/slack-triage.mjs" dismiss \
+    --channel <channel-id> --ts <message-ts>
+  ```
+
+  Do not post a reply for these — a bot answering every "thanks!" in the
+  channel is noise. When in doubt between this and *Needs clarification*, ask:
+  a question costs one reply, a silent dismissal loses the request.
 - **Needs clarification** — the report is coherent, but a scoping decision only
   the reporter can make is missing (what a new thing should contain, which of
   several behaviors they meant). Do not invent scope and do not file yet. Draft
@@ -89,7 +117,7 @@ Pick exactly one:
     --channel <channel-id> --ts <message-ts> --text "…"
   ```
 
-  The trigger reaction stays on the message, so the next run re-surfaces it
+  The message is left unmarked, so the next run re-surfaces it
   with the reporter's answer already pulled in as thread context — research
   once more, then file. A headless run has nobody to approve the wording:
   leave the message unprocessed and say so in the report instead of posting.
@@ -165,12 +193,13 @@ yours to grant:
 The script creates the issue, places it on the board, sets Status and Priority,
 adds the done reaction, and replies in the Slack thread with the issue link. It
 refuses to run when the shared GraphQL quota is below its reserve — if you hit
-that, stop and report. The flags stay unprocessed and the next run picks them up.
+that, stop and report. The candidates stay unprocessed and the next run picks them up.
 
 ## Step 6 — Report
 
 One line per candidate: Slack author → classification → issue link, status,
-priority. Call out anything filed as `Blocked` and what it needs, anything
+priority (or "dismissed" / "asked"). Group dismissed non-reports into a single
+count rather than a line each. Call out anything filed as `Blocked` and what it needs, anything
 waiting on a clarification reply, and anything you deliberately did not file.
 
 If the repo runs a single-lane agent queue, say how many issues you just put in

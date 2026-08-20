@@ -1,7 +1,10 @@
 # slack-triage
 
-React to a Slack message with :ticket:, and it becomes a researched GitHub issue
-on the repo's Projects v2 board — ready for an agent to pick up.
+Post feedback in the repo's Slack channel, and the next triage run researches it
+and drafts a GitHub issue on the repo's Projects v2 board — ready for an agent to
+pick up. The channel is the intake; a done reaction (:inbox_tray: or whatever
+the repo configures) is the only state, added once the message has been filed,
+dismissed as not-a-report, or answered as already covered.
 
 One Slack app and one bot token serve every repo. Onboarding repo number two is
 a config file.
@@ -63,9 +66,14 @@ never approved, treat it as an incident — pull it back on the board and read
 that transcript. The enforceable containment for adversarial Slack content
 remains running triage attended, and auditing what a run filed.
 
-Pick a trigger emoji nobody uses conversationally. `:ticket:` is safe; `:eyes:`
-and `:+1:` are not — people react with those by reflex, and every one would
-queue an agent.
+By default there is no trigger emoji: every human message in the channel is a
+candidate until it carries the done marker, and the command is told to `dismiss`
+what is not a report. If you would rather gate on a reaction, set
+`slack.triggerEmoji` — pick one nobody uses conversationally (`:ticket:` is
+safe; `:eyes:` and `:+1:` are not, people react with those by reflex). Either
+way, pick a **done** emoji nobody uses conversationally: a message that carries
+it is dropped without a word, so a teammate ticking ✅ to mean "seen" would
+silently delete the request.
 
 ## One-time Slack app setup
 
@@ -130,8 +138,8 @@ Find the project ID with `gh project list --owner <org> --format json`.
   "repository": "owner/name",
   "slack": {
     "channel": "#feedback",
-    "triggerEmoji": "ticket",
-    "doneEmoji": "white_check_mark",
+    "triggerEmoji": null,
+    "doneEmoji": "inbox_tray",
     "lookbackDays": 14,
     "keychainService": "slack-triage"
   },

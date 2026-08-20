@@ -45,8 +45,8 @@
     {
       "name": "slack-triage",
       "source": "./plugins/slack-triage",
-      "description": "Turn reaction-flagged Slack feedback into researched GitHub issues on a Projects v2 board",
-      "version": "0.4.0",
+      "description": "Turn Slack channel feedback into researched GitHub issues on a Projects v2 board",
+      "version": "0.5.0",
       "keywords": [
         "slack",
         "github",
