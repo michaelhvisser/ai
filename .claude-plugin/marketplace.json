@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "AI coding assistant plugins for shipping software — language-agnostic review and PR workflows, TypeScript/JavaScript issue-to-PR automation, and Slack-to-GitHub triage. By Michael Visser.",
-    "version": "0.4.0"
+    "version": "0.4.1"
   },
   "plugins": [
     {
       "name": "workflow",
       "source": "./plugins/workflow",
       "description": "Language-agnostic PR and review workflow skills — read-only PR situation reports, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "keywords": [
         "workflow",
         "github",

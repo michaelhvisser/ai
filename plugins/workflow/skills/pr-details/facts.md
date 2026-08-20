@@ -109,13 +109,18 @@ objects must exist locally before Phase 3, and a fork head is frequently absent:
 
 ```bash
 BASE_TIP=$(git ls-remote origin "refs/heads/$BASE" | cut -f1)
-git fetch --no-tags --quiet origin "+refs/heads/$BASE:refs/pr-details/base-$PR_NUM"
+git fetch --no-tags --quiet origin "+refs/heads/${BASE}:refs/pr-details/base-${PR_NUM}"
 git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
   || git fetch --no-tags --quiet origin "+refs/pull/$PR_NUM/head:refs/pr-details/head-$PR_NUM"
 git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null \
   || { echo "pr-details: head object $HEAD_SHA unavailable" >&2; FACTS_INCOMPLETE=1; }
 MERGE_BASE=$(git merge-base "$BASE_TIP" "$HEAD_SHA") || FACTS_INCOMPLETE=1
 ```
+
+**Brace every variable that is followed by a colon** — `${BASE}:refs/…`, `${BASE_TIP}:path`,
+`${HEAD_REPO}:${HEAD_REF}`. Under zsh, `$BASE:r` is the history modifier *remove extension* and
+`$BASE_TIP:A` is *absolute path*; an unbraced `"$BASE:refs/…"` silently becomes `devefs/…` and
+the fetch fails. Observed on the first live run of this skill.
 
 `refs/pull/<N>/head` is the reliable route to a fork head. The fetch writes only into
 `refs/pr-details/*` — a namespace this skill owns — and touches no branch, no index, and no
@@ -414,7 +419,7 @@ after 10s, then set `FACTS_INCOMPLETE`. Behind-count:
 pr_facts_compare "$HOST" "$SLUG" "$BASE" "$HEAD_SHA"     # {status, ahead_by, behind_by}
 ```
 
-For a fork, the head side is `$HEAD_REPO:$HEAD_REF`. **`behind_by > 0` under a strict ruleset
+For a fork, the head side is `${HEAD_REPO}:${HEAD_REF}`. **`behind_by > 0` under a strict ruleset
 is *rebase required*, not advisory** — the server refuses the merge regardless of CI.
 
 ### §2e Local state
@@ -449,7 +454,7 @@ GitHub first (durable), disk second (session-local).
 | `address-review` | thread replies and resolutions by the user after bot comments | `<repo>/.local/state/address-review-$PR_NUM.loop.local.json` |
 | `e2e-verify` | `e2e-verified` label; a `## E2E Verification Results` comment | `<repo>/.local/state/e2e-verify-$PR_NUM.loop.local.json` |
 | `review-deep --post` | a PR comment by the user with a `## Deep Review` / review-findings heading | — |
-| Detent gate | the issue workpad comment (`## Workpad`), updated after the `HEAD_SHA` commit date, mentioning the PR | — |
+| Detent gate | the issue workpad comment (`## Workpad`) whose **`updated_at`** (not `created_at` — Detent edits the same comment in place) is after the `HEAD_SHA` commit date, mentioning the PR | — |
 
 All six GitHub markers were confirmed live on this repo: `@codex review`,
 `**Reviewed commit:** \`8872519c0d\`` (a 10-char SHA), `## Deep Review Results`, and
