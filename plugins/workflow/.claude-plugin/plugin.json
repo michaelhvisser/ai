@@ -1,7 +1,7 @@
 {
-  "name": "ts-workflow",
-  "description": "Issue-to-PR workflow automation with git worktree management for TypeScript/JavaScript projects",
-  "version": "0.3.0",
+  "name": "workflow",
+  "description": "Language-agnostic PR and review workflow skills — read-only PR situation reports, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
+  "version": "0.1.0",
   "author": {
     "name": "Michael Visser",
     "email": "michael@threefold.solutions"
@@ -12,12 +12,11 @@
   "keywords": [
     "workflow",
     "github",
-    "issues",
     "pr",
+    "review",
+    "triage",
+    "codex",
     "worktree",
-    "typescript",
-    "nextjs",
-    "astro",
-    "convex"
+    "commit"
   ]
 }

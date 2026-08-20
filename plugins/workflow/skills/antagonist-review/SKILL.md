@@ -32,11 +32,11 @@ cross-platform capability-binding rules.
 Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving any workflow
 choice.
 
-**Usage:** `/ts-workflow:antagonist-review [PR-number] [--base <ref>] [--max-fix-rounds <n>] [--effort low|medium|high|xhigh] [focus ...]`
+**Usage:** `/workflow:antagonist-review [PR-number] [--base <ref>] [--max-fix-rounds <n>] [--effort low|medium|high|xhigh] [focus ...]`
 
 **Examples:**
-`/ts-workflow:antagonist-review` (current branch vs auto-detected base) ·
-`/ts-workflow:antagonist-review 196` · `/ts-workflow:antagonist-review --base main concurrency in the sync loop`
+`/workflow:antagonist-review` (current branch vs auto-detected base) ·
+`/workflow:antagonist-review 196` · `/workflow:antagonist-review --base main concurrency in the sync loop`
 
 This skill is **repo-agnostic**: it auto-detects the base branch, the lint/test commands, and
 the repo guidelines file. It never pushes and never comments on GitHub.
@@ -117,12 +117,16 @@ done
    auto-dismisses (`reason: "documented non-finding"`) unless the diff changed the facts the
    note rests on — the same ghost must never cost the human twice. Locate the check commands:
    ```bash
-   source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
-   pm_detect
+   source "${CLAUDE_PLUGIN_ROOT}/lib/detect-checks.sh"
+   detect_checks
    ```
-   Prefer `package.json` scripts (`$PM run lint`, `$PM run typecheck`, `$PM run test` — each
-   only if `has_script` says it exists); fall back to `Makefile` targets `lint`/`test`; if
-   neither exists, ask the user — never guess. Record the commands: the fix phase needs them.
+   That resolves `PROJECT_KIND` (node|go|rust|make|unknown) and the four check commands —
+   `$CHECK_LINT`, `$CHECK_TYPECHECK`, `$CHECK_TEST`, `$CHECK_BUILD` — from whichever toolchain
+   the repo actually uses (`package.json` scripts, `go.mod`, `Cargo.toml`), backfilling any
+   check the primary toolchain lacks from a same-named `Makefile` target. Use the ones that
+   are non-empty; **an empty variable means that check does not exist — ask the user for it
+   rather than guessing a command.** If every one is empty, ask the user for the repo's check
+   commands. Record what you end up with: the fix phase needs them.
 4. **Working tree:** review runs fine on a dirty tree, but the **fix phase requires a clean
    tree** (the Codex tree-guard depends on it). Note the state now; re-check before fixing.
 5. **Ledger:** create `$SCRATCH_DIR/antagonist-ledger.json` (a session scratch directory) —

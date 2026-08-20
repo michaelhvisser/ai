@@ -1,0 +1,297 @@
+---
+name: pr-details
+description: "Read-only situation report for one pull request: CI judged against the base branch's actual required checks, review decision, unresolved threads split by author class, mergeability, board state, whether the linked issue's problem still exists on base, whether its plan is the right plan, whether UI review is warranted — and the single next step to take. It mutates nothing; its product is naming which expensive skill to reach for. Use before spending tokens on review or fixes, or when you pick up a PR cold and need to know where it actually stands. SKIP when you already know the next step and just want it done — run that skill directly."
+argument-hint: "[PR-number] [--plan-model fable|codex|both|none] [--effort low|medium|high|xhigh] [--no-plan-check] [--no-dup-search] [--json] [--refresh]"
+---
+
+# PR Details — read-only situation report for one PR
+
+Before requesting decisions or delegating work, read
+`${CLAUDE_PLUGIN_ROOT}/lib/driver-interaction.md` and follow its cross-platform
+capability-binding rules.
+
+Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving any workflow choice.
+
+Load the shared GitHub helpers before any GitHub operation:
+
+```bash
+source "${CLAUDE_PLUGIN_ROOT}/lib/github-rest.sh"
+source "${CLAUDE_PLUGIN_ROOT}/lib/pr-facts.sh"
+```
+
+From `github-rest.sh`: `github_pr`, `github_current_pr`, `github_pr_reviews`,
+`github_check_snapshot`. From `pr-facts.sh`: `pr_facts_gh` (the retry wrapper — every `gh`
+call goes through it), `pr_facts_graphql_ok`, `pr_facts_rate_gate`, `pr_facts_rules`,
+`pr_facts_check_matrix`, `pr_facts_ci_state`, `pr_facts_review_threads`, `pr_facts_board`,
+`pr_facts_compare`, `pr_facts_shared_files`, `pr_facts_run_dir`.
+
+---
+
+## What this skill is
+
+`pr-details` answers five questions about one PR and then names exactly one next action:
+
+1. **Where is it?** CI, review decision, threads, mergeability, behind-base, board state.
+2. **Why does it exist, and is that still true?** The linked issue's problem, re-checked
+   against the base branch, with duplicate issues and PRs surfaced.
+3. **Is the plan right?** A strong model audits the issue's plan against the problem and the
+   diff, and proposes corrections.
+4. **Is there UI to look at?**
+5. **What is the single next step?**
+
+It is the front door of the review family: every sibling either mutates the PR
+(`address-review`, `codex-ship`) or spends a lot of tokens (`antagonist-review`). This one
+spends little, mutates nothing, and tells you which expensive tool to reach for.
+
+**Non-goals (hard).** It never pushes, commits, rebases, comments, resolves threads, edits
+issues, changes labels, or moves board items. It never triggers a bot review. The plan check
+*proposes* issue-body edits as text; applying them is a separate human action. It judges the
+**plan**, not the **diff quality** — that is `review-deep` / `antagonist-review`.
+
+## Read-only enforcement
+
+Read-only is enforced by construction, in two layers. There is no "breach detection": diffing
+comment counts produces false alarms from concurrent humans, misses reviews, labels,
+reactions, edits, and pushes, and its usual recovery (`git stash push -u`) mutates the user's
+tree and captures unrelated work.
+
+1. **The skill issues only `gh` read verbs.** The complete allowed list: `gh pr view`,
+   `gh pr list`, `gh pr checks`, `gh pr diff`, `gh issue view`, `gh issue list`,
+   `gh search issues`, `gh search prs`, `gh repo view`, `gh auth status`, `gh api` with no
+   `--method`/`-X` (or an explicit `-X GET`), and `gh api graphql` with a `query` operation
+   only. Any other verb is a bug.
+2. **Codex runs sandboxed.** `-s read-only` plus `-c sandbox_mode="read-only"` plus
+   `-c approval_policy="never"`. `approval_policy="never"` is what denies outward-facing tool
+   calls; the sandbox flag fences only the filesystem.
+
+**Accepted residual risk:** the Codex process inherits the host's `gh` credentials, so a
+read-only *filesystem* sandbox does not by itself prove no network mutation is possible; the
+prompt forbids GitHub tool use explicitly and `approval_policy="never"` denies the escalation
+path, and that combination is the mitigation this skill relies on.
+
+The skill never runs `git stash`, `git checkout`, `git reset`, `git fetch --prune`, or
+anything else that changes the working tree or branch state. Its only `git` writes are
+object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`facts.md` §0c).
+
+## Usage
+
+**Claude Code:** `/workflow:pr-details [PR-number] [flags]`
+**Codex:** `$workflow:pr-details [PR-number] [flags]`
+
+**Examples:** `/workflow:pr-details` · `/workflow:pr-details 161` ·
+`/workflow:pr-details 161 --plan-model both` · `/workflow:pr-details 161 --json`
+
+| Flag | Default | Why |
+|---|---|---|
+| `[PR-number]` | auto from the current branch via `github_current_pr`, then `gh pr list --search <HEAD sha>` | House convention. A branch name or a full PR **URL** is also accepted; a URL sets host, owner, and repo too (`facts.md` §0a). |
+| `--plan-model fable\|codex\|both\|none` | `fable` if a strong subagent tier exists, else `codex` if `command -v codex`, else `none` | `both` runs a two-model quorum. Never silently downgrade — an unavailable model produces a warning line in the report. |
+| `--effort low\|medium\|high\|xhigh` | `xhigh` | Passed to `codex exec -c model_reasoning_effort=`; mapped to the subagent effort hint for Fable. |
+| `--no-plan-check` | off | Phase 4 is the only slow phase. Skipping it makes this a ~20-second status command. |
+| `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket. |
+| `--json` | off | Machine schema on stdout (`output.md` §2). |
+| `--refresh` | off | Ignore the SHA-keyed immutable cache (`facts.md` §0e). |
+
+Rejected flags: `--fix` / `--apply` (violates the non-goals); `--base` (a PR always has a base).
+
+Parse with the `for arg in $ARGUMENTS … case` loop and `SKIP_NEXT` for valued flags, as in
+`codex-ship`. A bare token that is not `^[0-9]+$` is a branch name or a URL.
+
+```bash
+PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; AS_JSON=0; REFRESH=0; PR_ARG=""
+SKIP_NEXT=""
+for arg in $ARGUMENTS; do
+  case "$SKIP_NEXT" in
+    model)  PLAN_MODEL="$arg"; SKIP_NEXT=""; continue ;;
+    effort) EFFORT="$arg";     SKIP_NEXT=""; continue ;;
+  esac
+  case "$arg" in
+    --plan-model)    SKIP_NEXT="model" ;;
+    --effort)        SKIP_NEXT="effort" ;;
+    --no-plan-check) DO_PLAN=0 ;;
+    --no-dup-search) DO_DUP=0 ;;
+    --json)          AS_JSON=1 ;;
+    --refresh)       REFRESH=1 ;;
+    --*)             echo "pr-details: unknown flag $arg" >&2; exit 2 ;;
+    *)               PR_ARG="$arg" ;;
+  esac
+done
+[ -n "$SKIP_NEXT" ] && { echo "pr-details: $SKIP_NEXT flag needs a value" >&2; exit 2; }
+```
+
+## Output contract
+
+Stdout and stderr are strictly separated so `--json` is machine-consumable:
+
+- With `--json`: **stdout carries JSON and nothing else** — no banners, no progress, no
+  warnings. Every diagnostic goes to **stderr**, and warnings that matter to a consumer are
+  *also* carried inside the JSON as `warnings[]`.
+- Without `--json`: the terminal report goes to stdout; diagnostics still go to stderr.
+
+| Exit | Meaning |
+|---|---|
+| `0` | A report was produced. **This includes `next_step.id == "blocked"`** — a blocked verdict is a successful report. Callers branch on `next_step.id`, never on the exit code. |
+| `2` | Usage error: unparseable flag, a valued flag with no value, mutually exclusive flags. |
+| `3` | Auth or rate-limit refusal: `gh` unauthenticated for the resolved host, or a quota bucket below its reserve (`facts.md` §0b). No partial report. |
+| `4` | PR not found, or resolved to a repository the caller did not intend (`facts.md` §0a). |
+| `1` | Reserved for unexpected internal failure. Never used deliberately. |
+
+## Model roles
+
+Edit this block; never hard-pin a model name in the phase logic.
+
+| Role | Default tier | Job | Token posture |
+|---|---|---|---|
+| **Orchestrator** | session model | argument parsing, all `gh`/git calls, fact assembly, decision table, report. **Zero code judgment.** | cheap |
+| **Still-needed researcher** | read-only researcher tier | Phase 3: trace the problem on base at the pinned SHA; name the fixing commit or the live code path | one call, small prompt |
+| **Plan judge (Fable)** | strongest available subagent tier | Phase 4: plan adequacy, gaps, proposed issue edits | one call; the main spend when selected |
+| **Plan judge (Codex)** | local `codex exec` CLI, a second model *family* | same prompt, independent family | one backgrounded call; wall-time cost, subscription-side tokens |
+| **Quorum** | none — the orchestrator applies the `plan-check.md` §4 table | report agreement or split; never adjudicate | free |
+
+The **reference bar** for "strong tier" is whatever the frontier-quality model is when you run
+this, never a model name.
+
+Cost: `--no-plan-check` is ~10 API calls plus one researcher call; the default `fable` adds one
+strong call; `both` adds a backgrounded Codex run whose cost is wall time, not tokens.
+
+## Phase outline
+
+| Phase | What | Detail file |
+|---|---|---|
+| 0 | Preflight: **resolve identity first**, auth for that host, rate gate, git pins, contract + ruleset discovery, run dir and cache | `facts.md` §0 |
+| 1 | PR record, linked issues, duplicates, diff | `facts.md` §1 |
+| 2 | Status snapshot: CI, reviews, threads, mergeability, local state, board, prior-skill evidence | `facts.md` §2 |
+| 3 | Still-needed validation, per linked issue | `still-needed.md` |
+| 4 | Plan check by a strong model (skippable) | `plan-check.md` |
+| 5 | UI-review detection (deterministic, no model) | below |
+| 6 | Next-step decision table | below + `next-step.md` |
+| 7 | Render | `output.md` |
+
+**The rate gate runs twice**: once in Phase 0, and once immediately before Phase 4 dispatch.
+Phase 4 is the expensive phase, and a shared fleet's quota moves underneath a long run.
+
+## Phase 5 — UI-review detection
+
+Deterministic; no model. Inputs: the changed-file list, `diff.patch`, the PR body.
+
+**Path heuristics** (any match → `ui_touch=true`): App Router / pages
+(`^app/.*\.(tsx|jsx|mdx)$`, `^pages/`, `^src/(app|pages|routes)/`); components
+(`^(src/)?components?/`, `^ui/`, `^(src/)?features/.*\.(tsx|jsx|vue|svelte|astro)$`);
+templates and styles (`\.(vue|svelte|astro|html|hbs|ejs|njk)$`,
+`\.(css|scss|sass|less|pcss)$`, `tailwind\.config\.*`, `globals\.css`); Storybook and visual
+tests (`\.stories\.(tsx|jsx|mdx)$`, `^\.storybook/`, `\.(spec|test)\.(ts|tsx)$` importing
+`@playwright/test`); assets (`^public/`, `\.(svg|png|jpg|webp)$`); copy and i18n
+(`^(locales|messages|i18n)/`).
+
+**Negative filters:** pure test files with no sibling source change; `\.d\.ts`; hunks whose
+non-`import`/non-comment changed-line count is zero.
+
+**Severity:** `visual` when JSX/template/CSS hunks change markup or class names; `behavioural`
+when only handlers, hooks, or state in a UI file change; `copy` when only string literals
+change.
+
+**Route mapping**, so the report says *where* to look: `app/<segments>/page.tsx` → route, with
+`(group)` segments dropped and `[param]` kept. For a component, the `app/**/page.tsx` files
+that import it, found with one shallow `git grep -l "<basename>" "$HEAD_SHA" -- app/` — pinned
+to the head SHA like every other source read (`still-needed.md` §1). Cap at 5 routes.
+
+**Evidence:** screenshots in the PR body (`!\[`, `<img`, `user-attachments`), an
+`## E2E Verification Results` comment, an `e2e-verified` label.
+
+Output → `ui {warranted, severity, files[], routes[], evidence_present, reason}`.
+
+## Phase 6 — Next-step decision table
+
+Evaluated **top to bottom; first match wins; exactly one step**. Every row yields exactly one
+`next_step.id` from the closed vocabulary in `output.md` §2 — there is no "optional" outcome; a
+weaker secondary suggestion goes in `next_step.then[]` or `next_step.notes[]`, never in the
+headline. Fact names are defined in `next-step.md` §1; ordering rationale in §2; the ready
+predicate's conjuncts in §3.
+
+| # | Group | Condition (first match wins) | `next_step.id` |
+|---|---|---|---|
+| 1 | terminal | PR state `MERGED` | `merged` |
+| 2 | terminal | PR state `CLOSED`, not merged | `closed` |
+| 3 | terminal | `FACTS_INCOMPLETE` — a required fact is `unknown`: auth/quota degraded mid-run, `mergeable == UNKNOWN` after both retries, a paginated collection failed to complete, or partial GraphQL data on a load-bearing query | `facts-incomplete` |
+| 4 | board | `BOARD_STATUS` ∈ terminal states (`Done`, `Cancelled`) while the PR is open | `board-terminal` |
+| 5 | board | `BOARD_STATUS == Blocked` | `blocked` |
+| 6 | board | `BOARD_STATUS == Backlog`, or no linked issue, or `BOARD_AMBIGUOUS` | `no-active-issue` |
+| 7 | supersede | **every** linked issue is `already-fixed-by` with `confidence: high` | `close-superseded` |
+| 8 | supersede | **every** linked issue is `likely-duplicate-of #M` where #M is open and further along, and this PR is not the further-along one | `close-duplicate` |
+| 9 | mechanical | `mergeable == CONFLICTING` | `rebase` |
+| 10 | mechanical | `BEHIND && STRICT` | `rebase` |
+| 11 | mechanical | `CI_STATE == red` | `address-review` |
+| 12 | feedback | `HUMAN_CR` or `UNRES_H > 0` | `address-review` |
+| 13 | feedback | `CODEX_CR` or `UNRES_CODEX > 0` | `codex-ship` |
+| 14 | feedback | `UNRES_B > 0` (non-Codex bots), or any `needs-resolve-only` thread | `address-review` |
+| 15 | plan | `PLAN_COMBINED == no` | `fix-plan` |
+| 16 | plan | `PLAN_COMBINED == partial` with a `blocker` gap, **or** `PLAN_SPLIT` | `antagonist-review` |
+| 17 | waiting | `CI_STATE == pending` (includes a required check that is **absent** from the rollup) | `wait-ci` |
+| 18 | review spend | `ui.warranted && !E2E_AT_HEAD` | `ui-review` |
+| 19 | review spend | `!AR_AT_HEAD && !CS_AT_HEAD && DIFF_LINES >= 150` | `antagonist-review` |
+| 20 | review spend | `AR_AT_HEAD && !CS_AT_HEAD` | `codex-ship` |
+| 21 | review spend | `!AR_AT_HEAD && CS_AT_HEAD && DIFF_LINES >= 150` | `antagonist-review` |
+| 22 | draft | `IS_DRAFT` (nothing above fired) | `finish-draft` |
+| 23 | gate | any **mandatory contract conjunct is observably false** at head (`next-step.md` §3) | `complete-gate` |
+| 24 | approval | approval shortfall: `APPROVALS_GIVEN < APPROVALS_REQUIRED`, or `reviewDecision == REVIEW_REQUIRED`, or an unsatisfied code-owner / last-push / unattributed-changes approval requirement | `human-approval` |
+| 25 | ready | `READY_VERIFIABLE` and `BOARD_STATUS == Merging` | `hand-to-detent` |
+| 26 | ready | `READY_VERIFIABLE` and `BOARD_STATUS == Human Review` and `!AUTO_PROMOTE` | `human-approval` |
+| 27 | ready | `READY_VERIFIABLE` and `BOARD_STATUS == Human Review` and `AUTO_PROMOTE` and `!REQ_LABEL` | `hand-to-detent` |
+| 28 | ready | `READY_VERIFIABLE` and `BOARD_STATUS == Human Review` and `AUTO_PROMOTE` and `REQ_LABEL` | `human-approval` |
+| 29 | ready | `READY_VERIFIABLE` and `BOARD_STATUS` ∈ active (`Todo`, `In Progress`, `Rework`) | `move-to-human-review` |
+| 30 | fallback | anything else | `needs-human` |
+
+Rows 25–29 carry a **verdict qualifier**, not just an id. When every mandatory conjunct is
+`verified` or `evidenced` at head, the verdict reads `ready`. When one or more conjuncts are
+`self-report` (nothing on GitHub can prove them — a local `pnpm` gate and Convex schema
+validation always fall here), the verdict reads `ready pending: <conjunct list>` and
+`next_step.pending[]` names them. A conjunct that is *observably false* never reaches these
+rows; it fires row 23 instead.
+
+Four cross-cutting **annotations** print under any step and never change the headline:
+`IS_DRAFT` when a row other than 22 fired ("draft — the blocker above outranks promoting it");
+a partial supersession result (some but not all linked issues superseded, per
+`still-needed.md` §5); a low-confidence duplicate; and local checkout state.
+
+## Output template
+
+Read `output.md` for the full grammar. Shape:
+
+```
+=== PR #161 · fix(meetings): link Cal bookings to organizations ===
+threefold-solutions/client-portals · dev ← detent/…_92-7e7e04d397c3 @ e04cd91 · 9 files +727/−68 · open, not draft
+
+STATUS
+  CI        green   Lint, typecheck, test ✓ (required, integration 15368) · Vercel ✓ (required, legacy status, no integration_id)
+  Review    0/0 approvals · no CHANGES_REQUESTED · extra approval for unattributed changes: required
+  Threads   0 unresolved (0 human · 0 codex · 0 other) · 0 resolved
+  Merge     MERGEABLE · BEHIND · 4 behind dev (strict up-to-date required)
+  Board     #92 Human Review · auto-promote: off · PR row: Backlog (ignored)
+  Local     checkout is at dev, not at PR head · clean
+
+PURPOSE
+  #92 Cal.com webhook org linking has never linked a meeting
+  Needed?   NEEDED (high) — convex/http.ts:212 on dev@dcd2622 still matches on label
+
+PLAN CHECK  (fable @ xhigh · 40s)
+  PLAN_ADEQUATE: yes
+
+UI REVIEW   not warranted — no UI paths changed
+
+NEXT STEP   → rebase onto dev                          [row 10]
+  why: 4 commits behind dev and the ruleset requires strict up-to-date; the server refuses the merge regardless of CI
+  then: /workflow:pr-details 161
+  files: <run dir>
+```
+
+## Supporting files
+
+- `facts.md` — Phases 0–2: identity, auth, rate gate, git pins, contract and ruleset
+  discovery, run dir and cache, retries, PR and issue records, duplicates, CI, reviews,
+  threads, mergeability, board, prior-skill evidence
+- `still-needed.md` — Phase 3: pinned-read rule, claim extraction, mechanical base probe,
+  researcher brief, per-issue aggregation
+- `plan-check.md` — Phase 4: prompt template, Fable routing, the Codex `exec` invocation,
+  quorum
+- `next-step.md` — Phase 6: fact definitions, ordering rationale, ready-predicate ledger,
+  fact-vector regression
+- `output.md` — Phase 7: terminal grammar, `--json` schema v1, exit codes, scratch hygiene

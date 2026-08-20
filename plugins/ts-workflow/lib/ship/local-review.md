@@ -52,7 +52,7 @@ If the diff is empty, skip the review loop entirely — proceed to Phase 2 (Step
 
 Otherwise set `REVIEW_BASE="origin/${BASE_BRANCH}"`,
 `REVIEW_BACKEND="$LLM_CHOICE"`, and `REVIEW_CONCURRENCY=auto`. Read
-`../review-planning.md`, run the shared planner, display the coverage plan, and
+`${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`, run the shared planner, display the coverage plan, and
 follow its units and final coordinator pass. The planner, not raw diff length,
 determines whether further partitioning or a backend decision is necessary.
 
@@ -82,7 +82,7 @@ if [ "$CODEX_TIMEOUT" -gt 900 ]; then CODEX_TIMEOUT=900; fi
 
 Use the shared coverage plan for full-context or partitioned execution. If it
 reports `REVIEW_PLAN_REQUIRES_INPUT=yes`, apply the decision policy in
-`../review-planning.md`. Never narrow baseline coverage or request input solely
+`${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`. Never narrow baseline coverage or request input solely
 because the diff is large.
 
 #### Codex Exhaustive (`codex exec --output-schema`)

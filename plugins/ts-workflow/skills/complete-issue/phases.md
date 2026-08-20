@@ -59,7 +59,7 @@ No model flag is passed in either Codex path. A `model = "..."` pin in
 `~/.codex/config.toml` is respected; leaving it unset lets the Codex CLI choose
 its recommended default.
 
-Read `../../lib/review-planning.md`, run the shared planner, display the coverage
+Read `${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`, run the shared planner, display the coverage
 plan, and execute every unit plus the coordinator pass. Partition sequentially
 when the selected fallback lacks concurrent agents. Apply the shared review
 planning decision policy when reliable coverage needs more partitions or an
