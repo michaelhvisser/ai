@@ -91,7 +91,10 @@ done
 [ -z "$PR_NUM" ] && PR_NUM=$(github_current_pr 2>/dev/null | jq -r '.number // empty')
 if [ -z "$PR_NUM" ]; then echo "ERROR: no PR. Pass a number or run from a PR branch."; exit 1; fi
 
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+# `--json` on any gh command is a GraphQL call; fall back to the git remote when it is drained.
+# Two `sed -E` stages, not one: a lazy `+?` is a GNU extension and BSD/macOS sed errors on it.
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) \
+  || REPO=$(git remote get-url origin | sed -E 's#\.git$##' | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#')
 echo "PR: #$PR_NUM | repo: $REPO | max-rounds: $MAX_ROUNDS | second-opinion arg: $SECOND_OPINION_ARG"
 ```
 
@@ -102,9 +105,24 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
 ## Phase 0: Preflight
 
 1. **Working tree clean?** `git status --porcelain` must be empty. If not, stop and ask.
-2. **Linked issue** — capture for the final report and closure:
+2. **API budget** — GitHub meters GraphQL and REST *separately*, and this skill leans on both.
+   Check before the first round; `/rate_limit` is free and never counts against either budget:
+   ```bash
+   GQL_LEFT=$(gh api rate_limit --jq '.resources.graphql.remaining')
+   GQL_RESET=$(gh api rate_limit --jq '.resources.graphql.reset|todate')
+   REST_LEFT=$(gh api rate_limit --jq '.resources.core.remaining')
+   echo "api budget: graphql=$GQL_LEFT (resets $GQL_RESET) rest=$REST_LEFT"
+   ```
+   If `GQL_LEFT` is under ~50, run in **REST fallback mode** (see below) rather than failing
+   mid-round. GraphQL exhaustion is not hypothetical: a busy day of `gh pr view` / `gh pr checks`
+   drains it while REST still has thousands left, and every `gh` command that takes `--json`
+   is a GraphQL call under the hood.
+3. **Linked issue** — capture for the final report and closure:
    ```bash
    gh pr view $PR_NUM --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+   # REST fallback (no closingIssuesReferences in REST — parse the PR body's closing keyword):
+   gh api repos/$REPO/pulls/$PR_NUM --jq '.body' \
+     | grep -ioE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+' | head -1
    ```
    Store the first as `ISSUE_NUM` (may be empty — that's fine, just note it).
 3. **Known non-findings & prior review state:** locate the repo's AGENTS.md/CLAUDE.md and
@@ -129,7 +147,44 @@ Print: `=== PHASE 0 COMPLETE: preflight clean, checks: <LOCAL_CHECKS>, issue #$I
 
 ---
 
-## Kickoff: resolve the second-opinion policy
+## REST fallback mode (GraphQL budget exhausted)
+
+**REST is not a drop-in replacement — one capability has no REST equivalent at all.** Review
+*thread* objects live only in GraphQL: REST's review-comment objects carry `id`, `node_id`,
+`path`, `body`, `user`, `in_reply_to_id`, and `pull_request_review_id`, but **no thread id and no
+`isResolved` field** (verified against the live API — the field simply does not exist in the REST
+schema). So in fallback mode you can still read findings, reply, and unblock a review, but you
+**cannot read resolution state and cannot resolve a thread**.
+
+| Need | GraphQL | REST fallback |
+|------|---------|---------------|
+| Repo name | `gh repo view --json nameWithOwner` | `git remote get-url origin` |
+| PR metadata / state | `gh pr view --json …` | `gh api repos/$REPO/pulls/$PR_NUM` |
+| CI status | `gh pr checks` | `gh api repos/$REPO/commits/$SHA/check-runs`, `…/status` |
+| Linked issue | `closingIssuesReferences` | parse closing keyword from `.body` |
+| Codex review comments | `reviewThreads.nodes[].comments` | `gh api repos/$REPO/pulls/$PR_NUM/comments --paginate` |
+| Codex reviews | `gh api …/reviews` *(already REST)* | unchanged |
+| Reply to a thread | `addPullRequestReviewThreadReply` | `POST …/pulls/$PR_NUM/comments/$COMMENT_ID/replies` |
+| Dismiss a blocking review | `dismissPullRequestReview` | `PUT …/pulls/$PR_NUM/reviews/$REVIEW_ID/dismissals` |
+| **Read `isResolved`** | `reviewThreads.nodes[].isResolved` | **none — GraphQL only** |
+| **Resolve a thread** | `resolveReviewThread` | **none — GraphQL only** |
+
+Reconstruct threads in REST by grouping `pulls/$PR_NUM/comments` on `in_reply_to_id` (a comment
+with no `in_reply_to_id` is a thread root; replies point at that root's `id`). That reproduces
+grouping and lets you post the dismissal reason, but never resolution state.
+
+Because the last two rows have no fallback, in REST mode you **must not report threads as
+resolved**. Do the reply (the paper trail still lands), record each thread that still needs
+resolving, and take exactly one of:
+
+1. **Wait it out.** The GraphQL budget refills hourly; `$GQL_RESET` from Phase 0 is the exact
+   time. This is usually the right answer — a wait of minutes beats a half-finished ledger.
+2. **Finish in REST and hand off the remainder.** Print the list of comment URLs whose threads
+   are still unresolved and say plainly that resolution was deferred for API budget, not
+   because the findings are open.
+
+Never silently skip resolution and report success — a Codex thread left open still gates the
+merge, so a run that claims to have cleared them and hasn't is worse than one that stops.
 
 The second opinion is **mandatory when the judge is a cheaper/weaker model than the strong-tier
 reference bar** — because you cannot trust a cheap model's solo triage — and **discretionary
@@ -382,7 +437,12 @@ ESCALATE, or continue).
 see the GraphQL-budget discipline in the sibling `ship` skill; everything else stays on REST.)
 
 1. **Resolve the review thread with a reason reply.** Fetch Codex's unresolved threads, match
-   each to a dismissed finding by `path`/body, reply with the recorded reason, then resolve:
+   each to a dismissed finding by `path`/body, reply with the recorded reason, then resolve.
+
+   If the GraphQL budget is drained, this step is the one that cannot be completed in REST —
+   see "REST fallback mode": post the reply via
+   `POST …/pulls/$PR_NUM/comments/$COMMENT_ID/replies`, then either wait for `$GQL_RESET` or
+   hand off the unresolved list. Do not report resolution you did not perform.
    ```bash
    OWNER=${REPO%%/*}; NAME=${REPO##*/}   # from the REPO captured in Parse arguments
    # list unresolved Codex threads (id + first comment for matching)
@@ -463,7 +523,10 @@ Reach here only on **CLEAR**. Confirm the confidence gate:
 - [ ] `LOCAL_CHECKS` green locally on the final SHA
 - [ ] Branch rebased on the current base branch
 - [ ] **Every dismissed (slop) finding's review thread is resolved *on GitHub* with a reason
-      reply** (Step E) — not just in the ledger. Verify zero unresolved Codex threads remain:
+      reply** (Step E) — not just in the ledger. Verify zero unresolved Codex threads remain.
+      This check is GraphQL-only (REST has no `isResolved`), so if the budget is drained it
+      cannot be satisfied in REST: leave the box **unchecked**, and report the deferred
+      threads rather than ticking it on the strength of the ledger alone.
   ```bash
   gh api graphql -f query='
     query($o:String!,$n:String!,$num:Int!){ repository(owner:$o,name:$n){
