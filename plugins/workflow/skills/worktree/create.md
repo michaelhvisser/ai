@@ -6,7 +6,7 @@ Create or reuse an isolated git worktree for a GitHub issue or PR. Loaded by
 ## Usage
 
 User-facing slash command: `/create-worktree <issue-or-pr-number>`. Skill
-invocation: `$ts-workflow:worktree create`.
+invocation: `$workflow:worktree create`.
 
 ## Steps
 

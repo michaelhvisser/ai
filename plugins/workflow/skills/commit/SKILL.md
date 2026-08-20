@@ -14,7 +14,7 @@ cross-platform capability-binding rules.
 ## Usage
 
 ```
-$ts-workflow:commit
+$workflow:commit
 ```
 
 ## Steps

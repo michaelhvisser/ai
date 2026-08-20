@@ -1,8 +1,8 @@
 # michaelhvisser/ai
 
-AI coding assistant plugins for TypeScript/JavaScript builders — by [Michael Visser](https://michaelhvisser.com).
+AI coding assistant plugins for shipping software — by [Michael Visser](https://michaelhvisser.com).
 
-This is a [Claude Code](https://claude.ai/code) plugin marketplace: a curated collection of the workflows and skills I use daily to ship Next.js, Astro, and Convex projects, packaged so any TS/JS builder can use them.
+This is a [Claude Code](https://claude.ai/code) plugin marketplace: a curated collection of the workflows and skills I use daily, packaged so anyone can use them. The review, PR, and worktree machinery is language-agnostic; the issue-to-PR pipeline on top of it is per-ecosystem.
 
 ## Installation
 
@@ -15,24 +15,35 @@ Add the marketplace in Claude Code:
 Then install a plugin:
 
 ```
-/plugin install ts-workflow@michaelhvisser-ai
+/plugin install workflow@michaelhvisser-ai
 ```
+
+Most people want `workflow` plus the language plugin for their stack — for Node/TS repos that is `ts-workflow`.
 
 ## Plugins
 
+### workflow
+
+Language-agnostic PR and review workflow skills. No toolchain assumptions — it resolves the repo's lint / typecheck / test / build commands at runtime from `package.json`, `go.mod`, `Cargo.toml`, or a `Makefile`.
+
+- **`/workflow:antagonist-review`** — cross-model adversarial review: a strong finder model and the local Codex CLI fight over every finding, a third model breaks ties, and a human settles only what the models can't
+- **`/workflow:codex-ship`** — triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop) with a second-opinion cross-check, fix only the confirmed-real set, and loop until Codex runs out of genuine value
+- **`/workflow:commit`**, **`/workflow:create-pr`** — conventional commits and template-driven PRs
+- **`/workflow:create-worktree`**, **`/workflow:remove-worktree`**, **`/workflow:prune-worktree`** — git worktree lifecycle for isolated issue work
+
+`codex-ship` hands the fix pass and the merge to whichever language plugin matches the repo (`ts-workflow` for Node, `go-workflow` for Go), and falls back to an inline fix + plain push when none is installed.
+
 ### ts-workflow
 
-Issue-to-PR workflow automation with git worktree management for TypeScript/JavaScript projects.
+Issue-to-PR workflow automation for TypeScript/JavaScript projects. Pairs with `workflow`, which supplies its commit, PR, worktree, and review skills.
 
 - **`/ts-workflow:start-issue`** — pick up a GitHub issue: worktree, plan, orchestrated multi-agent TDD implementation (explore → implement → spec review → quality review)
 - **`/ts-workflow:complete-issue`** — end-to-end loop from issue to merged PR
 - **`/ts-workflow:ship`** — verify locally, push, open PR, watch CI and review bots, merge
 - **`/ts-workflow:review-deep`** — deep review of a PR or branch with issue context; fixes and commits actionable findings
 - **`/ts-workflow:address-review`** — fetch human/bot review feedback and resolve it in a fix loop
-- **`/ts-workflow:codex-ship`** — triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop) with a second-opinion cross-check, fix only the confirmed-real set, and loop until Codex runs out of genuine value
-- **`/ts-workflow:antagonist-review`** — cross-model adversarial review: a strong finder model and the local Codex CLI fight over every finding, a third model breaks ties, and a human settles only what the models can't
 - **`/ts-workflow:e2e-verify`** — browser-based end-to-end verification of a PR against the dev stack
-- **`/ts-workflow:commit`**, **`/ts-workflow:create-pr`**, **`/ts-workflow:worktree`**, **`/ts-workflow:tmux-start`** — the supporting cast
+- **`/ts-workflow:tmux-start`** — the supporting cast
 
 Works with any Node repo. Detects your package manager (pnpm / npm / yarn / bun), monorepo tooling (Turborepo / Nx / workspaces), and test runner (vitest / jest / Playwright), with framework-aware guidance for Next.js (App Router, React 19), Astro, and Convex.
 
@@ -48,7 +59,7 @@ One Slack app and one bot token serve every repo; onboarding another is a `slack
 
 ## Credits
 
-`ts-workflow` is forked from [go-workflow](https://github.com/gopherguides/gopher-ai) by Gopher Guides (MIT) and adapted for the TypeScript/JavaScript ecosystem. If you write Go, go use the original — it's excellent.
+`ts-workflow` — and the `workflow` skills factored out of it — began as a fork of [go-workflow](https://github.com/gopherguides/gopher-ai) by Gopher Guides (MIT), adapted for the TypeScript/JavaScript ecosystem. If you write Go, the original is excellent and pairs with `workflow` the same way.
 
 ## License
 

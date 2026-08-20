@@ -4,7 +4,7 @@ Batch cleanup of all git worktrees for issues that are closed and branches that 
 
 ## Usage
 
-User-facing slash command: `/prune-worktree` (no args). Skill invocation: `$ts-workflow:worktree prune`.
+User-facing slash command: `/prune-worktree` (no args). Skill invocation: `$workflow:worktree prune`.
 
 ## Steps
 

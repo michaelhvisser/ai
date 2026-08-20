@@ -42,20 +42,29 @@ configured.
 | `/ts-workflow:start-issue <number>` | Start working on a GitHub issue (auto-detects bug vs feature) |
 | `/ts-workflow:address-review [PR]` | Address PR review comments, fix, and loop until bots approve |
 | `/ts-workflow:review-deep [PR]` | Deep code review with full PR context, then fix findings |
-| `/ts-workflow:commit` | Create a git commit with auto-generated message |
-| `/ts-workflow:create-pr` | Create a PR following the repo template |
 | `/ts-workflow:e2e-verify [PR]` | Run browser E2E verification on a PR |
 | `/ts-workflow:ship` | Verify, push, watch CI/reviews, and merge |
-| `/ts-workflow:create-worktree <number>` | Create a new git worktree for isolated issue work |
-| `/ts-workflow:remove-worktree` | Interactively select and remove a git worktree |
-| `/ts-workflow:prune-worktree` | Batch cleanup of all completed issue worktrees |
+
+`commit`, `create-pr`, `antagonist-review`, `codex-ship`, and the worktree commands
+(`/create-worktree`, `/remove-worktree`, `/prune-worktree`) moved to the
+language-agnostic [`workflow`](../workflow) plugin as of 0.3.0. They are no longer
+part of this plugin, so **install `workflow` alongside this one** to keep them:
+
+```bash
+/plugin install workflow@michaelhvisser-ai
+```
+
+The two are meant to run together: `workflow` owns commits, PRs, worktrees, and
+cross-model review for any language; `ts-workflow` owns the Node-specific
+`start-issue` → `ship` pipeline. `/workflow:codex-ship` dispatches back into
+`ts-workflow` for `address-review` and `ship` when it detects a Node repo.
 
 ## Skill Invocation Modes
 
 | Mode | Skills |
 |------|--------|
-| Slash-only | `start-issue`, `address-review`, `worktree` (`/create-worktree`, `/remove-worktree`, `/prune-worktree`), `e2e-verify`, `ship`, `complete-issue`, `tmux-start` |
-| Auto-triggerable | `commit`, `create-pr`, `review-deep` |
+| Slash-only | `start-issue`, `address-review`, `e2e-verify`, `ship`, `complete-issue`, `tmux-start` |
+| Auto-triggerable | `review-deep` |
 
 Slash-only skills still run through their slash commands, but their descriptions are omitted from the always-loaded auto-invoked skill list. Use `/ts-workflow:<command>` in Claude Code or `$ts-workflow:<skill>` in Codex. Codex requires the qualified plugin name; bare skill names are not resolver aliases. In Claude Code, type the slash command directly; `$ts-workflow:start-issue` is Codex syntax and causes a blocked Skill-tool invocation. Auto-triggerable skills remain available from natural-language requests such as "commit these changes" or "review my changes".
 
@@ -143,6 +152,8 @@ supplement; it never substitutes for the visual check.
 - GitHub CLI (`gh`) - authenticated
 - Git with worktree support
 - Chrome DevTools MCP (for `e2e-verify` browser testing)
+- The [`workflow`](../workflow) plugin — provides `commit`, `create-pr`, and the
+  worktree commands these workflows call
 
 ## Credits
 

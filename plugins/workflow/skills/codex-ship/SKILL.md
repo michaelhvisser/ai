@@ -42,10 +42,37 @@ this skill triages each one first, records *why* it dismissed anything, **dismis
 the PR itself** (resolves the review thread with the reason, so it doesn't linger or block
 merging), and never silently waves slop through.
 
-**Usage:** `/ts-workflow:codex-ship [PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
+**Usage:** `/workflow:codex-ship [PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
 
-**Examples:** `/ts-workflow:codex-ship 152` · `/ts-workflow:codex-ship 152 --max-rounds 15` ·
-`/ts-workflow:codex-ship --second-opinion mandatory`
+**Examples:** `/workflow:codex-ship 152` · `/workflow:codex-ship 152 --max-rounds 15` ·
+`/workflow:codex-ship --second-opinion mandatory`
+
+---
+
+## Language plugin dispatch
+
+This skill is language-agnostic, but two of the things it dispatches — `address-review`
+(the fix pass) and `ship` (verify, watch CI, merge) — live in a **language plugin**, not
+here. Resolve which one before the loop needs it, and store it as `LANG_PLUGIN`.
+
+`detect_checks` (Phase 0, step 4) sets `PROJECT_KIND`. Map it:
+
+| `PROJECT_KIND` | `LANG_PLUGIN` |
+|----------------|---------------|
+| `node` | `ts-workflow` |
+| `go` | `go-workflow` |
+| anything else | ask the driver |
+
+For `make` / `rust` / `unknown` — or when the mapped plugin is not installed — ask the driver
+(per `driver-interaction.md`) which installed plugin provides `ship` and `address-review`, and
+use the name they give.
+
+**If no such plugin is installed**, do not stall the loop: run the fix pass **inline** in this
+session (apply the confirmed-real findings yourself, run `LOCAL_CHECKS`, then a plain
+`git commit` + `git push`), and at the merge checkpoint hand the PR back to the user instead of
+dispatching a ship skill. Every `/${LANG_PLUGIN}:...` dispatch below has that inline fallback.
+
+Resolve `LANG_PLUGIN` **once** per run and reuse it; do not re-ask each round.
 
 ---
 
@@ -60,7 +87,7 @@ Codex CLI), so it catches what the primary models miss.
 |------|--------------|-----|
 | **Orchestrator** | cheapest fast tier | trigger, poll, SHA-freshness, round-count, dispatch, completion. **Zero code judgment.** |
 | **Judge** | strong tier | per finding → verdict `real / wrong / redundant / out-of-scope` + one-line reason |
-| **Fixer** | strong tier | one `/ts-workflow:address-review` pass on the confirmed-real set, one commit, one push |
+| **Fixer** | strong tier | one `/${LANG_PLUGIN}:address-review` pass on the confirmed-real set, one commit, one push (or the inline fix pass when no language plugin is installed) |
 | **Second opinion** | local `codex exec` CLI | AGREE/DISAGREE per finding against the working tree |
 
 **Reference bar for the second-opinion policy = the current strong tier** (whatever the
@@ -133,13 +160,18 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
    dismissal rests on.
 4. **Resolve the repo's check commands** so we don't burn Codex rounds on lint noise:
    ```bash
-   source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
-   pm_detect
+   source "${CLAUDE_PLUGIN_ROOT}/lib/detect-checks.sh"
+   detect_checks
    ```
-   Build `LOCAL_CHECKS` from what exists, in order: `$PM run lint` if `has_script lint`,
-   `$PM run typecheck` if `has_script typecheck`, `$PM run test` if `has_script test`.
-   If there is no `package.json`, fall back to `Makefile` targets `lint`/`test`; if neither
-   exists, ask the user for the repo's check commands — never guess.
+   Build `LOCAL_CHECKS` from the non-empty results, in order: `$CHECK_LINT`,
+   `$CHECK_TYPECHECK`, `$CHECK_TEST`. `detect_checks` reads the repo's real toolchain
+   (`package.json` scripts, `go.mod`, `Cargo.toml`) and backfills any check the primary
+   toolchain lacks from a same-named `Makefile` target. **An empty variable means that check
+   does not exist — never guess a command for it.** If `LOCAL_CHECKS` comes out empty, ask
+   the user for the repo's check commands.
+
+   `detect_checks` also sets `PROJECT_KIND`, which the language-plugin dispatch above needs —
+   this is the call that resolves it.
 5. **Local courtesy green:** run `LOCAL_CHECKS`. Fix trivial lint locally (≤5 attempts) and
    commit+push if needed. Don't chase deep test failures here — that's what the loop is for.
 
@@ -493,8 +525,10 @@ The two **natural** exits — both are the loop working as designed, not failure
 
 Otherwise there are new, confirmed-real findings → keep going. Dispatch the **Fixer**:
   ```
-  /ts-workflow:address-review $PR_NUM --no-watch
+  /${LANG_PLUGIN}:address-review $PR_NUM --no-watch
   ```
+  (`LANG_PLUGIN` resolved per "Language plugin dispatch" above; with no language plugin
+  installed, do the fix pass inline and `git commit` + `git push` yourself.)
   Restrict it to the confirmed-real set. `--no-watch` so it does one pass and exits — this loop
   owns the outer cycle. It commits + pushes. (That push does **not** trigger a Codex review —
   see Step A check 2. Next round must post an explicit `@codex review`; don't burn the poll
@@ -568,8 +602,9 @@ Every **dismissal is shown with its reason** so nothing is silently waved throug
 finding is ambiguous/split, call it out explicitly. Request the decision via the surface's
 structured-input capability, with options:
 
-- **Merge now via `/ts-workflow:ship`** — hands the PR to the sibling ship skill, which
-  verifies, watches CI, handles remaining bot feedback, and merges.
+- **Merge now via `/${LANG_PLUGIN}:ship`** — hands the PR to the language plugin's ship skill,
+  which verifies, watches CI, handles remaining bot feedback, and merges. Offer this option
+  only when a language plugin is resolved; otherwise offer "hand the PR back to me".
 - **Stop here** — for repos with their own merge automation (merge queues, board-driven
   lanes): report the ledger and leave the merge to that system.
 
@@ -577,9 +612,10 @@ structured-input capability, with options:
 
 ## Completion
 
-- **Merge now** → dispatch `/ts-workflow:ship --no-merge` first if the user wants a final
-  human look at CI, otherwise `/ts-workflow:ship`. Ship owns CI-watching and the merge; do not
-  duplicate its polling here.
+- **Merge now** → dispatch `/${LANG_PLUGIN}:ship --no-merge` first if the user wants a final
+  human look at CI, otherwise `/${LANG_PLUGIN}:ship`. Ship owns CI-watching and the merge; do
+  not duplicate its polling here. With no language plugin installed, report the final HEAD SHA
+  and the ledger and let the user merge — this skill does not merge on its own.
 - **Stop here** → print the ledger summary, note the final HEAD SHA, and remind the user of
   anything their automation still needs (e.g. a CI-gating label on the final SHA, a board
   status flip). This skill never flips external project-board state itself.

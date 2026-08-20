@@ -17,7 +17,7 @@ selection.
 ## Usage
 
 ```
-$ts-workflow:create-pr
+$workflow:create-pr
 ```
 
 ## Steps

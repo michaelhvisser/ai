@@ -195,7 +195,7 @@ REVIEW_BACKEND=agent
 REVIEW_CONCURRENCY=auto
 ```
 
-Read `../../lib/review-planning.md`, run the shared planner, display its coverage
+Read `${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`, run the shared planner, display its coverage
 plan, and follow it through the final coordinated pass. Do not interrupt solely
 because of raw diff size. Preserve `SCOPE_HINT` as review emphasis.
 
@@ -332,6 +332,6 @@ reversible delivery choice.
 - `context-gathering.md` — PR/issue/review-thread fetching, repo-guideline detection, size guard
 - `review-criteria.md` — full review criteria, TS/JS idiom checks, framework checks (React/Next.js, Convex), Quality Score Rubric, confidence scoring, breaking-change detection
 - `fix-and-verify.md` — fix iteration, parallel dispatch, test generation, verification, commit, and push
-- `../../scripts/review-deep-post-fix.sh` — deterministic owned-file commit, optional push, and remote-head verification
+- `${CLAUDE_PLUGIN_ROOT}/scripts/review-deep-post-fix.sh` — deterministic owned-file commit, optional push, and remote-head verification
 - `output-format.md` — findings table, spec-compliance table, review-comments-status table, PR-comment template
-- `../../lib/review-planning.md` — shared adaptive coverage planning and finding coordination
+- `${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md` — shared adaptive coverage planning and finding coordination

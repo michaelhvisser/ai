@@ -5,15 +5,31 @@
     "email": "michael@threefold.solutions"
   },
   "metadata": {
-    "description": "AI coding assistant plugins for TypeScript/JavaScript builders \u2014 Next.js, Astro, Convex, and beyond. By Michael Visser.",
-    "version": "0.3.11"
+    "description": "AI coding assistant plugins for shipping software — language-agnostic review and PR workflows, TypeScript/JavaScript issue-to-PR automation, and Slack-to-GitHub triage. By Michael Visser.",
+    "version": "0.4.0"
   },
   "plugins": [
+    {
+      "name": "workflow",
+      "source": "./plugins/workflow",
+      "description": "Language-agnostic PR and review workflow skills — read-only PR situation reports, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
+      "version": "0.1.0",
+      "keywords": [
+        "workflow",
+        "github",
+        "pr",
+        "review",
+        "triage",
+        "codex",
+        "worktree",
+        "commit"
+      ]
+    },
     {
       "name": "ts-workflow",
       "source": "./plugins/ts-workflow",
       "description": "Issue-to-PR workflow automation with worktree management for TypeScript/JavaScript projects",
-      "version": "0.2.9",
+      "version": "0.3.0",
       "keywords": [
         "workflow",
         "github",
