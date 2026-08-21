@@ -52,12 +52,32 @@ traced failure path does, and an **executable repro** (a failing test, a script,
 against real code) settles what debate cannot: a feasible repro that fails is strong evidence
 for dismissal; one that succeeds usually ends the argument in confirmation.
 
-## Known non-findings persist
+## Known non-findings persist — but almost none qualify
 
-The canonical home for durable dismissals is a **"Not a finding"** section in the repo's
-AGENTS.md/CLAUDE.md; prior review ledgers count too. A new finding matching one auto-dismisses
-with a pointer — unless the diff changed the facts the note rests on. The same ghost must
-never cost the human twice, in either skill.
+Durable dismissals live wherever the repo keeps its reviewer guidance: a **"Not a finding"**
+section in AGENTS.md/CLAUDE.md, or a review-scoped file those point at. Prior review ledgers
+count too, as do the dismissal rows of an earlier review comment on the same PR. A new finding
+matching one auto-dismisses with a pointer — unless the diff changed the facts the note rests
+on. The same ghost must never cost the human twice, in either skill.
+
+**Most dismissals are not eligible for persistence.** A dismissal qualifies only when all three
+hold:
+
+1. **Class-level, not line-level.** It states a standing by-design behavior ("we intentionally
+   X"), not a verdict about specific lines in one diff. A line-scoped dismissal can only recur
+   if a later PR touches those lines — and then the diff *is* the changed fact, so the note is
+   suspended for re-verification anyway. It buys nothing.
+2. **Premise-stable.** Its premise cannot be quietly falsified from elsewhere in the repo. A
+   premise that is a *global* property ("no code path does X") fails this test: it can go false
+   without anyone touching the noted lines, and the note would keep auto-dismissing a defect
+   that has since become real. Record the premise and the date in the note itself, so the
+   "facts changed" check has something concrete to check.
+3. **Not conceded or withdrawn.** A finding whose own sponsor withdrew it — or that was
+   dismissed as pre-existing or out-of-scope — is a resolved argument, not a recurring ghost.
+
+Persisting an ineligible dismissal is a defect in the review, not diligence. Instruction files
+load into every unrelated session, so each note is a standing attention cost; and a note whose
+premise has gone stale is an instruction to ignore a real bug.
 
 ## Out-of-scope observations die quietly
 
