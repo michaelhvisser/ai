@@ -469,10 +469,23 @@ made, and lint/test state. Every dismissal shows its reason.
 Pre-existing and repo-level observations appear only as their one-line dismissed ledger
 entries — never as a recommendations section, a "worth filing" list, or any other nudge to
 open issues. The report's outputs are exactly two: fixes landed in the PR, and dismissals
-with reasons. If a dismissal looks durable (the same non-finding will recur on future
-reviews of this repo), offer **once** to record it as a "not a finding" note in the repo's
-reviewer guidance (AGENTS.md or wherever the repo keeps it) so Phase 0 auto-dismisses it
-next time — write it only if the user says yes.
+with reasons.
+
+**Do not offer to record a dismissal on its first occurrence.** Recurrence is established by
+evidence, never predicted: offer only when this run's Phase 0 actually found the same
+dismissal already litigated — in the repo's reviewer guidance, a prior ledger, or an earlier
+antagonist comment on this PR — and it still had to be re-derived. A first-occurrence
+dismissal is already durably recorded in this run's PR comment, which is exactly where a later
+re-review of this PR looks. Predicting durability is what turns this offer into a recurring
+nag: the model over-predicts, the user declines, the decline is not persisted, and the next
+run asks again.
+
+When that bar *is* met, test the dismissal against the three eligibility criteria in
+`finding-bar.md` ("Known non-findings persist") and drop it if it fails any one. Only then
+offer **once** to record it in the repo's reviewer guidance — preferring a review-scoped file
+that AGENTS.md points at over AGENTS.md itself, since AGENTS.md loads into every unrelated
+session — and write it only if the user says yes. If the user declines, do not re-offer it
+anywhere later in the same run.
 
 ### Post to PR
 
