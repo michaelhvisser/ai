@@ -24,6 +24,11 @@ every finding is held to across this plugin's review skills, and the judge and
 second-opinion prompts must carry its full text (paste it — subagents can't resolve the
 plugin path).
 
+Read `${CLAUDE_PLUGIN_ROOT}/lib/fix-at-the-root.md` before any fix pass: it is the
+doctrine the Fixer works under — fix the **class** of defect, not just the reported
+instance — and every fixer dispatch must carry its full text (paste it — the fixer runs
+in a language plugin or inline and cannot resolve this plugin's path).
+
 Load the shared GitHub REST helpers before any GitHub operation:
 
 ```bash
@@ -87,7 +92,7 @@ Codex CLI), so it catches what the primary models miss.
 |------|--------------|-----|
 | **Orchestrator** | cheapest fast tier | trigger, poll, SHA-freshness, round-count, dispatch, completion. **Zero code judgment.** |
 | **Judge** | strong tier | per finding → verdict `real / wrong / redundant / out-of-scope` + one-line reason |
-| **Fixer** | strong tier | one `/${LANG_PLUGIN}:address-review` pass on the confirmed-real set, one commit, one push (or the inline fix pass when no language plugin is installed) |
+| **Fixer** | strong tier | one `/${LANG_PLUGIN}:address-review` pass on the confirmed-real set — fixed at the class level per `fix-at-the-root.md` — one commit, one push (or the inline fix pass when no language plugin is installed) |
 | **Second opinion** | local `codex exec` CLI | AGREE/DISAGREE per finding against the working tree |
 
 **Reference bar for the second-opinion policy = the current strong tier** (whatever the
@@ -250,9 +255,10 @@ Print: `=== KICKOFF: max-rounds=$MAX_ROUNDS, second-opinion=$POLICY ===`
 
 ## The round loop
 
-Initialise `ROUND=0` and an empty **ledger** (findings seen, verdict, second-opinion result,
-action, reason, and `github_dismissed` once the slop thread is resolved on the PR). The ledger
-is the artifact you present at the checkpoint — keep it faithfully.
+Initialise `ROUND=0` and an empty **ledger** (findings seen, verdict, class statement,
+second-opinion result, action, reason, `github_dismissed` once the slop thread is resolved on
+the PR, and — for fixed findings — `siblings_fixed`/`root_fix` from the fixer's ladder). The
+ledger is the artifact you present at the checkpoint — keep it faithfully.
 
 ### Step A — Consume existing Codex feedback first; trigger only if there is none
 
@@ -377,6 +383,11 @@ return a verdict and a one-line reason:
 - `out-of-scope` — pre-existing on the base branch, or not fixable inside this PR's blast
   radius. Dismissed on GitHub with that reason (Step E) — never converted into a proposed
   issue or follow-up.
+
+For every `real` verdict the judge also records a one-line **class statement**: the general
+property this diff violates, plus a greppable signature for locating sibling sites. This is
+where the Fixer's sweep (`fix-at-the-root.md`, rung 2) starts — and a judge that cannot state
+the class has not finished verifying the finding.
 
 Two bar rules bind the judge mechanically: a **mechanically-checkable** claim (types, unused
 symbols, null flow, lint) is verdicted by running the relevant tool on the changed files,
@@ -530,7 +541,16 @@ Otherwise there are new, confirmed-real findings → keep going. Dispatch the **
   (`LANG_PLUGIN` resolved per "Language plugin dispatch" above; with no language plugin
   installed, do the fix pass inline and `git commit` + `git push` yourself.)
   Restrict it to the confirmed-real set. `--no-watch` so it does one pass and exits — this loop
-  owns the outer cycle. It commits + pushes. (That push does **not** trigger a Codex review —
+  owns the outer cycle. It commits + pushes.
+
+  **The fixer fixes classes, not instances.** Hand it each finding's class statement from
+  Step C plus the **full text of `fix-at-the-root.md`** (paste it — the fixer cannot resolve
+  this plugin's path), and require the ladder: fix the reported instance, sweep this PR's diff
+  for traced siblings, fix the shared origin when one exists inside the blast radius. This
+  applies equally to the inline fallback. The payoff is convergence: a class fixed at the root
+  does not come back, while an instance-patched class is how round N+1 "discovers" findings
+  that are really the siblings of round N's. Copy each finding's `siblings_fixed` and
+  `root_fix` from the fixer's report into the ledger. (That push does **not** trigger a Codex review —
   see Step A check 2. Next round must post an explicit `@codex review`; don't burn the poll
   budget waiting on an auto-review.)
 
@@ -588,7 +608,7 @@ Present the **ledger** and stop. Do not merge or hand off without an explicit OK
   #$PR_NUM — CODEX SHIP: READY
 ============================================
   Rounds:            $ROUND / $MAX_ROUNDS
-  Confirmed & fixed: <n>   <list: finding → fix>
+  Confirmed & fixed: <n>   <list: finding → fix (class · siblings_fixed · root_fix)>
   Dismissed:         <n>   <list: finding → verdict → reason → second-opinion → GH thread resolved ✓>
   Ambiguous/split:   <n>   <list, if any>
   Local checks:      <LOCAL_CHECKS> ✓   |   rebased on base ✓
