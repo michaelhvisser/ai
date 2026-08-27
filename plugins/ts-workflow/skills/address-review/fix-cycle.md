@@ -102,7 +102,9 @@ When there are 3 or more unresolved comments targeting **different files**, disp
    choice, with:
    - "You are addressing PR review comments in `{FILE_PATH}`. Working directory: `{PROJECT_ROOT}`."
    - All comments for that file (reviewer text, line number, suggested change)
-   - "Before editing, run the pre-existing target changes guard. For each comment: understand the request, locate the code, make the minimal fix, validate against feedback. Report: files changed, fixes applied, testability of each fix."
+   - The full text of the Step 4c fix ladder (instance → siblings → origin, with its
+     scope guards) — the subagent cannot read this file
+   - "Before editing, run the pre-existing target changes guard. For each comment: understand the request, locate the code, fix it at the root per the ladder (sweep confined to this PR's diff), validate against feedback. Report: files changed, fixes applied, per-fix class statement + siblings fixed + root fix (or none), testability of each fix."
 3. **Dispatch all file-group agents in parallel** using `run_in_background: true`
 4. **Collect results** — proceed to Step 4.5 (test generation) with combined fix list
 
@@ -117,7 +119,29 @@ Determine what change is requested: code style, logic, docs, test, refactoring? 
 Use file path and line number from the thread.
 
 ### 4c. Make the Fix
-Make the **minimal change** that addresses the comment. Follow existing patterns.
+Fix the **defect at its root** with the smallest diff that does so. Follow existing
+patterns. A review comment reports an *instance* (a defect at file:line); most defects
+are instances of a *class* — a general property the change violates, which other sites
+in the same PR may violate too. Climb this ladder, in order, stopping when a rung finds
+nothing:
+
+1. **Fix the reported instance.** The floor — later rungs never replace it.
+2. **Sweep for siblings.** State in one line the class the comment is an instance of,
+   then sweep this PR's diff (not the whole repo) for other sites with the same defect.
+   Fix each sibling whose failure you can trace the same way; resemblance alone is not
+   a defect — a lookalike that is guarded upstream, or differs in the fact that
+   matters, is left alone.
+3. **Fix the origin.** When the instances share one mechanical origin inside this PR —
+   a copy-pasted shape, a wrong value produced upstream of every consumer, a missing
+   guard repeated at each call site — fix the origin once instead of patching each site.
+
+Scope guards: the sweep and any origin fix stay inside this PR's diff and blast radius;
+siblings already on the base branch are left alone (pre-existing, not this PR's work);
+never grow a review fix into a refactor of shared components other surfaces depend on.
+When rungs 2–3 find nothing, the minimal instance fix **is** the correct fix. When a
+caller (e.g. `codex-ship`) supplies a class statement or a fuller fix-at-the-root
+doctrine with the finding, follow that — it is this ladder with the caller's triage
+already done.
 
 ### 4d. Validate Fix Against Feedback
 1. Re-read the reviewer's comment
@@ -126,7 +150,10 @@ Make the **minimal change** that addresses the comment. Follow existing patterns
 4. Avoid mechanical edits that miss the underlying concern
 
 ### 4e. Track the Fix
-Note: thread ID, what was fixed, brief explanation, testability (`testable`/`not-testable`), source file/function/package if testable, and every file modified by the fix. Maintain one explicit owned-files list for this fix cycle. Do not add files that were already modified before the cycle or changed for unrelated work.
+Note: thread ID, what was fixed, brief explanation, the class statement with
+`siblings_fixed` count (0 is fine — state it) and `root_fix` (what changed at the
+origin, or `none (<reason>)`), testability (`testable`/`not-testable`), source
+file/function/package if testable, and every file modified by the fix. Maintain one explicit owned-files list for this fix cycle. Do not add files that were already modified before the cycle or changed for unrelated work.
 
 ## Step 4.5: Generate Tests for Testable Fixes
 
