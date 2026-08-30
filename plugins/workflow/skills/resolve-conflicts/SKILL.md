@@ -42,36 +42,26 @@ if [ -f "$RC_STATE_FILE" ]; then
   RC_PREV_BRANCH="${RC_BRANCH:-}"; RC_PREV_EXPECT="${RC_EXPECT:-}"
 fi
 
-RC_BASE=""
+RC_PICKS=""
 if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   RC_OP=rebase
   RC_STATE_DIR="$RC_GIT_DIR/rebase-merge"
   [ -d "$RC_STATE_DIR" ] || RC_STATE_DIR="$RC_GIT_DIR/rebase-apply"
   RC_ONTO=$(cat "$RC_STATE_DIR/onto")            # the new base
   RC_ORIG_HEAD=$(cat "$RC_STATE_DIR/orig-head")  # the branch tip before the rebase began
-  # Replay base = the first picked commit's parent. A plain rebase replays
-  # merge-base..orig-head, but `git rebase --onto NEW UPSTREAM` replays only
-  # UPSTREAM..orig-head — a merge-base three-dot diff would drag the commits
-  # the command deliberately excluded into the baseline, and Step 6 would
-  # then demand they survive. Merge backend: read the pick list. Apply
-  # backend (`--apply`): no pick list, but each generated patch opens with
-  # "From <sha>", and the first patch's parent is the replay base — exact
-  # for any topology, where counting patches (orig-head~<last>) lands wrong
-  # as soon as the range contains merged side-branch commits. Merge-base is
-  # the last resort.
-  RC_BASE=""
+  # The commits being replayed, read from the rebase's own state. Merge
+  # backend: pick lines from done + git-rebase-todo. Apply backend: each
+  # generated patch opens with "From <sha>". No single "replay base" range
+  # can substitute for this list — --onto excludes commits a merge-base
+  # range would include, a reordered interactive todo breaks
+  # first-pick-parent arithmetic, and merged side-branch history breaks
+  # patch counting.
   if [ -f "$RC_STATE_DIR/git-rebase-todo" ] || [ -f "$RC_STATE_DIR/done" ]; then
-    RC_FIRST_PICK=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
-      | grep -m1 -E '^(pick|edit|reword|fixup|squash) ' | awk '{print $2}')
-  elif [ -f "$RC_STATE_DIR/0001" ]; then
-    RC_FIRST_PICK=$(awk '/^From [0-9a-f]{40}/{print $2; exit}' "$RC_STATE_DIR/0001")
+    RC_PICKS=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
+      | awk '/^(pick|edit|reword|fixup|squash) /{print $2}')
   else
-    RC_FIRST_PICK=""
+    RC_PICKS=$(awk '/^From [0-9a-f]{40}/{print $2}' "$RC_STATE_DIR"/[0-9]* 2>/dev/null)
   fi
-  [ -n "$RC_FIRST_PICK" ] \
-    && RC_BASE=$(git rev-parse -q --verify "${RC_FIRST_PICK}^" 2>/dev/null) \
-    || RC_BASE=""
-  [ -n "$RC_BASE" ] || RC_BASE=$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")
 elif [ -f "$RC_GIT_DIR/MERGE_HEAD" ]; then
   RC_OP=merge
   RC_ONTO=$(git rev-parse MERGE_HEAD)            # the incoming tip
@@ -108,29 +98,46 @@ fi
 if [ "$RC_OP" = none ]; then
   echo "WORKFLOW_RESULT=INCOMPLETE"
   echo "WORKFLOW_REASON=no-operation-in-progress"
-elif [ "$RC_OP" = cherry-pick ]; then
-  # Only the picked commit's own change. A three-dot diff would reach back to
-  # the merge base and drag every unselected branch-only ancestor into the
-  # baseline, which Step 6 would then report as "lost". Per-commit filename so
-  # a multi-commit pick accumulates one baseline per stop, idempotently.
-  if git rev-parse -q --verify "${RC_ORIG_HEAD}~1" >/dev/null 2>&1; then
-    git diff "${RC_ORIG_HEAD}~1" "$RC_ORIG_HEAD" \
-      > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
-  else
-    # Root commit: there is no parent to diff against, and a failed ~1 lookup
-    # would leave an EMPTY baseline that Step 6 vacuously passes. The root's
-    # entire content is the change.
-    git show --format= "$RC_ORIG_HEAD" \
-      > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
-  fi
-elif [ "$RC_OP" = rebase ]; then
-  # Only the commits actually being replayed (RC_BASE handles --onto, where
-  # the merge base and the replay base differ).
-  git diff "$RC_BASE" "$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
-else
-  # merge: everything the branch changed relative to the incoming side. This
-  # is the reviewed work that must survive resolution.
+elif [ "$RC_OP" = merge ]; then
+  # Everything the branch changed relative to the incoming side. This is the
+  # reviewed work that must survive resolution.
   git diff "$RC_ONTO...$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
+else
+  # rebase and cherry-pick: ONE BASELINE PER REPLAYED COMMIT, all captured at
+  # the first stop. Later commits may apply cleanly and never re-enter this
+  # step, and Step 6's supersession proof needs their baselines too. For a
+  # cherry-pick the set is the current commit plus every pick still in the
+  # sequencer (picks completed before the first stop landed before RC_ONTO
+  # and are outside the integrity check's scope).
+  if [ "$RC_OP" = cherry-pick ]; then
+    RC_PICKS="$RC_ORIG_HEAD $(awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null)"
+  fi
+  if [ -z "$RC_PICKS" ]; then
+    # No readable pick state — last resort for a rebase: the merge-base range.
+    git diff "$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")" "$RC_ORIG_HEAD" \
+      > "$RC_RUN_DIR/ours-before.diff"
+  fi
+  # while-read, not `for x in $VAR`: zsh does not word-split an unquoted
+  # variable, and these blocks run under the user's shell.
+  printf '%s\n' "$RC_PICKS" | while IFS= read -r RC_P; do
+    [ -n "$RC_P" ] || continue
+    RC_P=$(git rev-parse "$RC_P")
+    RC_OUT="$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_P").diff"
+    if git rev-parse -q --verify "${RC_P}^2" >/dev/null 2>&1; then
+      # A merge commit being picked: ^1 is NOT automatically the right base —
+      # the pick was started with -m <n>, and for a single pick git records
+      # <n> nowhere. Determine it from the command the caller actually ran
+      # (missing intent if unknowable) and write the baseline by hand:
+      # git diff "<sha>^<n>" "<sha>" > "$RC_OUT"
+      echo "MAINLINE_NEEDED: $RC_P — baseline requires the -m parent number"
+    elif git rev-parse -q --verify "${RC_P}~1" >/dev/null 2>&1; then
+      git diff "${RC_P}~1" "$RC_P" > "$RC_OUT"
+    else
+      # Root commit: no parent; a failed ~1 lookup would leave an EMPTY
+      # baseline that Step 6 vacuously passes. Its entire content is the change.
+      git show --format= "$RC_P" > "$RC_OUT"
+    fi
+  done
 fi
 
 # The push lease is captured at the FIRST stop, before any resolution work:
@@ -159,6 +166,12 @@ fi
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
 the skill's own authority — which operation, onto what, is the caller's decision.
+
+A `MAINLINE_NEEDED` line means a replayed **merge commit**'s baseline could not be derived
+mechanically: recover the `-m <n>` parent number from the command the caller actually ran
+(`sequencer/opts` may record it for a multi-pick sequence; otherwise it is a missing-intent
+question), then write `git diff "<sha>^<n>" "<sha>"` to the named baseline file before
+continuing past Step 0.
 
 **Every later block that uses an `RC_*` variable begins with this loader** — repeat it
 rather than assuming shell state survived from Step 0:
@@ -286,18 +299,18 @@ RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
 git diff "$RC_ONTO"..HEAD > "$RC_RUN_DIR/ours-after.diff"
 ```
 
-Compare every `ours-before*.diff` (one file for a merge or rebase; one per picked commit
-for a cherry-pick) against `ours-after.diff`. Every hunk present before and absent
+Compare every `ours-before*.diff` (one file for a merge; one per replayed commit for a
+rebase or cherry-pick) against `ours-after.diff`. Every hunk present before and absent
 after must be one of:
 
 1. **An identical change already on the incoming side** — confirm with
    `git log -S'<vanished text>' --oneline "$RC_ONTO"` or by reading the incoming commit.
 2. **A deliberate drop recorded in Step 3's trade-offs.**
-3. **Cherry-pick only: superseded inside the picked series itself** — a later picked
-   commit modified or removed what an earlier one introduced, so the transient hunk is
-   rightly absent from the net result. Prove it by pointing at the later
-   `ours-before-<sha>.diff` that touches the same lines; the series' **net** effect is
-   what must survive, not each intermediate state.
+3. **Superseded inside the replayed series itself** — a later replayed commit (in the
+   cherry-pick sequence or the rebase todo) modified or removed what an earlier one
+   introduced, so the transient hunk is rightly absent from the net result. Prove it by
+   pointing at the later `ours-before-<sha>.diff` that touches the same lines; the
+   series' **net** effect is what must survive, not each intermediate state.
 
 Anything else is a lost reviewed change: reopen the resolution and restore it before
 declaring done. This check is the completion criterion for the whole skill — "the rebase
