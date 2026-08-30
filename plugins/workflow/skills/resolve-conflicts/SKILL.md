@@ -1,6 +1,6 @@
 ---
 name: resolve-conflicts
-description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge or rebase stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the merge or rebase first, and come back only if it stops."
+description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge, rebase, or cherry-pick stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the operation first, and come back only if it stops."
 ---
 
 # Resolve Conflicts — finish the operation without losing either side
@@ -209,10 +209,13 @@ fi
 # with the same endpoints but an edited pick list (Codex reproduced inode
 # recycling on APFS, so no directory fingerprint is trusted). The keep-set is
 # derived only from LIVE facts — never from remembered state, which a false
-# match would poison: a baseline survives when its commit is still in the
-# current replay set, or when its change has verifiably LANDED on this branch
-# since the operation began (patch-id equivalence — a cherry-pick's earlier
-# stops land under new SHAs but keep their patch content).
+# match would poison. Deletion is the dangerous direction (a deleted
+# legitimate baseline turns Step 6 into a false PASS), so a file is removed
+# only when every proof of belonging fails: not in the current replay set,
+# its change never landed by patch-id, and no landed commit carries its
+# subject (a conflict-RESOLVED earlier pick lands with a different patch-id
+# but keeps its message). A stale file that slips through all three surfaces
+# in Step 6 as a visible false alarm — the safe failure.
 printf '%s\n' "$RC_PICKS" \
   | while IFS= read -r RC_P; do
       [ -n "$RC_P" ] && git rev-parse --short "$RC_P" 2>/dev/null
@@ -221,11 +224,14 @@ git rev-list "$RC_ONTO"..HEAD 2>/dev/null \
   | while IFS= read -r RC_C; do
       git show --format= "$RC_C" | git patch-id --stable
     done | awk '{print $1}' | sort -u > "$RC_RUN_DIR/.landed"
+git log --format=%s "$RC_ONTO"..HEAD 2>/dev/null > "$RC_RUN_DIR/.landed-subjects"
 for RC_F in $(ls "$RC_RUN_DIR"/ours-before-*.diff 2>/dev/null); do
   RC_S=${RC_F##*ours-before-}; RC_S=${RC_S%.diff}
   grep -qx "$RC_S" "$RC_RUN_DIR/.keep" && continue
   RC_PID=$(git show --format= "$RC_S" 2>/dev/null | git patch-id --stable | awk '{print $1}')
   [ -n "$RC_PID" ] && grep -qx "$RC_PID" "$RC_RUN_DIR/.landed" && continue
+  RC_SUBJ=$(git log -1 --format=%s "$RC_S" 2>/dev/null)
+  [ -n "$RC_SUBJ" ] && grep -qxF "$RC_SUBJ" "$RC_RUN_DIR/.landed-subjects" && continue
   rm -f "$RC_F"
 done
 
