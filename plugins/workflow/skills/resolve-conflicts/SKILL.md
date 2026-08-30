@@ -40,10 +40,11 @@ rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
 # KIND and the operation IDENTITY match what is detected now — an --abort
 # leaves this file behind, and a later operation (even of the same kind) must
 # not inherit it.
-RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""
+RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""; RC_PREV_SEQ=""
 if [ -f "$RC_STATE_FILE" ]; then
   RC_PREV_OP=$(rc_get RC_OP); RC_PREV_ID=$(rc_get RC_ID)
   RC_PREV_ONTO=$(rc_get RC_ONTO); RC_PREV_RUN_DIR=$(rc_get RC_RUN_DIR)
+  RC_PREV_SEQ=$(rc_get RC_SEQ)
 fi
 
 RC_PICKS=""
@@ -97,21 +98,19 @@ fi
 # Operation identity: the same KIND is not the same OPERATION — an aborted
 # rebase followed by a new rebase must not share baselines. The identity is
 # derived from state git itself keeps per operation.
+# Identity gates state reuse; the baseline PRUNE further down is what makes a
+# false identity match harmless, so no filesystem trivia (inodes recycle on
+# APFS) is part of it.
 case "$RC_OP" in
-  # The state dir's inode is the per-instance marker: a rebase aborted and
-  # restarted from the same tip onto the same target (with, say, a commit
-  # dropped from the todo) recreates rebase-merge/, so its stale baselines
-  # never join this run's glob.
-  rebase)      RC_ID="${RC_ORIG_HEAD}:${RC_ONTO}:$(ls -di "$RC_STATE_DIR" | awk '{print $1}')" ;;
+  rebase)      RC_ID="${RC_ORIG_HEAD}:${RC_ONTO}" ;;
   merge)       RC_ID="$RC_ONTO" ;;
   cherry-pick)
-    # sequencer/head alone collides when a second, different sequence starts
-    # from the same HEAD after an abort; the sequencer directory's inode is
-    # new per sequence, so head:inode separates them.
     if [ -d "$RC_GIT_DIR/sequencer" ]; then
-      RC_ID="$(cat "$RC_GIT_DIR/sequencer/head" 2>/dev/null):$(ls -di "$RC_GIT_DIR/sequencer" | awk '{print $1}')"
+      RC_ID=$(cat "$RC_GIT_DIR/sequencer/head" 2>/dev/null)
     else
-      RC_ID=$(git rev-parse CHERRY_PICK_HEAD)
+      # Single pick: include the target HEAD — the same commit retried after
+      # the branch advanced is a different operation with a different RC_ONTO.
+      RC_ID="$(git rev-parse CHERRY_PICK_HEAD):$(git rev-parse HEAD)"
     fi ;;
   *)           RC_ID="" ;;
 esac
@@ -207,6 +206,29 @@ else
   done
 fi
 
+# Sequence memory: the set of commits this operation replays, first-stop
+# value preserved across re-entry (a cherry-pick's outstanding set shrinks as
+# picks land, but the earlier picks' baselines remain Step 6 evidence).
+if [ "$RC_PREV_OP" = "$RC_OP" ] && [ "$RC_PREV_ID" = "$RC_ID" ] && [ -n "$RC_PREV_SEQ" ]; then
+  RC_SEQ="$RC_PREV_SEQ"
+else
+  RC_SEQ=$(printf '%s\n' "$RC_PICKS" | tr '\n' ' ')
+fi
+
+# PRUNE stale baselines. Identity can falsely match a restarted operation
+# with the same endpoints but an edited pick list (Codex reproduced inode
+# recycling on APFS, so no directory fingerprint is trusted): any
+# ours-before file for a commit outside this operation's replay set is
+# deleted, so Step 6 can never demand a deliberately dropped commit back.
+{ printf '%s\n' "$RC_PICKS"; printf '%s\n' "$RC_SEQ" | tr ' ' '\n'; } \
+  | while IFS= read -r RC_P; do
+      [ -n "$RC_P" ] && git rev-parse --short "$RC_P" 2>/dev/null
+    done | sort -u > "$RC_RUN_DIR/.keep"
+for RC_F in $(ls "$RC_RUN_DIR"/ours-before-*.diff 2>/dev/null); do
+  RC_S=${RC_F##*ours-before-}; RC_S=${RC_S%.diff}
+  grep -qx "$RC_S" "$RC_RUN_DIR/.keep" || rm -f "$RC_F"
+done
+
 # Push lease for Step 7. Only a rebase rewrites published history, and for a
 # rebase the correct expectation is not any remote-tracking snapshot — every
 # snapshot is raceable (a fetch by an IDE before or after the first stop
@@ -224,8 +246,8 @@ fi
 # Fenced blocks may execute as separate shell calls and inherit nothing, and
 # by Step 6 the operation state dirs are gone — persist what later steps need.
 # Written as key=value DATA; loaders parse with rc_get, never source.
-[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\n' \
-  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" > "$RC_STATE_FILE"
+[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\nRC_SEQ=%s\n' \
+  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" "$RC_SEQ" > "$RC_STATE_FILE"
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
