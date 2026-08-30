@@ -300,18 +300,26 @@ read-only posture. Classify it per `decision-gates.md`: consent to spend tokens 
 PR is **missing intent** — a status request does not imply it — so the gate asks once, through
 the driver's structured-input capability, and never loops.
 
-Skip the gate entirely when `--no-gate` or `--json`; when the driver has no structured input
-(print the queue and stop, per `driver-interaction.md`); or when `queue[0]` is a
-`QUEUE_TERMINAL` id — the report already says who owns the move.
+Skip the gate entirely when `--no-gate` or `--json`, or when `queue[0]` is a
+`QUEUE_TERMINAL` id — the report already says who owns the move. A driver **without**
+structured input does not skip it: per `driver-interaction.md`, ask the same one question
+as concise text in the final response and stop; the user's answer resumes the gate.
 
 **Dispatchability is checked, not assumed.** A queue entry is dispatchable when its id maps
 to a skill actually invocable in this session (`codex-ship` and `antagonist-review` from
 this plugin; `address-review` and `ui-review` through the language plugin the flow map
-names, when installed), or when it is `rebase` — the one mechanical entry, executed by
-running its `local:` recipe verbatim on explicit selection. Everything else (`wait-ci`,
-`fix-plan`, `finish-draft`, `complete-gate`, `move-to-human-review`, …) is an action the
-report describes, not a skill to launch: for those the gate offers only the local recipe
-and Stop. Never present a Run option that cannot actually run.
+names, when installed), or when it is `rebase` — the one mechanical entry. Everything else
+(`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`, `move-to-human-review`, …) is an
+action the report describes, not a skill to launch: for those the gate offers only the
+local recipe and Stop. Never present a Run option that cannot actually run.
+
+**Rebase dispatch binds to the PR's checkout, never the shell's.** The skill reports from
+any checkout — another branch, detached HEAD, a dirty tree — so running the rebase recipe
+in the ambient directory can rebase and force-push an unrelated branch. Offer Run for
+`rebase` only when Phase 2e's local facts show the checkout **at the PR head and clean**;
+the executed push names its target explicitly
+(`git push --force-with-lease origin <headRefName>`), never an argumentless push.
+Otherwise the gate presents the recipe without running it.
 
 One question, at most four options:
 

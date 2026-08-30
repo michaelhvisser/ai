@@ -170,8 +170,8 @@ The resolution map — what "this step succeeded" is assumed to change, and noth
 |---|---|
 | `rebase` | `behind_by = 0`, `mergeable = MERGEABLE` — **and a new head SHA**: `CI_STATE = pending`, every `*_AT_HEAD` false. Evidence dies with the SHA it named; a queue that keeps crediting it lies. |
 | `address-review` | `UNRES_H = UNRES_B = 0`, `HUMAN_CR = false`, `needs-resolve-only` cleared, plus the new-head resets above — assume the fix pushes code; a resolve-only round is the cheaper surprise. |
-| `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` |
-| `antagonist-review` | `AR_AT_HEAD = true`, `CI_STATE = green` |
+| `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` — plus the new-head resets: `CI_STATE = pending` and every **other** `*_AT_HEAD` false. Its fixer pushes when a finding is real; assume it does (a clean run is the cheaper surprise), and its own contract re-reviews at the final head, which is why `CS_AT_HEAD` survives the reset. |
+| `antagonist-review` | `AR_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the loop pushes fix commits when findings confirm. It never *owns* CI, so no resolution may ever fabricate green from pending — `wait-ci` follows in the projection instead. |
 | `ui-review` | `E2E_AT_HEAD = true` |
 | `fix-plan` | `PLAN_COMBINED = yes`, `PLAN_SPLIT = false` |
 | `wait-ci` | `CI_STATE = green` — the optimistic branch; the entry's note reads "if it lands red, the next step is address-review instead" |
@@ -193,7 +193,7 @@ drive.
 
 | id | local recipe |
 |---|---|
-| `rebase` | `git fetch origin && git rebase origin/<base>`, then `git push --force-with-lease`; on conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
+| `rebase` | from a clean checkout of the PR head: `git fetch origin && git rebase origin/<base>`, then `git push --force-with-lease origin <headRefName>` — the push names its target explicitly so it can never force-update whatever branch the shell happens to be on; on conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
 | `address-review` | open each unresolved thread (URLs in the report), fix in the editor, push, then reply and resolve on GitHub |
 | `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
 | `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
