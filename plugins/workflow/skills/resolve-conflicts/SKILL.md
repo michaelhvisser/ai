@@ -229,7 +229,9 @@ git rev-list "$RC_ONTO"..HEAD 2>/dev/null \
       git show --format= "$RC_C" | git patch-id --stable
     done | awk '{print $1}' | sort -u > "$RC_RUN_DIR/.landed"
 git log --format=%s "$RC_ONTO"..HEAD 2>/dev/null > "$RC_RUN_DIR/.landed-subjects"
-for RC_F in $(ls "$RC_RUN_DIR"/ours-before-*.diff 2>/dev/null); do
+# find, not a glob: on a merge run no ours-before-*.diff exists, and zsh's
+# NOMATCH aborts a failed glob before any command runs.
+find "$RC_RUN_DIR" -maxdepth 1 -name 'ours-before-*.diff' | while IFS= read -r RC_F; do
   RC_S=${RC_F##*ours-before-}; RC_S=${RC_S%.diff}
   grep -qx "$RC_S" "$RC_RUN_DIR/.keep" && continue
   RC_PID=$(git show --format= "$RC_S" 2>/dev/null | git patch-id --stable | awk '{print $1}')
@@ -252,9 +254,25 @@ if [ "$RC_OP" = rebase ] && grep -q '^refs/heads/' "$RC_STATE_DIR/head-name" 2>/
   RC_EXPECT="$RC_ORIG_HEAD"
   # The branch's CONFIGURED push destination, not a hardcoded origin/<name> —
   # pushRemote / remote.pushDefault / a push refspec can all redirect it.
-  RC_PUSH=$(git rev-parse --abbrev-ref "${RC_BRANCH}@{push}" 2>/dev/null) \
-    || RC_PUSH="origin/${RC_BRANCH}"
-  RC_REMOTE=${RC_PUSH%%/*}; RC_DEST=${RC_PUSH#*/}
+  RC_PUSH=$(git rev-parse --abbrev-ref "${RC_BRANCH}@{push}" 2>/dev/null) || RC_PUSH=""
+  if [ -n "$RC_PUSH" ]; then
+    RC_REMOTE=${RC_PUSH%%/*}; RC_DEST=${RC_PUSH#*/}
+  else
+    # @{push} can fail while a destination IS configured (a refs/for/* push
+    # refspec has no local tracking ref). Guessing origin/<branch> there
+    # would rewrite the wrong remote — so guess only when the effective push
+    # remote carries no push refspecs at all; otherwise record no lease and
+    # hand the push to the caller, who knows their config.
+    RC_PR=$(git config "branch.${RC_BRANCH}.pushRemote" 2>/dev/null \
+      || git config remote.pushDefault 2>/dev/null \
+      || git config "branch.${RC_BRANCH}.remote" 2>/dev/null || echo origin)
+    if [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ]; then
+      RC_REMOTE=""; RC_DEST=""; RC_EXPECT=""
+      echo "PUSH_UNRESOLVED: ${RC_BRANCH} has push config Step 7 cannot resolve — it will skip the push"
+    else
+      RC_REMOTE="$RC_PR"; RC_DEST="$RC_BRANCH"
+    fi
+  fi
 else
   RC_BRANCH=$(git symbolic-ref --quiet --short HEAD) || RC_BRANCH=""
   RC_EXPECT=""; RC_REMOTE=""; RC_DEST=""  # no rewrite → no force-push at all
