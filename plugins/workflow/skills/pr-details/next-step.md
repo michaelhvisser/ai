@@ -167,7 +167,9 @@ though promotion follows it: the queue's job is to reach the user's own decision
 stop there, not to project past it.
 
 Several resolutions apply **the new-head resets** — the facts a push invalidates, exactly
-as GitHub will when it lands: `CI_STATE = pending`; every other `*_AT_HEAD` false; and
+as GitHub will when it lands: `CI_STATE = pending` **when the repository has any required
+or observed checks — a repo whose fetched CI state is `none` stays `none`, and a batch
+never polls checks that cannot exist**; every other `*_AT_HEAD` false; and
 approval sufficiency invalidated per the fetched ruleset — `APPROVALS_GIVEN = 0` under
 `dismiss_stale_on_push`, and the last-push-approval conjunct unsatisfied under
 `last_push_approval`, so a projected queue can never carry an approval across a push that
@@ -180,7 +182,7 @@ The resolution map — what "this step succeeded" is assumed to change, and noth
 | `rebase` | `behind_by = 0`, `mergeable = MERGEABLE`, `merge_state = CLEAN` (the `BEHIND`/`DIRTY` values this step exists to fix must not survive it — a retained `BEHIND` makes C6 false forever and loops the queue into `complete-gate`) — **and a new head SHA**: the new-head resets. Evidence dies with the SHA it named; a queue that keeps crediting it lies. |
 | `address-review` | `UNRES_H = UNRES_B = 0`, `needs-resolve-only` cleared, plus the new-head resets — assume the fix pushes code; a resolve-only round is the cheaper surprise. **`HUMAN_CR` stays as fetched**: a formal `CHANGES_REQUESTED` review clears only when the reviewer re-approves or dismisses it — the skill just requests re-review. When it was true, row 12 refires on the next projection step and the loop guard ends the queue there, which is the honest tail: the reviewer owns the next move. |
 | `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` — plus the new-head resets: `CI_STATE = pending` and every **other** `*_AT_HEAD` false. Its fixer pushes when a finding is real; assume it does (a clean run is the cheaper surprise), and its own contract re-reviews at the final head, which is why `CS_AT_HEAD` survives the reset. |
-| `antagonist-review` | `AR_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the loop pushes fix commits when findings confirm. It never *owns* CI, so no resolution may ever fabricate green from pending — `wait-ci` follows in the projection instead. |
+| `antagonist-review` | `AR_AT_HEAD = true` and **nothing else** — by its own contract the skill never pushes (fix commits land locally, or on a `review/antagonist-*` branch for cherry-picking), so the remote head and every fact about it are unchanged. When fixes exist, landing them is a separate action the re-run re-derives from real state. No resolution may ever fabricate green from pending. |
 | `ui-review` | `E2E_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the mapped verifier rebases and force-pushes whenever the branch is behind, so evidence from the superseded SHA must not survive the projection. E2E evidence itself is from the verifier's final head. |
 | `fix-plan` | `PLAN_COMBINED = yes`, `PLAN_SPLIT = false` |
 | `wait-ci` | `CI_STATE = green` — the optimistic branch; the entry's note reads "if it lands red, the next step is address-review instead" |
