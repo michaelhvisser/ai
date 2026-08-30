@@ -172,7 +172,7 @@ The resolution map — what "this step succeeded" is assumed to change, and noth
 | `address-review` | `UNRES_H = UNRES_B = 0`, `HUMAN_CR = false`, `needs-resolve-only` cleared, plus the new-head resets above — assume the fix pushes code; a resolve-only round is the cheaper surprise. |
 | `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` — plus the new-head resets: `CI_STATE = pending` and every **other** `*_AT_HEAD` false. Its fixer pushes when a finding is real; assume it does (a clean run is the cheaper surprise), and its own contract re-reviews at the final head, which is why `CS_AT_HEAD` survives the reset. |
 | `antagonist-review` | `AR_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the loop pushes fix commits when findings confirm. It never *owns* CI, so no resolution may ever fabricate green from pending — `wait-ci` follows in the projection instead. |
-| `ui-review` | `E2E_AT_HEAD = true` |
+| `ui-review` | `E2E_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the mapped verifier rebases and force-pushes whenever the branch is behind, so evidence from the superseded SHA must not survive the projection. E2E evidence itself is from the verifier's final head. |
 | `fix-plan` | `PLAN_COMBINED = yes`, `PLAN_SPLIT = false` |
 | `wait-ci` | `CI_STATE = green` — the optimistic branch; the entry's note reads "if it lands red, the next step is address-review instead" |
 | `finish-draft` | `IS_DRAFT = false` |

@@ -14,7 +14,7 @@ which exist until step 0a has run.
 
 ### §0a Resolve identity (first, always)
 
-Produce `{HOST, OWNER, NAME, SLUG, PR_NUM, BASE, HEAD_SHA, HEAD_REPO, IS_FORK}` before any
+Produce `{HOST, OWNER, NAME, SLUG, PR_NUM, BASE, HEAD_SHA, HEAD_REPO, HEAD_SLUG, IS_FORK}` before any
 other call. Nothing downstream may use the current checkout's repo implicitly.
 
 ```bash
@@ -51,12 +51,15 @@ Then the minimal PR record the rest of Phase 0 depends on:
 
 ```bash
 pr_facts_gh pr view "$PR_ARG" -R "$SLUG" \
-  --json number,baseRefName,headRefOid,headRepositoryOwner,isCrossRepository,state \
+  --json number,baseRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state \
   > "$RUN_TMP/pr-min.json" || exit 4
 PR_NUM=$(jq -r .number                    "$RUN_TMP/pr-min.json")
 BASE=$(jq -r .baseRefName                 "$RUN_TMP/pr-min.json")
 HEAD_SHA=$(jq -r .headRefOid              "$RUN_TMP/pr-min.json")
-HEAD_REPO=$(jq -r .headRepositoryOwner.login "$RUN_TMP/pr-min.json")
+HEAD_REPO=$(jq -r .headRepositoryOwner.login "$RUN_TMP/pr-min.json")  # owner, for compare's owner:ref
+# The FULL head slug, owner/name — remote-URL matching needs it, because the
+# owner login alone is ambiguous (renamed forks, several repos per owner).
+HEAD_SLUG=$(jq -r '.headRepositoryOwner.login + "/" + .headRepository.name' "$RUN_TMP/pr-min.json")
 IS_FORK=$(jq -r .isCrossRepository        "$RUN_TMP/pr-min.json")
 ```
 

@@ -330,8 +330,10 @@ sends the rebased commit itself, to the remote that actually hosts the head:
 git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>
 ```
 
-`<head-remote>` is the configured remote whose URL matches `HEAD_REPO` (`facts.md` §0a
-already knows `IS_FORK`): `origin` for a same-repo PR, the fork's remote otherwise. The
+`<head-remote>` is the configured remote whose URL matches the full `HEAD_SLUG`
+(owner/name, normalized — the owner login alone is ambiguous for renamed forks or several
+repos under one owner; `facts.md` §0a carries both it and `IS_FORK`): `origin` for a
+same-repo PR, the fork's remote otherwise. The
 `HEAD:` refspec pushes what was just rebased even when the local branch is not named
 `<headRefName>`. When no configured remote points at the head repository — the usual case
 for a fork checked out via `refs/pull/*` — the entry is **not dispatchable**: present the
