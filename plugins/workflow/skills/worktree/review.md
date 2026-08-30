@@ -64,7 +64,26 @@ Read `Worktree absolute path:` from the output for each PR.
 
 ### Step 4: Install Dependencies
 
-In each worktree, detect the package manager from the lockfile and install:
+**Trust gate first.** The worktree now contains code the PR author controls, and
+installing dependencies executes that PR's lifecycle scripts with your local
+permissions — in a directory where Step 2 may just have copied secret-bearing
+env files. Classify before installing:
+
+```bash
+gh pr view "<pr-number>" --json isCrossRepository,author --jq '{fork: .isCrossRepository, author: .author.login}'
+```
+
+- **Same-repository PR** (`fork: false`) — the author has push access to this
+  repo already; install normally.
+- **Fork PR** (`fork: true`) — untrusted by default. This is missing intent
+  (`lib/decision-gates.md`): ask whether to install with lifecycle scripts
+  disabled (`npm install --ignore-scripts`, `pnpm install --ignore-scripts`,
+  `yarn install --ignore-scripts`, `bun install --ignore-scripts`), install
+  normally because the user vouches for this author, or skip installation.
+  When scripts were skipped, say so in the report — packages needing a build
+  step may not work until the user opts in.
+
+Then detect the package manager from the lockfile and install:
 
 | Lockfile present | Command |
 |---|---|
@@ -98,9 +117,17 @@ step with a note. Never fail the whole flow over the editor.
 ### Step 6: Report
 
 For each PR, report: worktree path, branch, head commit (`git log --oneline
--1`), and the diff stat against the PR's base
-(`git diff --stat origin/<base>...HEAD | tail -1`). Note any
-`PR_STATE_WARNING` or `WORKTREE_STALE` lines.
+-1`), and the diff stat against the PR's **freshly fetched** base — the
+creation script fetches only `refs/pull/<n>/head`, so `origin/<base>` is
+whatever the user last fetched and can misreport the change set:
+
+```bash
+RV_BASE=$(gh pr view "<pr-number>" --json baseRefName --jq .baseRefName)
+git fetch --no-tags origin "$RV_BASE"
+git diff --stat "origin/${RV_BASE}...HEAD" | tail -1
+```
+
+Note any `PR_STATE_WARNING` or `WORKTREE_STALE` lines.
 
 ## Contract
 
