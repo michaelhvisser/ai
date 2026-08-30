@@ -429,12 +429,13 @@ git commit --no-edit                       # merge
 GIT_EDITOR=true git cherry-pick --continue # cherry-pick
 ```
 
-A rebase replays commits one at a time, so a later commit may stop on new conflicts:
-loop back to Step 1 for each stop (the Step 0 baseline stays valid — `RC_ONTO` and
-`RC_ORIG_HEAD` do not change mid-rebase). A multi-commit cherry-pick also stops per
-commit, but there `CHERRY_PICK_HEAD` moves: loop back to **Step 0** at each stop, so the
-per-commit baseline tracks the commit actually being replayed (the shared run dir
-accumulates them). During a rebase always use `--continue`, never a plain `git commit`.
+A rebase or multi-commit cherry-pick replays commits one at a time, so a later commit may
+stop on new conflicts. **Loop back to Step 0 for every stop, both operations alike.**
+Step 0 is idempotent, and re-running it is what keeps the baseline set true: a rebase todo
+can change mid-operation (`--edit-todo` adds or removes picks — a new pick needs its
+baseline captured, a removed one is pruned), and a cherry-pick's `CHERRY_PICK_HEAD` moves
+per stop. The shared run dir accumulates the per-commit baselines across stops. During a
+rebase always use `--continue`, never a plain `git commit`.
 
 ## Step 6 — Integrity check
 
