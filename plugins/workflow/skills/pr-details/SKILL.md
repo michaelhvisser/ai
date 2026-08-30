@@ -379,6 +379,13 @@ One question, at most four options:
 3. **Handle it locally** — print step 1's `local:` recipe and stop.
 4. **Stop** — the report stands as-is.
 
+**Every sibling dispatch passes the full PR URL, never a bare number.** Siblings resolve
+their repository from the ambient checkout (`codex-ship` via `gh repo view`,
+`antagonist-review` via unqualified `gh pr` calls), and a fork checkout can carry a
+same-numbered PR — a bare `261` there addresses the wrong pull request. The URL pins host,
+owner, and repo. A sibling that cannot accept a URL is dispatchable only when the ambient
+checkout's repository **is** the resolved base repository.
+
 Dispatch means invoking the sibling skill exactly as the user would have; every gate, prompt,
 and confirmation inside that skill still applies. `pr-details` itself still mutates nothing —
 the mutation belongs to the skill the user selected, and the selection is recorded in the
