@@ -120,7 +120,8 @@ Parse with the `for arg in $ARGUMENTS … case` loop and `SKIP_NEXT` for valued 
 `codex-ship`. A bare token that is not `^[0-9]+$` is a branch name or a URL.
 
 ```bash
-PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; AS_JSON=0; REFRESH=0; PR_ARG=""
+PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; DO_SHOTS=1; DO_PAGE=1; DO_GATE=1
+AS_JSON=0; REFRESH=0; PR_ARG=""
 SKIP_NEXT=""
 for arg in $ARGUMENTS; do
   case "$SKIP_NEXT" in
@@ -132,7 +133,10 @@ for arg in $ARGUMENTS; do
     --effort)        SKIP_NEXT="effort" ;;
     --no-plan-check) DO_PLAN=0 ;;
     --no-dup-search) DO_DUP=0 ;;
-    --json)          AS_JSON=1 ;;
+    --no-shots)      DO_SHOTS=0 ;;
+    --no-page)       DO_PAGE=0 ;;
+    --no-gate)       DO_GATE=0 ;;
+    --json)          AS_JSON=1; DO_GATE=0 ;;
     --refresh)       REFRESH=1 ;;
     --*)             echo "pr-details: unknown flag $arg" >&2; exit 2 ;;
     *)               PR_ARG="$arg" ;;
@@ -300,11 +304,21 @@ Skip the gate entirely when `--no-gate` or `--json`; when the driver has no stru
 (print the queue and stop, per `driver-interaction.md`); or when `queue[0]` is a
 `QUEUE_TERMINAL` id — the report already says who owns the move.
 
+**Dispatchability is checked, not assumed.** A queue entry is dispatchable when its id maps
+to a skill actually invocable in this session (`codex-ship` and `antagonist-review` from
+this plugin; `address-review` and `ui-review` through the language plugin the flow map
+names, when installed), or when it is `rebase` — the one mechanical entry, executed by
+running its `local:` recipe verbatim on explicit selection. Everything else (`wait-ci`,
+`fix-plan`, `finish-draft`, `complete-gate`, `move-to-human-review`, …) is an action the
+report describes, not a skill to launch: for those the gate offers only the local recipe
+and Stop. Never present a Run option that cannot actually run.
+
 One question, at most four options:
 
-1. **Run step 1** — dispatch the named skill against this PR.
-2. **Run steps 1–k** — offered only when two or more dispatchable steps precede the first
-   human-owned or terminal entry. Between steps, re-run
+1. **Run step 1** — offered only when step 1 is dispatchable; invokes the mapped skill (or
+   the rebase recipe) against this PR.
+2. **Run steps 1–k** — offered only when two or more consecutive dispatchable steps precede
+   the first non-dispatchable, human-owned, or terminal entry. Between steps, re-run
    `pr-details <n> --no-plan-check --no-page --no-gate` and continue only while the fresh
    headline matches the projection; any divergence stops the run and reports it.
 3. **Handle it locally** — print step 1's `local:` recipe and stop.

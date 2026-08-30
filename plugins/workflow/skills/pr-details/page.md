@@ -102,11 +102,23 @@ the JSON as `page.path`. (`open` verified present on the reference host.)
 
 - One file, self-contained: inline CSS, zero external requests — no fonts, no CDN, no
   favicons, no analytics. Respect `prefers-color-scheme` for a light and a dark palette.
-- Screenshots embed as `data:` URIs. Downscale to ≤1200px wide first when a resizer is on the
-  host (`sips --resampleWidth 1200 in.png --out out.png` — macOS builtin, verified); embed as
-  captured otherwise. `base64 -i file | tr -d '\n'` produces the URI body (verified).
-- The only script allowed is copy-to-clipboard on the queue's command buttons; without JS the
-  command text is still selectable, so the page degrades to plain text cleanly.
+- **Everything repo- or contributor-derived is untrusted and gets contextually escaped**:
+  PR titles and bodies, issue text, branch names, file paths, commit subjects, thread
+  excerpts, and the plan check's proposed edits are HTML-escaped (`&`, `<`, `>`, `"`, `'`)
+  before landing in markup, attribute values are escaped for attribute context, and the
+  only URLs emitted are `https:` links to the PR's own GitHub host plus the screenshot
+  `data:` URIs. A PR title containing `<script>` must render as text — this page opens
+  automatically in the reviewer's browser.
+- **No script in the page, at all**, and a CSP backstop so an escaping miss stays inert:
+
+  ```html
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
+  ```
+
+  `script-src` is absent so it falls back to `default-src 'none'` — injected script does
+  not execute, and `connect-src 'none'` means nothing can exfiltrate. Command text in the
+  queue cards is selectable; there is no copy button to script.
 - Wide content (file tables, diff stats, the proposed issue edits) scrolls inside its own
   container; the page body never scrolls horizontally.
 
@@ -114,9 +126,9 @@ the JSON as `page.path`. (`open` verified present on the reference host.)
 
 1. **Banner** — PR number, title, repo, head SHA short, and the headline step with its verdict
    qualifier. The banner answers "what do you need from me" before any scrolling.
-2. **Action queue** — one card per entry: position, the exact command, a copy button, the
-   `why:` line, the cost posture, and the `local:` recipe inside a collapsed
-   `<details>` block. Entry 1 is marked **next**; later entries carry
+2. **Action queue** — one card per entry: position, the exact command in a selectable
+   monospace block, the `why:` line, the cost posture, and the `local:` recipe inside a
+   collapsed `<details>` block. Entry 1 is marked **next**; later entries carry
    "projected — assumes the steps above land cleanly" (`next-step.md` §5).
 3. **Quality** — the review ladder at this head: codex-ship, antagonist, deep review, E2E —
    each marked ran-at-head, stale (evidence names an older SHA), or not run — and which of
