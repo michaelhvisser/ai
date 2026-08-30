@@ -412,7 +412,13 @@ run_review() {
     # Reuse: fast-forward to the current PR head so rework commits appear.
     # A review worktree holds no local commits by contract; if it somehow
     # does, refuse rather than discard them.
-    if git -C "$WORKTREE_ABS_PATH" merge --ff-only "$pr_head_ref" >/dev/null 2>&1; then
+    # A stray local commit makes HEAD ahead of the fetched PR head, and
+    # --ff-only then reports "Already up to date" — success — while keeping
+    # it. The review contract says the branch holds no local commits, so
+    # refuse explicitly before the fast-forward can vouch for the tree.
+    if [ "$(git -C "$WORKTREE_ABS_PATH" rev-list --count "${pr_head_ref}..HEAD")" -gt 0 ]; then
+      echo "WORKTREE_STALE: local commits beyond $pr_head_ref; not touching it"
+    elif git -C "$WORKTREE_ABS_PATH" merge --ff-only "$pr_head_ref" >/dev/null 2>&1; then
       echo "WORKTREE_UPDATED: $pr_head_ref"
     else
       echo "WORKTREE_STALE: local branch has diverged from $pr_head_ref; not touching it"

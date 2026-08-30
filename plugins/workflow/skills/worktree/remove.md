@@ -51,9 +51,11 @@ The checks differ by worktree kind — classify from the path first.
 **Review worktree** (`*-review-pr-*`): the branch `review-pr-<n>` is local-only
 and never merges, so the merge check does not apply. Instead:
 
-1. **PR status**: Is the reviewed PR merged or closed?
+1. **PR status**: Is the reviewed PR merged or closed? Take the number from
+   the checked-out branch — exact, where a path substring match can hit a repo
+   name or title slug that happens to contain `review-pr-<n>`:
    ```bash
-   PR_NUM=$(echo "$WORKTREE_PATH" | grep -oE 'review-pr-([0-9]+)' | grep -oE '[0-9]+')
+   PR_NUM=$(git -C "$WORKTREE_PATH" branch --show-current); PR_NUM=${PR_NUM#review-pr-}
    gh pr view "$PR_NUM" --json state --jq '.state'   # MERGED or CLOSED = done
    ```
 

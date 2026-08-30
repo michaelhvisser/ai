@@ -116,15 +116,19 @@ step with a note. Never fail the whole flow over the editor.
 
 ### Step 6: Report
 
-For each PR, report: worktree path, branch, head commit (`git log --oneline
--1`), and the diff stat against the PR's **freshly fetched** base — the
-creation script fetches only `refs/pull/<n>/head`, so `origin/<base>` is
-whatever the user last fetched and can misreport the change set:
+For each PR, report: worktree path, branch, head commit, and the diff stat
+against the PR's **freshly fetched** base — the creation script fetches only
+`refs/pull/<n>/head`, so `origin/<base>` is whatever the user last fetched and
+can misreport the change set. Every command is scoped to the worktree with
+`git -C`: the shell is still sitting in the source checkout, and with several
+PRs there are several worktrees to report on.
 
 ```bash
+RV_WT="<worktree-path>"   # the script's "Worktree absolute path:" line
 RV_BASE=$(gh pr view "<pr-number>" --json baseRefName --jq .baseRefName)
-git fetch --no-tags origin "$RV_BASE"
-git diff --stat "origin/${RV_BASE}...HEAD" | tail -1
+git -C "$RV_WT" fetch --no-tags origin "$RV_BASE"
+git -C "$RV_WT" log --oneline -1
+git -C "$RV_WT" diff --stat "origin/${RV_BASE}...HEAD" | tail -1
 ```
 
 Note any `PR_STATE_WARNING` or `WORKTREE_STALE` lines.

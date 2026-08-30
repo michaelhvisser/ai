@@ -25,9 +25,16 @@ git fetch origin "$DEFAULT_BRANCH"
 
 ### Step 3: Evaluate Each Worktree
 
-Classify each worktree by its path: review worktrees match `*-review-pr-*`,
-issue worktrees match `*-issue-*` (check review first — a PR title slug could
-contain `issue-`).
+Classify each worktree by its **checked-out branch**, not its path — a repo
+name, ancestor directory, or PR title slug can itself contain `review-pr-<n>`
+or `issue-`, so path matching can mis-derive the number:
+
+```bash
+WT_BRANCH=$(git -C "$WORKTREE_PATH" branch --show-current)
+```
+
+A branch matching `review-pr-<digits>` exactly is a review worktree; otherwise
+treat a `*-issue-*` path as an issue worktree.
 
 For each **issue worktree**:
 
@@ -54,9 +61,10 @@ For each **issue worktree**:
 For each **review worktree** (`review-pr-<n>` branches are local-only and never
 merge, so the merged check does not apply):
 
-1. Extract the PR number and check the PR state:
+1. Take the PR number from the branch (exact, unlike the path) and check the
+   PR state:
    ```bash
-   PR_NUM=$(echo "$WORKTREE_PATH" | grep -oE 'review-pr-([0-9]+)' | grep -oE '[0-9]+')
+   PR_NUM=${WT_BRANCH#review-pr-}
    STATE=$(gh pr view "$PR_NUM" --json state --jq '.state' 2>/dev/null)
    ```
 
