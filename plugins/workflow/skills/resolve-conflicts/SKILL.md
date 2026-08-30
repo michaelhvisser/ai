@@ -35,10 +35,11 @@ RC_STATE_FILE="$RC_GIT_DIR/resolve-conflicts.state"
 # Load any previous run's state into PREV_* only — it is trusted further down
 # strictly when its operation matches the one detected NOW. An --abort leaves
 # this file behind, and a later, different operation must not inherit it.
-RC_PREV_OP=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""
+RC_PREV_OP=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""; RC_PREV_BRANCH=""; RC_PREV_EXPECT=""
 if [ -f "$RC_STATE_FILE" ]; then
   . "$RC_STATE_FILE"
   RC_PREV_OP="$RC_OP"; RC_PREV_ONTO="$RC_ONTO"; RC_PREV_RUN_DIR="$RC_RUN_DIR"
+  RC_PREV_BRANCH="${RC_BRANCH:-}"; RC_PREV_EXPECT="${RC_EXPECT:-}"
 fi
 
 RC_BASE=""
@@ -53,20 +54,23 @@ if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   # UPSTREAM..orig-head — a merge-base three-dot diff would drag the commits
   # the command deliberately excluded into the baseline, and Step 6 would
   # then demand they survive. Merge backend: read the pick list. Apply
-  # backend (`--apply`) has no pick list, but `last` counts the patch series
-  # format-patch generated over UPSTREAM..orig-head, and that series is
-  # linear, so orig-head~last is UPSTREAM. Merge-base is the last resort.
+  # backend (`--apply`): no pick list, but each generated patch opens with
+  # "From <sha>", and the first patch's parent is the replay base — exact
+  # for any topology, where counting patches (orig-head~<last>) lands wrong
+  # as soon as the range contains merged side-branch commits. Merge-base is
+  # the last resort.
   RC_BASE=""
   if [ -f "$RC_STATE_DIR/git-rebase-todo" ] || [ -f "$RC_STATE_DIR/done" ]; then
     RC_FIRST_PICK=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
       | grep -m1 -E '^(pick|edit|reword|fixup|squash) ' | awk '{print $2}')
-    [ -n "$RC_FIRST_PICK" ] \
-      && RC_BASE=$(git rev-parse -q --verify "${RC_FIRST_PICK}^" 2>/dev/null) \
-      || RC_BASE=""
-  elif [ -f "$RC_STATE_DIR/last" ]; then
-    RC_LAST=$(cat "$RC_STATE_DIR/last")
-    RC_BASE=$(git rev-parse -q --verify "${RC_ORIG_HEAD}~${RC_LAST}" 2>/dev/null) || RC_BASE=""
+  elif [ -f "$RC_STATE_DIR/0001" ]; then
+    RC_FIRST_PICK=$(awk '/^From [0-9a-f]{40}/{print $2; exit}' "$RC_STATE_DIR/0001")
+  else
+    RC_FIRST_PICK=""
   fi
+  [ -n "$RC_FIRST_PICK" ] \
+    && RC_BASE=$(git rev-parse -q --verify "${RC_FIRST_PICK}^" 2>/dev/null) \
+    || RC_BASE=""
   [ -n "$RC_BASE" ] || RC_BASE=$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")
 elif [ -f "$RC_GIT_DIR/MERGE_HEAD" ]; then
   RC_OP=merge
@@ -109,8 +113,16 @@ elif [ "$RC_OP" = cherry-pick ]; then
   # the merge base and drag every unselected branch-only ancestor into the
   # baseline, which Step 6 would then report as "lost". Per-commit filename so
   # a multi-commit pick accumulates one baseline per stop, idempotently.
-  git diff "${RC_ORIG_HEAD}~1" "$RC_ORIG_HEAD" \
-    > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
+  if git rev-parse -q --verify "${RC_ORIG_HEAD}~1" >/dev/null 2>&1; then
+    git diff "${RC_ORIG_HEAD}~1" "$RC_ORIG_HEAD" \
+      > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
+  else
+    # Root commit: there is no parent to diff against, and a failed ~1 lookup
+    # would leave an EMPTY baseline that Step 6 vacuously passes. The root's
+    # entire content is the change.
+    git show --format= "$RC_ORIG_HEAD" \
+      > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
+  fi
 elif [ "$RC_OP" = rebase ]; then
   # Only the commits actually being replayed (RC_BASE handles --onto, where
   # the merge base and the replay base differ).
@@ -121,10 +133,28 @@ else
   git diff "$RC_ONTO...$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
 fi
 
+# The push lease is captured at the FIRST stop, before any resolution work:
+# a background fetch during a long resolution (an IDE, a daemon) advances the
+# remote-tracking ref, and a lease value read later would rubber-stamp
+# exactly the push the lease exists to refuse. On re-entry the first stop's
+# captured value wins — never re-read it.
+if [ "$RC_PREV_OP" = "$RC_OP" ] && [ -n "$RC_PREV_BRANCH" ]; then
+  RC_BRANCH="$RC_PREV_BRANCH"; RC_EXPECT="$RC_PREV_EXPECT"
+else
+  if [ "$RC_OP" = rebase ] && [ -f "$RC_STATE_DIR/head-name" ]; then
+    RC_BRANCH=$(sed 's#^refs/heads/##' "$RC_STATE_DIR/head-name")
+  else
+    RC_BRANCH=$(git symbolic-ref --quiet --short HEAD) || RC_BRANCH=""
+  fi
+  RC_EXPECT=""
+  [ -n "$RC_BRANCH" ] \
+    && { RC_EXPECT=$(git rev-parse -q --verify "refs/remotes/origin/${RC_BRANCH}") || RC_EXPECT=""; }
+fi
+
 # Fenced blocks may execute as separate shell calls and inherit nothing, and
 # by Step 6 the operation state dirs are gone — persist what later steps need.
-[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\n' \
-  "$RC_OP" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" > "$RC_STATE_FILE"
+[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\n' \
+  "$RC_OP" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" > "$RC_STATE_FILE"
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
@@ -244,7 +274,10 @@ accumulates them). During a rebase always use `--continue`, never a plain `git c
 
 ## Step 6 — Integrity check
 
-Only after the operation fully completes:
+Only after the operation fully completes. **First, run Step 4's checks once more against
+the finished tree**: when commits after the resolved stop applied cleanly, the earlier
+check run saw only an intermediate state, and a cleanly-applied later commit can still
+break the build against the resolution. Then:
 
 ```bash
 RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
@@ -278,16 +311,18 @@ verdict. Then, only if the branch already exists on the remote and the operation
 history:
 
 ```bash
-RC_EXPECT=$(git rev-parse -q --verify "refs/remotes/origin/<branch>") || RC_EXPECT=""
-git push --force-with-lease="<branch>:${RC_EXPECT}" origin <branch>
+RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
+[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+git push --force-with-lease="${RC_BRANCH}:${RC_EXPECT}" origin "$RC_BRANCH"
 ```
 
-Never plain `--force`, and never `git fetch` before this push: fetching refreshes the
-remote-tracking ref, and a bare `--force-with-lease` then uses that just-fetched value as
-its expectation — a contributor's push made during the resolution would be silently
-overwritten. The explicit `<branch>:<expected>` lease pins the expectation to what this
-repository last saw **before** the operation. A rejected push means the remote really did
-move: stop and surface it to the driver; re-fetching and retrying on the skill's own
+Never plain `--force`, and never `git fetch` before this push. The lease value comes from
+the state file, captured at the **first stop of the operation** (Step 0): a bare
+`--force-with-lease`, or a lease read at push time, uses whatever the remote-tracking ref
+holds *now* — and any fetch in between (this skill's, an IDE's, a daemon's) refreshes it
+into a rubber stamp. The pinned `<branch>:<expected>` lease means: overwrite only what
+this repository had seen before resolution began. A rejected push means the remote really
+did move: stop and surface it to the driver; re-fetching and retrying on the skill's own
 authority is exactly the overwrite the lease exists to prevent. This skill does not
 merge, open PRs, or move board items; hand those to the calling workflow.
 
