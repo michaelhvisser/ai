@@ -310,7 +310,11 @@ as concise text in the final response and stop; the user's answer resumes the ga
 `address-review` → the language plugin's `address-review`; `ui-review` → the language
 plugin's **E2E verification skill** (in `ts-workflow` that is `e2e-verify` — there is no
 skill literally named `ui-review`). An entry is dispatchable only when its mapped skill is
-actually invocable in this session, or when it is `rebase` — the one mechanical entry.
+actually invocable **by the orchestrator** in this session — installed AND model-invocable.
+A `disable-model-invocation: true` target (ts-workflow's `address-review` and `e2e-verify`
+today) cannot be launched from here: for those entries the gate presents the exact slash
+command for the user to type, never a Run option that would fail. `rebase` stays the one
+mechanical entry.
 Everything else (`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`,
 `move-to-human-review`, …) is an action the report describes, not a skill to launch: for
 those the gate offers only the local recipe and Stop. Never present a Run option that
@@ -343,10 +347,15 @@ One question, at most four options:
 
 1. **Run step 1** — offered only when step 1 is dispatchable; invokes the mapped skill (or
    the rebase recipe) against this PR.
-2. **Run steps 1–k** — offered only when two or more consecutive dispatchable steps precede
-   the first non-dispatchable, human-owned, or terminal entry. Between steps, re-run
+2. **Run steps 1–k** — offered only when two or more dispatchable steps precede the first
+   non-dispatchable, human-owned, or terminal entry, **where interleaved `wait-ci` entries
+   are absorbed rather than batch-breaking**: every dispatchable resolution projects CI to
+   pending, so `wait-ci` sits between any two dispatches by construction, and the
+   orchestrator handles it itself (watch the checks, e.g. `gh pr checks <n> --watch`, as
+   part of the batch). Between steps, re-run
    `pr-details <n> --no-plan-check --no-page --no-gate` and continue only while the fresh
-   headline matches the projection; any divergence stops the run and reports it.
+   headline matches the projection — a red CI landing counts as divergence and stops the
+   run with a report.
 3. **Handle it locally** — print step 1's `local:` recipe and stop.
 4. **Stop** — the report stands as-is.
 

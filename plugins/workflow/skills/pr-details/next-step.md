@@ -164,6 +164,13 @@ before any further projection would be honest. `human-approval` is deliberately 
 though promotion follows it: the queue's job is to reach the user's own decision point and
 stop there, not to project past it.
 
+Several resolutions apply **the new-head resets** — the facts a push invalidates, exactly
+as GitHub will when it lands: `CI_STATE = pending`; every other `*_AT_HEAD` false; and
+approval sufficiency invalidated per the fetched ruleset — `APPROVALS_GIVEN = 0` under
+`dismiss_stale_on_push`, and the last-push-approval conjunct unsatisfied under
+`last_push_approval`, so a projected queue can never carry an approval across a push that
+would dismiss it.
+
 The resolution map — what "this step succeeded" is assumed to change, and nothing else:
 
 | id | facts assumed afterwards |
