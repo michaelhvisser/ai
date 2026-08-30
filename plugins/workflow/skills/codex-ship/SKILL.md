@@ -1,7 +1,7 @@
 ---
 name: codex-ship
 description: "Drive a PR to merge-readiness with the Codex GitHub connector: consume existing Codex feedback, judge every finding (real vs. slop) with a strong model, corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value. Use to harden a PR against Codex review before merging. SKIP one-off review-comment cleanup with no loop intent; use address-review."
-argument-hint: "[PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]"
+argument-hint: "[PR-number|PR-URL] [--max-rounds <n>] [--second-opinion mandatory|auto|off]"
 ---
 
 # Codex Ship — triage-gated Codex↔fix loop
@@ -47,7 +47,7 @@ this skill triages each one first, records *why* it dismissed anything, **dismis
 the PR itself** (resolves the review thread with the reason, so it doesn't linger or block
 merging), and never silently waves slop through.
 
-**Usage:** `/workflow:codex-ship [PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
+**Usage:** `/workflow:codex-ship [PR-number|PR-URL] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
 
 **Examples:** `/workflow:codex-ship 152` · `/workflow:codex-ship 152 --max-rounds 15` ·
 `/workflow:codex-ship --second-opinion mandatory`
@@ -106,7 +106,7 @@ bar, never against a model name.
 ```bash
 MAX_ROUNDS=10               # safety backstop against oscillation, NOT the intended exit
 SECOND_OPINION_ARG="auto"   # auto | mandatory | off
-PR_NUM=""
+PR_NUM=""; URL_REPO=""
 SKIP_NEXT=""
 for arg in $ARGUMENTS; do
   case "$SKIP_NEXT" in
@@ -116,6 +116,13 @@ for arg in $ARGUMENTS; do
   case "$arg" in
     --max-rounds)      SKIP_NEXT="rounds" ;;
     --second-opinion)  SKIP_NEXT="so" ;;
+    https://*)         # full PR URL: pins host and repository, so a fork
+                       # checkout's same-numbered PR can never be addressed by
+                       # mistake, and a GHE URL never falls back to github.com
+                       URL_HOST=$(printf '%s' "$arg" | sed -E 's#^https?://([^/]+)/.*#\1#')
+                       URL_REPO=$(printf '%s' "$arg" | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#')
+                       PR_NUM=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+                       export GH_HOST="$URL_HOST" ;;   # every gh call targets the URL's host
     *)                 PR_NUM="$arg" ;;
   esac
 done
@@ -123,9 +130,11 @@ done
 [ -z "$PR_NUM" ] && PR_NUM=$(github_current_pr 2>/dev/null | jq -r '.number // empty')
 if [ -z "$PR_NUM" ]; then echo "ERROR: no PR. Pass a number or run from a PR branch."; exit 1; fi
 
+# A URL-pinned repo wins; otherwise the ambient repository is the target.
 # `--json` on any gh command is a GraphQL call; fall back to the git remote when it is drained.
 # Two `sed -E` stages, not one: a lazy `+?` is a GNU extension and BSD/macOS sed errors on it.
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) \
+REPO="${URL_REPO:-}"
+[ -n "$REPO" ] || REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null) \
   || REPO=$(git remote get-url origin | sed -E 's#\.git$##' | sed -E 's#^.*[:/]([^/]+/[^/]+)$#\1#')
 echo "PR: #$PR_NUM | repo: $REPO | max-rounds: $MAX_ROUNDS | second-opinion arg: $SECOND_OPINION_ARG"
 ```
@@ -137,6 +146,11 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
 ## Phase 0: Preflight
 
 1. **Working tree clean?** `git status --porcelain` must be empty. If not, stop and ask.
+   **And the target must be the ambient repository**: when a URL pinned `REPO` and the
+   ambient checkout's repository differs, stop — the fixer (`address-review` takes only a
+   number and resolves its repo from the checkout) and the ship phase both act on the
+   ambient tree, so a cross-repo run would fix or ship the wrong PR. Tell the user to run
+   from a checkout of `$REPO`.
 2. **API budget** — GitHub meters GraphQL and REST *separately*, and this skill leans on both.
    Check before the first round; `/rate_limit` is free and never counts against either budget:
    ```bash
@@ -151,7 +165,7 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
    is a GraphQL call under the hood.
 3. **Linked issue** — capture for the final report and closure:
    ```bash
-   gh pr view $PR_NUM --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+   gh pr view $PR_NUM -R "$REPO" --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
    # REST fallback (no closingIssuesReferences in REST — parse the PR body's closing keyword):
    gh api repos/$REPO/pulls/$PR_NUM --jq '.body' \
      | grep -ioE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' | grep -oE '[0-9]+' | head -1
@@ -293,7 +307,7 @@ this order:
    trigger, no poll.
 3. **Neither** → trigger a fresh review:
    ```bash
-   gh pr comment $PR_NUM -b "@codex review"   # official documented trigger; reviews current HEAD
+   gh pr comment $PR_NUM -R "$REPO" -b "@codex review"   # official documented trigger; reviews current HEAD
    ```
    `@codex review` is the canonical trigger Codex's own about-box documents. A bare `@codex`
    is equivalent — either form triggers a fresh review of current HEAD. There is also

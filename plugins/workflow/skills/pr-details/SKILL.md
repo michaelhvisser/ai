@@ -1,7 +1,7 @@
 ---
 name: pr-details
-description: "Read-only situation report for one pull request: CI judged against the base branch's actual required checks, review decision, unresolved threads split by author class, mergeability, board state, whether the linked issue's problem still exists on base, whether its plan is the right plan, whether UI review is warranted — and the single next step to take. It mutates nothing; its product is naming which expensive skill to reach for. Use before spending tokens on review or fixes, or when you pick up a PR cold and need to know where it actually stands. SKIP when you already know the next step and just want it done — run that skill directly."
-argument-hint: "[PR-number] [--plan-model fable|codex|both|none] [--effort low|medium|high|xhigh] [--no-plan-check] [--no-dup-search] [--json] [--refresh]"
+description: "Read-only situation report for one pull request: CI judged against the base branch's actual required checks, review decision, unresolved threads split by author class, mergeability, board state, whether the linked issue's problem still exists on base, whether its plan is the right plan, which review skill (codex-ship, antagonist-review, ui-review) is still needed at this head — and the ordered action queue to merge, each step green-lightable at a prompt or doable by hand from its local recipe. UI changes get a screenshot glance from the preview deploy; everything renders into one local report.html. It mutates nothing on GitHub itself; on your explicit go it launches the step it named. Use before spending tokens on review or fixes, when you pick up a PR cold, or as a check-in to approve what runs next. SKIP when you already know the next step and just want it done — run that skill directly."
+argument-hint: "[PR-number] [--plan-model fable|codex|both|none] [--effort low|medium|high|xhigh] [--no-plan-check] [--no-dup-search] [--no-shots] [--no-page] [--no-gate] [--json] [--refresh]"
 ---
 
 # PR Details — read-only situation report for one PR
@@ -29,24 +29,36 @@ call goes through it), `pr_facts_graphql_ok`, `pr_facts_rate_gate`, `pr_facts_ru
 
 ## What this skill is
 
-`pr-details` answers five questions about one PR and then names exactly one next action:
+`pr-details` answers six questions about one PR:
 
 1. **Where is it?** CI, review decision, threads, mergeability, behind-base, board state.
 2. **Why does it exist, and is that still true?** The linked issue's problem, re-checked
    against the base branch, with duplicate issues and PRs surfaced.
 3. **Is the plan right?** A strong model audits the issue's plan against the problem and the
    diff, and proposes corrections.
-4. **Is there UI to look at?**
-5. **What is the single next step?**
+4. **Is there UI to look at?** If so, a screenshot glance from the preview deployment shows
+   it without launching the app.
+5. **Is the quality ladder satisfied?** Which of codex-ship, antagonist-review, deep review,
+   and E2E already ran at this head, and which the decision table still requires.
+6. **What is the path?** One actual next step, then the projected steps behind it — an
+   ordered queue where each entry can be green-lit at the closing prompt or done by hand from
+   its `local:` recipe.
 
 It is the front door of the review family: every sibling either mutates the PR
 (`address-review`, `codex-ship`) or spends a lot of tokens (`antagonist-review`). This one
-spends little, mutates nothing, and tells you which expensive tool to reach for.
+spends little, mutates nothing on GitHub, and tells you which expensive tool to reach for.
+Think of it as the check-in with a project manager: current status, what needs your green
+light, and what you can do yourself instead. The report lands twice — a ≤48-line terminal
+summary, and `report.html` in the run dir with the queue, screenshots, and the change outline
+in one place.
 
 **Non-goals (hard).** It never pushes, commits, rebases, comments, resolves threads, edits
 issues, changes labels, or moves board items. It never triggers a bot review. The plan check
 *proposes* issue-body edits as text; applying them is a separate human action. It judges the
-**plan**, not the **diff quality** — that is `review-deep` / `antagonist-review`.
+**plan**, not the **diff quality** — that is `review-deep` / `antagonist-review`. The Phase 8
+gate launches a sibling skill only on the user's explicit selection; that launch is the user's
+decision, and everything the sibling then does runs under the sibling's own contract, not this
+one's.
 
 ## Read-only enforcement
 
@@ -73,6 +85,14 @@ The skill never runs `git stash`, `git checkout`, `git reset`, `git fetch --prun
 anything else that changes the working tree or branch state. Its only `git` writes are
 object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`facts.md` §0c).
 
+**The screenshot phase browses, it never acts — and the browser enforces that.** Phase 5b
+captures the PR's preview deployment only in a context where read-only is enforceable
+(JavaScript disabled, or every non-GET request **and all WebSocket traffic** intercepted —
+the upgrade handshake is a GET and its frames evade method filters), because a real app mutates
+state on mere load; no clicks, no form input, no logging in (`page.md` §1c). A route behind
+an auth wall is recorded as `auth-blocked`, and a browser that cannot enforce the controls
+means no navigation at all.
+
 ## Usage
 
 **Claude Code:** `/workflow:pr-details [PR-number] [flags]`
@@ -88,16 +108,23 @@ object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`fact
 | `--effort low\|medium\|high\|xhigh` | `xhigh` | Passed to `codex exec -c model_reasoning_effort=`; mapped to the subagent effort hint for Fable. |
 | `--no-plan-check` | off | Phase 4 is the only slow phase. Skipping it makes this a ~20-second status command. |
 | `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket. |
+| `--no-shots` | off | Skip Phase 5b screenshot capture. The UI verdict is unaffected — screenshots are evidence for the human, never a fact (`page.md` §1). |
+| `--no-page` | off | Skip writing and opening `report.html` (`page.md` §2). |
+| `--no-gate` | off | Report and stop — no green-light prompt. `--json` implies it, and also suppresses the page auto-open. |
 | `--json` | off | Machine schema on stdout (`output.md` §2). |
 | `--refresh` | off | Ignore the SHA-keyed immutable cache (`facts.md` §0e). |
 
-Rejected flags: `--fix` / `--apply` (violates the non-goals); `--base` (a PR always has a base).
+Rejected flags: `--fix` / `--apply` (mutation without the gate's per-run selection defeats the
+non-goals — the Phase 8 gate is the sanctioned route, and it never runs unprompted); `--go`
+(same reason: pre-authorizing the dispatch turns a status command into a mutation command);
+`--base` (a PR always has a base).
 
 Parse with the `for arg in $ARGUMENTS … case` loop and `SKIP_NEXT` for valued flags, as in
 `codex-ship`. A bare token that is not `^[0-9]+$` is a branch name or a URL.
 
 ```bash
-PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; AS_JSON=0; REFRESH=0; PR_ARG=""
+PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; DO_SHOTS=1; DO_PAGE=1; DO_GATE=1
+AS_JSON=0; REFRESH=0; PR_ARG=""
 SKIP_NEXT=""
 for arg in $ARGUMENTS; do
   case "$SKIP_NEXT" in
@@ -109,7 +136,10 @@ for arg in $ARGUMENTS; do
     --effort)        SKIP_NEXT="effort" ;;
     --no-plan-check) DO_PLAN=0 ;;
     --no-dup-search) DO_DUP=0 ;;
-    --json)          AS_JSON=1 ;;
+    --no-shots)      DO_SHOTS=0 ;;
+    --no-page)       DO_PAGE=0 ;;
+    --no-gate)       DO_GATE=0 ;;
+    --json)          AS_JSON=1; DO_GATE=0 ;;
     --refresh)       REFRESH=1 ;;
     --*)             echo "pr-details: unknown flag $arg" >&2; exit 2 ;;
     *)               PR_ARG="$arg" ;;
@@ -152,6 +182,9 @@ this, never a model name.
 
 Cost: `--no-plan-check` is ~10 API calls plus one researcher call; the default `fable` adds one
 strong call; `both` adds a backgrounded Codex run whose cost is wall time, not tokens.
+Screenshots add one to two minutes of browser wall time only when UI is warranted and a
+preview deploy exists; the page render and the queue are free — they reuse facts already
+fetched.
 
 ## Phase outline
 
@@ -163,8 +196,11 @@ strong call; `both` adds a backgrounded Codex run whose cost is wall time, not t
 | 3 | Still-needed validation, per linked issue | `still-needed.md` |
 | 4 | Plan check by a strong model (skippable) | `plan-check.md` |
 | 5 | UI-review detection (deterministic, no model) | below |
-| 6 | Next-step decision table | below + `next-step.md` |
+| 5b | Screenshot glance from the preview deployment (capability-bound, skippable) | `page.md` §1 |
+| 6 | Next-step decision table + action-queue projection | below + `next-step.md` |
 | 7 | Render | `output.md` |
+| 7b | Report page, written and opened locally | `page.md` §2 |
+| 8 | Green-light gate: approve the next step(s), take the local recipe, or stop | below |
 
 **The rate gate runs twice**: once in Phase 0, and once immediately before Phase 4 dispatch.
 Phase 4 is the expensive phase, and a shared fleet's quota moves underneath a long run.
@@ -197,7 +233,9 @@ to the head SHA like every other source read (`still-needed.md` §1). Cap at 5 r
 **Evidence:** screenshots in the PR body (`!\[`, `<img`, `user-attachments`), an
 `## E2E Verification Results` comment, an `e2e-verified` label.
 
-Output → `ui {warranted, severity, files[], routes[], evidence_present, reason}`.
+Output → `ui {warranted, severity, files[], routes[], evidence_present, reason}`. Phase 5b
+appends `preview_url`, `shots_status`, `screenshots[]`, and `visual_summary` (`page.md` §1);
+none of them feed the decision table.
 
 ## Phase 6 — Next-step decision table
 
@@ -252,34 +290,145 @@ Four cross-cutting **annotations** print under any step and never change the hea
 a partial supersession result (some but not all linked issues superseded, per
 `still-needed.md` §5); a low-confidence duplicate; and local checkout state.
 
-## Output template
+**The queue.** After the headline row fires, project the path behind it: assume the step
+succeeded, overlay the resolution map, re-run the table, repeat — cap 5, loop-guarded,
+stopping at any human-owned or terminal id (`next-step.md` §5). Entries after the first are
+marked `projected` and each carries the `local:` recipe from `next-step.md` §6. `queue[0]`
+is the headline restated; the projection changes no fact and no verdict.
 
-Read `output.md` for the full grammar. Shape:
+## Phase 8 — the green-light gate
+
+The report names the next step; the gate turns it into motion without giving up the skill's
+read-only posture. Classify it per `decision-gates.md`: consent to spend tokens or mutate the
+PR is **missing intent** — a status request does not imply it — so the gate asks once, through
+the driver's structured-input capability, and never loops.
+
+Skip the gate entirely when `--no-gate` or `--json`, or when `queue[0]` is a
+`QUEUE_TERMINAL` id — the report already says who owns the move. A driver **without**
+structured input does not skip it: per `driver-interaction.md`, ask the same one question
+as concise text in the final response and stop; the user's answer resumes the gate.
+
+**Dispatchability is checked, not assumed.** The id→skill mapping is explicit:
+`codex-ship` → `/workflow:codex-ship`; `antagonist-review` → `/workflow:antagonist-review`;
+`address-review` → the language plugin's `address-review`; `ui-review` → the language
+plugin's **E2E verification skill** (in `ts-workflow` that is `e2e-verify` — there is no
+skill literally named `ui-review`). An entry is dispatchable only when its mapped skill is
+actually invocable **by the orchestrator** in this session — installed AND model-invocable.
+A `disable-model-invocation: true` target (ts-workflow's `address-review` and `e2e-verify`
+today) cannot be launched from here: for those entries the gate presents the exact slash
+command for the user to type, never a Run option that would fail. `rebase` stays the one
+mechanical entry.
+Everything else (`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`,
+`move-to-human-review`, …) is an action the report describes, not a skill to launch: for
+those the gate offers only the local recipe and Stop. Never present a Run option that
+cannot actually run.
+
+**Every mutating dispatch binds to the PR's checkout, never the shell's.** The skill
+reports from any checkout — another branch, detached HEAD, a dirty tree — and every
+dispatchable skill can reach a fixer that commits and pushes from the ambient directory
+(`codex-ship` invokes `address-review`; `antagonist-review` dispatches its own fixer). So
+the Run options are offered **only when Phase 2e's local facts show a clean checkout at
+the PR head**; otherwise the gate names the gap — "checkout is not at the PR head; open
+its worktree (`/workflow:create-worktree <n>` review mode) and run `<command>` there" —
+and offers only the local recipe and Stop. For `rebase` specifically, the executed push
+sends the rebased commit itself, to the remote that actually hosts the head:
 
 ```
-=== PR #161 · fix(meetings): link Cal bookings to organizations ===
-threefold-solutions/client-portals · dev ← detent/…_92-7e7e04d397c3 @ e04cd91 · 9 files +727/−68 · open, not draft
+git push --force-with-lease=refs/heads/<headRefName>:<HEAD_SHA> \
+  <head-remote> HEAD:refs/heads/<headRefName>
+```
+
+The explicit lease pins the expectation to the head **this run observed** — the SHA every
+fact in the report describes. A bare `--force-with-lease` trusts the remote-tracking ref,
+which any background fetch refreshes into a rubber stamp; with the pin, a contributor's
+push after Phase 2 rejects the force-push instead of being overwritten, and the rejection
+is surfaced, never retried with a refreshed lease.
+
+`<head-remote>` is the configured remote whose URL matches the full `HEAD_SLUG`
+(owner/name, normalized — the owner login alone is ambiguous for renamed forks or several
+repos under one owner; `facts.md` §0a carries both it and `IS_FORK`): `origin` for a
+same-repo PR, the fork's remote otherwise. The
+`HEAD:` refspec pushes what was just rebased even when the local branch is not named
+`<headRefName>`. When no configured remote points at the head repository — the usual case
+for a fork checked out via `refs/pull/*` — the entry is **not dispatchable**: present the
+recipe instead of running it.
+
+One question, at most four options:
+
+1. **Run step 1** — offered only when step 1 is dispatchable; invokes the mapped skill (or
+   the rebase recipe) against this PR.
+2. **Run steps 1–k** — offered only when two or more dispatchable steps precede the first
+   non-dispatchable, human-owned, or terminal entry, **where interleaved `wait-ci` entries
+   are absorbed rather than batch-breaking**: every dispatchable resolution projects CI to
+   pending, so `wait-ci` sits between any two dispatches by construction, and the
+   orchestrator handles it itself as part of the batch — and a freshly pushed head has a
+   registration window in which the checks watch reports *no checks* and exits: poll until
+   the new head's checks exist, then watch them to completion, before evaluating anything.
+   **Every batch command stays repo-qualified** — the ambient checkout may be a fork whose
+   default remote is not the base repository, so the watch is
+   `gh pr checks <n> -R <host>/<slug>` and the recheck passes the full PR URL (which pins
+   host, owner, and repo per `facts.md` §0a). Between steps, re-run
+   `pr-details <PR-URL> --no-plan-check --no-page --no-gate`, **carrying the original run's
+   plan verdict into the recheck's table** (read `PLAN_COMBINED`/`PLAN_SPLIT` from the
+   prior `facts.json` — Phase 4 is skipped for cost, not because the verdict expired, and
+   without the carry a plan-keyed row can never reproduce). The carry is valid only while
+   the diff is materially unchanged (a rebase); once a dispatched fixer changed the diff,
+   a plan-keyed projection is stale — that is divergence. Continue only while the fresh
+   headline matches the projection; a red CI landing or a stale plan projection stops the
+   run with a report.
+3. **Handle it locally** — print step 1's `local:` recipe and stop.
+4. **Stop** — the report stands as-is.
+
+**Every sibling dispatch passes the full PR URL, never a bare number.** Siblings resolve
+their repository from the ambient checkout (`codex-ship` via `gh repo view`,
+`antagonist-review` via unqualified `gh pr` calls), and a fork checkout can carry a
+same-numbered PR — a bare `261` there addresses the wrong pull request. The URL pins host,
+owner, and repo. A sibling that cannot accept a URL is dispatchable only when the ambient
+checkout's repository **is** the resolved base repository.
+
+Dispatch means invoking the sibling skill exactly as the user would have; every gate, prompt,
+and confirmation inside that skill still applies. `pr-details` itself still mutates nothing —
+the mutation belongs to the skill the user selected, and the selection is recorded in the
+final response.
+
+## Output template
+
+Read `output.md` for the full grammar. Shape (a real run, verified live):
+
+```
+=== PR #261 · fix(settings): guard admin Server Actions ===
+threefold-solutions/client-portals · dev ← detent/…_258-643cc60a3ccb @ ae3b03e · 3 files +256/−13 · open, not draft
 
 STATUS
   CI        green   Lint, typecheck, test ✓ (required, integration 15368) · Vercel ✓ (required, legacy status, no integration_id)
   Review    0/0 approvals · no CHANGES_REQUESTED · extra approval for unattributed changes: required
-  Threads   0 unresolved (0 human · 0 codex · 0 other) · 0 resolved
-  Merge     MERGEABLE · BEHIND · 4 behind dev (strict up-to-date required)
-  Board     #92 Human Review · auto-promote: off · PR row: Backlog (ignored)
-  Local     checkout is at dev, not at PR head · clean
+  Threads   0 unresolved (0 human · 0 codex · 0 other) · 1 resolved
+  Merge     MERGEABLE · BLOCKED · 0 behind dev (strict up-to-date required)
+  Board     #258 Human Review · auto-promote: on (opt-out label present) · PR row: Backlog (ignored)
+  Local     checkout at PR head · clean
 
 PURPOSE
-  #92 Cal.com webhook org linking has never linked a meeting
-  Needed?   NEEDED (high) — convex/http.ts:212 on dev@dcd2622 still matches on label
+  #258 Admin settings Server Actions do not assert their own caller
+  Needed?   NEEDED (high) — 8 effectful exports on dev@733f9f1 still skip the caller assert; #228 fixed admin/ but never settings/
 
-PLAN CHECK  (fable @ xhigh · 40s)
+PLAN CHECK  (fable @ xhigh · 80s)
   PLAN_ADEQUATE: yes
+  G1 should  cross-file sweep left optional though 10 more admin actions.ts files carry the same gap — file the follow-up issue
 
 UI REVIEW   not warranted — no UI paths changed
 
-NEXT STEP   → rebase onto dev                          [row 10]
-  why: 4 commits behind dev and the ruleset requires strict up-to-date; the server refuses the merge regardless of CI
-  then: /workflow:pr-details 161
+QUALITY     codex-ship ✓ at head · antagonist ✗ not run · deep review stale (pre-force-push) · e2e n/a
+            still required before merge: antagonist-review (row 21) · deep review at head (C9)
+
+NEXT STEPS
+  1 → /workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/261   [row 21]
+      why:   codex-ship clean at head but no second-family review, and the diff is 354 lines ≥ 150
+      local: review gh pr diff 261 yourself, or run the language plugin's review-deep
+  2 → complete the pre-review gate                    [row 23 · projected]
+      why:   the contract's deep-review conjunct is observably false at this head
+  3 → your approval                                   [row 28 · projected]  ready pending: local gate
+  then:  /workflow:pr-details 261
+  page:  <run dir>/report.html
   files: <run dir>
 ```
 
@@ -293,5 +442,6 @@ NEXT STEP   → rebase onto dev                          [row 10]
 - `plan-check.md` — Phase 4: prompt template, Fable routing, the Codex `exec` invocation,
   quorum
 - `next-step.md` — Phase 6: fact definitions, ordering rationale, ready-predicate ledger,
-  fact-vector regression
-- `output.md` — Phase 7: terminal grammar, `--json` schema v1, exit codes, scratch hygiene
+  action-queue projection and local recipes, fact-vector regression
+- `page.md` — Phases 5b and 7b: preview-deploy screenshots and the local report page
+- `output.md` — Phase 7: terminal grammar, `--json` schema v2, exit codes, scratch hygiene

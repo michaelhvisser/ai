@@ -1,8 +1,9 @@
 # Next step — Phase 6
 
 The decision table itself lives in `SKILL.md` §"Phase 6". This file defines the facts it reads,
-why the rows sit in that order, how the ready predicate is built, and the regression the
-ordering has to keep passing.
+why the rows sit in that order, how the ready predicate is built, how the action queue is
+projected from the table (§5), the local alternative each step carries (§6), and the
+regression the ordering has to keep passing.
 
 ---
 
@@ -136,9 +137,90 @@ are different questions, and the answer depends on `AUTO_PROMOTE`:
 - Active states → `move-to-human-review`, with the rationale naming the gate evidence that
   must be posted first.
 
-## §4 Fact-vector regression
+## §5 The action queue
 
-Each vector, and the row it must hit. Re-check this list after any change to the table.
+The table names exactly one **actual** next step; the queue shows the path behind it, so the
+user can green-light one step or several at once. Entries after the first are **projections**:
+re-evaluations of the same table under the assumption that every previous entry succeeded.
+`queue[0]` is always identical to `next_step`, and nothing downstream may treat a later entry
+as a fact — the `then:` re-run re-derives everything from real state.
+
+```
+facts[0] := the fetched facts
+queue    := [ row(facts[0]) ]
+repeat up to 4 more times:
+    id := last entry's next_step.id
+    if id ∈ QUEUE_TERMINAL or the resolution map has no row for id: stop
+    facts[n] := facts[n-1] overlaid with resolution(id)
+    next := row(facts[n])
+    if next.id already appears in queue and next.id != "wait-ci": stop   # loop guard;
+        # wait-ci legitimately recurs after every push-projecting step and must
+        # not truncate the path — the cap of 5 still bounds the queue
+    append next, marked projected
+```
+
+`QUEUE_TERMINAL := { merged, closed, facts-incomplete, board-terminal, blocked,
+no-active-issue, close-superseded, close-duplicate, hand-to-detent, human-approval,
+needs-human }` — the work is done, a human owns the move, or the situation needs settling
+before any further projection would be honest. `human-approval` is deliberately terminal even
+though promotion follows it: the queue's job is to reach the user's own decision point and
+stop there, not to project past it.
+
+Several resolutions apply **the new-head resets** — the facts a push invalidates, exactly
+as GitHub will when it lands: `CI_STATE = pending` **when the repository has any required
+or observed checks — a repo whose fetched CI state is `none` stays `none`, and a batch
+never polls checks that cannot exist**; every other `*_AT_HEAD` false; and
+approval sufficiency invalidated per the fetched ruleset — `APPROVALS_GIVEN = 0` under
+`dismiss_stale_on_push`, and the last-push-approval conjunct unsatisfied under
+`last_push_approval`, so a projected queue can never carry an approval across a push that
+would dismiss it.
+
+The resolution map — what "this step succeeded" is assumed to change, and nothing else:
+
+| id | facts assumed afterwards |
+|---|---|
+| `rebase` | `behind_by = 0`, `mergeable = MERGEABLE`, `merge_state = CLEAN` (the `BEHIND`/`DIRTY` values this step exists to fix must not survive it — a retained `BEHIND` makes C6 false forever and loops the queue into `complete-gate`) — **and a new head SHA**: the new-head resets. Evidence dies with the SHA it named; a queue that keeps crediting it lies. |
+| `address-review` | `UNRES_H = UNRES_B = 0`, `needs-resolve-only` cleared, plus the new-head resets — assume the fix pushes code; a resolve-only round is the cheaper surprise. **`HUMAN_CR` stays as fetched**: a formal `CHANGES_REQUESTED` review clears only when the reviewer re-approves or dismisses it — the skill just requests re-review. When it was true, row 12 refires on the next projection step and the loop guard ends the queue there, which is the honest tail: the reviewer owns the next move. |
+| `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` — plus the new-head resets: `CI_STATE = pending` and every **other** `*_AT_HEAD` false. Its fixer pushes when a finding is real; assume it does (a clean run is the cheaper surprise), and its own contract re-reviews at the final head, which is why `CS_AT_HEAD` survives the reset. |
+| `antagonist-review` | `AR_AT_HEAD = true` and **nothing else** — by its own contract the skill never pushes (fix commits land locally, or on a `review/antagonist-*` branch for cherry-picking), so the remote head and every fact about it are unchanged. When fixes exist, landing them is a separate action the re-run re-derives from real state. No resolution may ever fabricate green from pending. |
+| `ui-review` | `E2E_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the mapped verifier rebases and force-pushes whenever the branch is behind, so evidence from the superseded SHA must not survive the projection. E2E evidence itself is from the verifier's final head. |
+| `fix-plan` | `PLAN_COMBINED = yes`, `PLAN_SPLIT = false` |
+| `wait-ci` | `CI_STATE = green` — the optimistic branch; the entry's note reads "if it lands red, the next step is address-review instead" |
+| `finish-draft` | `IS_DRAFT = false` |
+| `complete-gate` | every `evidenced` conjunct in §3 present at head; `self-report` conjuncts stay pending |
+| `move-to-human-review` | `BOARD_STATUS = Human Review` |
+
+Projection is optimistic by design: it answers "what is the path if each step lands cleanly",
+which is exactly the shape a green-light decision needs. The cap of 5 and the loop guard keep
+a churning pair of rows (rebase → wait-ci → review spend → …) from unrolling forever.
+
+## §6 Local alternatives
+
+Every queue entry carries a `local:` recipe — what the user does by hand instead of
+green-lighting the skill. Recipes are generic; contract-derived strings (`gate.run`, the base
+branch, the preview URL, route lists, thread URLs) are substituted at render time. The recipe
+never replaces the skill's own safety rails — it is the manual route for a user who prefers to
+drive.
+
+| id | local recipe |
+|---|---|
+| `rebase` | from a clean checkout of the PR head: `git fetch <base-remote> && git rebase <base-remote>/<base>`, then `git push --force-with-lease=refs/heads/<headRefName>:<observed-head-sha> <head-remote> HEAD:refs/heads/<headRefName>`. `<base-remote>` is the remote whose URL matches the PR's **base** repository (usually `origin`; on a fork checkout often `upstream` — rebasing onto a fork's stale `origin/<base>` is the trap), and `<head-remote>` matches the **head** repository; the `HEAD:` refspec pushes the rebased commit itself, and the explicit lease pins the expectation to the head SHA you rebased from, so neither an unrelated same-named branch nor a contributor's unseen push can be overwritten. On conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
+| `address-review` | open each unresolved thread (URLs in the report), fix in the editor, push, then reply and resolve on GitHub |
+| `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
+| `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
+| `fix-plan` | edit the issue's Plan section by hand; the proposed replacement text is in the report page and `$RUN_DIR/plan-*.md` |
+| `wait-ci` | `gh pr checks <n> -R <host>/<slug> --watch` — repo-qualified, since a fork checkout's inferred repository may not be the resolved base |
+| `ui-review` | open `<preview_url><route>` for each listed route, or run the repo's dev server and visit them |
+| `complete-gate` | run the contract gate (`<gate.run>`) at the head commit, then post the evidence the contract names — workpad update, review comment, label |
+| `human-approval` | this **is** the local step: read the report page, then approve (`gh pr review <n> -R <host>/<slug> --approve` — repo-qualified: this is an outward-facing write and the ambient checkout may be a fork with a same-numbered PR), merge, or move the board item per the contract |
+| `move-to-human-review` | post the gate evidence, then move the issue's board item |
+| `hand-to-detent` | set the issue's board Status to the merge lane; the daemon takes it from there |
+| everything else | situation-specific — the `why:` line names what a human needs to settle |
+
+## §7 Fact-vector regression
+
+Each vector, and the row (or queue) it must hit. Re-check this list after any change to the
+table, the resolution map, or the render.
 
 | # | Fact vector | The failure being prevented | Row | Outcome |
 |---|---|---|---|---|
@@ -155,3 +237,7 @@ Each vector, and the row it must hit. Re-check this list after any change to the
 | **F20c** | draft + `PLAN_COMBINED == no` | same masking | **15** (`fix-plan`) | same mechanism. Draft also sets C6 false, so no ready row can fire while the PR is a draft. |
 | **F21** | base branch has `deletion` and `non_fast_forward` rules alongside the modelled two | treating *every* unmodelled rule type as unknown makes `unknown[]` permanently non-empty, so C7 is always false and no ready row can ever fire | **unchanged** | branch-mutation rule types land in `rules.ignored[]`, not `unknown[]` (`facts.md` §0d). Verified: the reference repo's `dev` carries exactly these two. |
 | **F22** | the issue's board row reads `Human Review`; the PR's own board row reads `Backlog` | reading the PR row as the issue's state fires row 6 (`no-active-issue`) and abandons the promotion ladder | **per issue row** | `BOARD_STATUS` comes from the **issue's** project item; the PR's row is printed once as an ignored line (`facts.md` §2f). Verified live on this repo. |
+| **F23** | codex-ship clean at head, no antagonist evidence, deep-review comment predates a force-push, diff 354 lines, board `Human Review`, auto-promote on, opt-out label present | the single headline hid the path — the user green-lit `antagonist-review` without knowing two more steps stand between it and merge | **21**, queue | queue = `[antagonist-review, complete-gate (projected — C9 observably false at this head), human-approval (projected, ready pending: local gate)]`. Verified live on the reference repo's PR #261. |
+| **F24** | row 9 or 10 fires (`rebase`), with `CS_AT_HEAD = true` before the rebase | the projected queue kept crediting review evidence that the force-push invalidates, projecting straight to ready | queue | the `rebase` resolution resets every `*_AT_HEAD` and sets CI pending, so the queue shows `wait-ci` and the review spend again after the rebase. |
+| **F25** | `ui.warranted`, driver has no browser capability | the screenshot phase blocks the run, or fabricates a summary with no image | **18 unchanged** | `shots_status = no-browser`; the headline is still `ui-review`; the page renders the routes-to-check list with no images; no fact changes (`page.md` §1b). |
+| **F26** | `--json` | a gate prompt or a browser `open` corrupts machine-readable stdout | — | `--json` implies `--no-gate` and suppresses the page auto-open; the page file is still written and its path rides in `page.path`. Stdout carries the JSON object and nothing else. |

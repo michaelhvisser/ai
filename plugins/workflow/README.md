@@ -21,7 +21,7 @@ Add the marketplace, then install the plugin:
 
 | Claude Code invocation | Description |
 |------------------------|-------------|
-| `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists, whether its plan is right, and the single next step to take |
+| `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists, whether its plan is right, which review skill is still needed at this head — and the ordered action queue to merge, green-lightable at the closing prompt, with a by-hand recipe per step, preview-deploy screenshots for UI changes, and a one-page local `report.html` |
 | `/workflow:antagonist-review [PR]` | Cross-model adversarial review with quorum tie-breaks: a strong finder model finds defects, the local Codex CLI attacks every one, a third model breaks ties, and a human settles only what the models genuinely cannot — then Codex fixes the confirmed set and the loop re-reviews until clean |
 | `/workflow:codex-ship [PR]` | Triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop), corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value |
 | `/workflow:resolve-conflicts` | Resolve an in-progress merge/rebase conflict hunk by hunk on intent, verify with the repo's own checks, and prove no reviewed change was silently dropped |
@@ -44,6 +44,11 @@ it names, run `pr-details` again — until the answer is a terminal or
 human-owned step. You never have to decide which review skill to spend tokens
 on; the decision table decides, keyed on what already ran at the current head
 SHA and how big the diff is.
+
+You rarely need the table below by hand: `pr-details` closes with a green-light
+prompt offering to run the step it named (or the next few, re-checking between
+each), hand you the local recipe instead, or stop at the report. The table is
+the same mapping, for when you drive the loop yourself or from `--json`.
 
 | `next_step.id` from `pr-details` | What to run |
 |---|---|
@@ -88,8 +93,17 @@ It reports:
 - **Plan** — a strong model audits whether the issue's plan is the right plan
   for its problem, and proposes issue-body edits as text. `--plan-model both`
   runs a two-family quorum; a split verdict is itself a signal.
-- **UI** — whether the diff warrants visual review, and which routes to look at.
-- **Next step** — exactly one, from a thirty-row table evaluated top to bottom.
+- **UI** — whether the diff warrants visual review, which routes to look at,
+  and — when a preview deployment exists — a screenshot glance of those routes
+  with a short visual summary, so a simple UI change never forces you to launch
+  the app.
+- **Quality** — which of codex-ship, antagonist-review, deep review, and E2E
+  already ran at this head SHA, and which the table still requires before merge.
+- **Next steps** — exactly one actual step from a thirty-row table evaluated
+  top to bottom, then the projected path behind it (cap 5), each entry carrying
+  the skill command and a by-hand `local:` recipe. Everything also renders into
+  `report.html` in the run directory — verdict, queue, screenshots, and a
+  what-changed outline in one page.
 
 The next-step vocabulary is closed, so callers can branch on it:
 `merged`, `closed`, `facts-incomplete`, `board-terminal`, `blocked`,
@@ -99,9 +113,10 @@ The next-step vocabulary is closed, so callers can branch on it:
 `move-to-human-review`, `hand-to-detent`, `needs-human`. There is no "optional"
 outcome — a weaker secondary suggestion goes in `then[]` or `notes[]`.
 
-`--json` puts the whole fact set on stdout (schema 1) with every diagnostic on
-stderr; the same object is written to the run directory as `facts.json` on every
-run. Nothing consumes it yet — siblings may later, to share one `HEAD_SHA` pin
+`--json` puts the whole fact set on stdout (schema 2 — adds `quality`,
+`queue[]`, `page`, and the `ui` screenshot fields; every schema-1 field is
+unchanged) with every diagnostic on stderr; the same object is written to the
+run directory as `facts.json` on every run. Nothing consumes it yet — siblings may later, to share one `HEAD_SHA` pin
 across a session instead of each re-deriving the PR number, base, linked issue,
 bot logins, and thread state.
 
