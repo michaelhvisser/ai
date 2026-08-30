@@ -333,8 +333,15 @@ and offers only the local recipe and Stop. For `rebase` specifically, the execut
 sends the rebased commit itself, to the remote that actually hosts the head:
 
 ```
-git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>
+git push --force-with-lease=refs/heads/<headRefName>:<HEAD_SHA> \
+  <head-remote> HEAD:refs/heads/<headRefName>
 ```
+
+The explicit lease pins the expectation to the head **this run observed** — the SHA every
+fact in the report describes. A bare `--force-with-lease` trusts the remote-tracking ref,
+which any background fetch refreshes into a rubber stamp; with the pin, a contributor's
+push after Phase 2 rejects the force-push instead of being overwritten, and the rejection
+is surfaced, never retried with a refreshed lease.
 
 `<head-remote>` is the configured remote whose URL matches the full `HEAD_SLUG`
 (owner/name, normalized — the owner login alone is ambiguous for renamed forks or several
@@ -353,8 +360,10 @@ One question, at most four options:
    non-dispatchable, human-owned, or terminal entry, **where interleaved `wait-ci` entries
    are absorbed rather than batch-breaking**: every dispatchable resolution projects CI to
    pending, so `wait-ci` sits between any two dispatches by construction, and the
-   orchestrator handles it itself (watch the checks, e.g. `gh pr checks <n> --watch`, as
-   part of the batch). Between steps, re-run
+   orchestrator handles it itself as part of the batch — and a freshly pushed head has a
+   registration window in which `gh pr checks <n> --watch` reports *no checks* and exits:
+   poll until the new head's checks exist, then watch them to completion, before
+   evaluating anything. Between steps, re-run
    `pr-details <n> --no-plan-check --no-page --no-gate` and continue only while the fresh
    headline matches the projection — a red CI landing counts as divergence and stops the
    run with a report.
