@@ -9,6 +9,7 @@ usage() {
 Usage:
   worktree-create.sh env-files [--source-dir <path>]
   worktree-create.sh create <issue-or-pr-number> [--source-dir <path>] [--copy-env|--no-copy-env] [--metadata-file <path>] [--register-state|--no-register-state]
+  worktree-create.sh review <pr-number> [--source-dir <path>] [--copy-env|--no-copy-env]
 USAGE
 }
 
@@ -328,6 +329,126 @@ run_create() {
   echo "Branch: $BRANCH_NAME"
 }
 
+run_review() {
+  local number="${1:-}"
+  [ -n "$number" ] || die "review requires a PR number"
+  shift
+  echo "$number" | grep -qE '^[0-9]+$' || die "PR number must be numeric"
+
+  local copy_env="false"
+  SOURCE_DIR=$(pwd)
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --source-dir)
+        SOURCE_DIR="${2:-}"
+        [ -n "$SOURCE_DIR" ] || die "--source-dir requires a path"
+        shift 2
+        ;;
+      --copy-env)
+        copy_env="true"
+        shift
+        ;;
+      --no-copy-env)
+        copy_env="false"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown review option: $1"
+        ;;
+    esac
+  done
+
+  require_tool gh
+  require_tool git
+  require_tool jq
+  gh auth status >/dev/null 2>&1 || die "gh not authenticated. Run: gh auth login"
+  [ -d "$SOURCE_DIR" ] || die "Source directory not found: $SOURCE_DIR"
+
+  MAIN_REPO_ROOT=$(main_repo_root "$SOURCE_DIR")
+
+  local pr_json head_ref pr_state pr_title
+  pr_json=$(gh pr view "$number" --json number,title,headRefName,state 2>/dev/null || true)
+  [ -n "$pr_json" ] || die "PR #$number not found"
+  head_ref=$(printf '%s\n' "$pr_json" | jq -r '.headRefName // ""')
+  pr_state=$(printf '%s\n' "$pr_json" | jq -r '.state // ""')
+  pr_title=$(printf '%s\n' "$pr_json" | jq -r '.title // ""')
+  [ -n "$head_ref" ] || die "PR #$number has no head ref"
+  if [ "$pr_state" != "OPEN" ]; then
+    echo "PR_STATE_WARNING: PR #$number is $pr_state"
+  fi
+
+  REPO_NAME=$(basename "$MAIN_REPO_ROOT")
+  TITLE_SLUG=$(slugify "$pr_title")
+  [ -n "$TITLE_SLUG" ] || TITLE_SLUG="pr-$number"
+  WORKTREE_NAME="${REPO_NAME}-review-pr-${number}-${TITLE_SLUG}"
+  WORKTREE_PATH="$(cd "$MAIN_REPO_ROOT/.." && pwd -P)/${WORKTREE_NAME}"
+  BRANCH_NAME="review-pr-${number}"
+  WORKTREE_CREATED="false"
+
+  # The PR head branch may be checked out in another worktree (an agent
+  # daemon workpad, or a colleague clone) — never claim it. A dedicated
+  # local review branch created FROM origin/<head_ref> carries identical
+  # content and cannot collide.
+  git -C "$MAIN_REPO_ROOT" fetch origin "$head_ref"
+
+  local existing_path
+  existing_path=$(existing_worktree_path "$MAIN_REPO_ROOT" "$BRANCH_NAME" "$WORKTREE_PATH")
+  if [ -n "$existing_path" ]; then
+    WORKTREE_ABS_PATH=$(cd "$existing_path" && pwd)
+    echo "WORKTREE_EXISTS: $WORKTREE_ABS_PATH"
+    # Reuse: fast-forward to the current PR head so rework commits appear.
+    # A review worktree holds no local commits by contract; if it somehow
+    # does, refuse rather than discard them.
+    if git -C "$WORKTREE_ABS_PATH" merge --ff-only "origin/$head_ref" >/dev/null 2>&1; then
+      echo "WORKTREE_UPDATED: origin/$head_ref"
+    else
+      echo "WORKTREE_STALE: local branch has diverged from origin/$head_ref; not touching it"
+    fi
+  else
+    local checked_out_path
+    checked_out_path=$(branch_checked_out_path "$MAIN_REPO_ROOT" "$BRANCH_NAME")
+    if [ -n "$checked_out_path" ]; then
+      die "Branch $BRANCH_NAME is checked out at $checked_out_path"
+    fi
+    if [ -e "$WORKTREE_PATH" ] || [ -L "$WORKTREE_PATH" ]; then
+      die "Target path already exists: $WORKTREE_PATH"
+    fi
+    if git -C "$MAIN_REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+      die "Branch $BRANCH_NAME already exists but is not a registered worktree; remove or rename it first"
+    fi
+    git -C "$MAIN_REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "origin/$head_ref"
+    WORKTREE_ABS_PATH=$(cd "$WORKTREE_PATH" && pwd)
+    WORKTREE_CREATED="true"
+    echo "WORKTREE_CREATED: $WORKTREE_ABS_PATH"
+  fi
+
+  local env_files
+  env_files=$(find_env_files "$SOURCE_DIR")
+  if [ -n "$env_files" ]; then
+    ENV_FILES_COUNT=$(printf '%s\n' "$env_files" | awk 'NF { count++ } END { print count + 0 }')
+    echo "ENV_FILES_FOUND: $ENV_FILES_COUNT"
+    echo "$env_files"
+    if [ "$copy_env" = "true" ]; then
+      printf '%s\n' "$env_files" | copy_env_files "$SOURCE_DIR" "$WORKTREE_ABS_PATH"
+    else
+      echo "ENV_FILES_SKIPPED"
+    fi
+  else
+    ENV_FILES_COUNT=0
+    echo "ENV_FILES_FOUND: 0"
+  fi
+
+  echo "Worktree absolute path: $WORKTREE_ABS_PATH"
+  echo "Branch: $BRANCH_NAME"
+  echo "PR head ref: origin/$head_ref"
+  echo "PR state: $pr_state"
+}
+
 COMMAND="${1:-}"
 case "$COMMAND" in
   env-files)
@@ -337,6 +458,10 @@ case "$COMMAND" in
   create)
     shift
     run_create "$@"
+    ;;
+  review)
+    shift
+    run_review "$@"
     ;;
   -h|--help)
     usage

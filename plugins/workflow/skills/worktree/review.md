@@ -1,0 +1,108 @@
+# Worktree — Review
+
+Create (or refresh) a review worktree checked out at a PR's **head commit**,
+install its dependencies, and open it in an editor. Loaded by `SKILL.md` when
+the user wants to review one or more PRs locally.
+
+This is deliberately different from `create.md`: that flow is issue-oriented
+and branches from the default branch (no PR code). A review needs the head ref
+so `git diff origin/<default>...HEAD` is the actual change set.
+
+## Usage
+
+User-facing slash command: `/review-worktree <pr-number> [<pr-number>...]`.
+Skill invocation: `$workflow:worktree review`.
+
+## Steps
+
+### Step 1: Capture Input
+
+Collect one or more PR numbers. If none is available from the request, follow
+the shared **missing-intent gate**: request the PR number(s) and stop.
+
+Bare numbers only — extract the number from a pasted PR URL.
+
+### Step 2: Check for Environment Files (once)
+
+```bash
+SOURCE_DIR="$(pwd)"
+"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create.sh" env-files --source-dir "$SOURCE_DIR"
+```
+
+If the output starts with `ENV_FILES_FOUND=true`, follow the shared
+**missing-intent gate**: ask once — "Found environment files that may contain
+secrets. Copy them to the review worktree(s)?" — and apply the answer to every
+PR in this invocation. Never infer consent. If the user has already granted
+env-copy consent for review worktrees earlier in the same session, reuse it.
+
+### Step 3: Create or Refresh Each Review Worktree
+
+For each PR number:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create.sh" review "<pr-number>" --source-dir "$SOURCE_DIR" --copy-env   # or --no-copy-env
+```
+
+The script:
+
+- resolves the PR's `headRefName` and fetches it
+- creates `../<reponame>-review-pr-<num>-<title-slug>/` on a **local**
+  branch `review-pr-<num>` started from `origin/<headRef>` — it never checks
+  out the PR's own branch, which may already be claimed by an agent daemon's
+  workpad or another worktree
+- sets upstream tracking to `origin/<headRef>`, so a later `git pull` in the
+  worktree picks up new rework commits
+- on reuse, fast-forwards to the current head; if the local branch diverged it
+  prints `WORKTREE_STALE` and leaves it untouched — surface that to the user
+  instead of resetting
+- prints `PR_STATE_WARNING` when the PR is merged or closed — still usable,
+  but tell the user
+
+Read `Worktree absolute path:` from the output for each PR.
+
+### Step 4: Install Dependencies
+
+In each worktree, detect the package manager from the lockfile and install:
+
+| Lockfile present | Command |
+|---|---|
+| `pnpm-lock.yaml` | `pnpm install` |
+| `package-lock.json` | `npm install` |
+| `yarn.lock` | `yarn install` |
+| `bun.lockb` / `bun.lock` | `bun install` |
+| `go.mod` (no JS lockfile) | nothing — Go resolves on build |
+
+If the repo's agent guidance (`CLAUDE.md`/`AGENTS.md`) prescribes a specific
+worktree setup command, prefer it — but never run a setup script that would
+overwrite env files the user chose to copy (or not copy) in Step 2.
+
+### Step 5: Open in Editor
+
+If the user asked for an editor (or invoked `/review-worktree`, whose default
+is Cursor), launch it with the Claude session markers stripped — a
+CLI-launched Electron editor inherits them and every integrated terminal
+inside it then treats `claude` as a nested session and disables transcript
+saving:
+
+```bash
+CURSOR_BIN="$(command -v cursor || echo /Applications/Cursor.app/Contents/Resources/app/bin/cursor)"
+env -u CLAUDE_CODE_CHILD_SESSION -u CLAUDE_CODE_SESSION_ID "$CURSOR_BIN" --new-window "<worktree-path>"
+```
+
+If no Cursor binary exists, fall back to `open -a "Cursor" <path>` (macOS,
+drops inherited env by re-parenting through launchd), then to skipping the
+step with a note. Never fail the whole flow over the editor.
+
+### Step 6: Report
+
+For each PR, report: worktree path, branch, head commit (`git log --oneline
+-1`), and the diff stat against the PR's base
+(`git diff --stat origin/<base>...HEAD | tail -1`). Note any
+`PR_STATE_WARNING` or `WORKTREE_STALE` lines.
+
+## Contract
+
+- A review worktree holds **no local commits**; never commit or push from
+  `review-pr-<num>`. Fixes belong on the PR's real branch via the normal flow.
+- Cleanup: `/remove-worktree` or `/prune-worktree` handle
+  `<reponame>-review-pr-*` like any other worktree.

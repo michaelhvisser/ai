@@ -1,6 +1,6 @@
 ---
 name: worktree
-description: "Create, remove, or prune git worktrees for issue/PR isolation. Use when the user asks for a worktree, wants an isolated workspace per issue, or wants completed worktrees cleaned up."
+description: "Create, remove, review, or prune git worktrees for issue/PR isolation. Use when the user asks for a worktree, wants an isolated workspace per issue, wants a PR checked out locally for review, or wants completed worktrees cleaned up."
 disable-model-invocation: true
 ---
 
@@ -20,10 +20,11 @@ target, consent, or cleanup choices.
 | User intent | Sibling | Slash command |
 |---|---|---|
 | Create one worktree for an issue or PR | `create.md` | `/create-worktree <num>` |
+| Review one or more PRs at their head commits | `review.md` | `/review-worktree <num>...` |
 | Remove a specific worktree (interactively) | `remove.md` | `/remove-worktree` |
 | Batch-clean all completed worktrees | `prune.md` | `/prune-worktree` |
 
-Match the user's request to one of the three rows, then read the corresponding sibling for the full procedure.
+Match the user's request to one of the rows, then read the corresponding sibling for the full procedure.
 
 If the request does not identify one action, follow the shared
 **missing-intent gate**. Request create, remove, or prune intent and stop before
@@ -33,6 +34,7 @@ mutating worktrees.
 
 - **Worktree path**: `../<reponame>-issue-<num>-<title-slug>/` — sibling to the source repo, never inside it
 - **Branch name**: `issue-<num>-<title-slug>`
+- **Review variant**: path `../<reponame>-review-pr-<num>-<title-slug>/`, local branch `review-pr-<num>` tracking `origin/<pr-head>` — checked out at the PR head, never the PR's own branch (see `review.md`)
 - **Title slug**: lowercase, alnum + hyphens, derived from `gh issue view --json title`
 - **Identifier rule**: `issue-<NUM>-` prefix is the trusted issue marker on a branch — `fix/2fa-login` contains a number but is NOT an issue branch
 - **Default branch**: `git remote show origin | grep 'HEAD branch'` (handles repos with `main` vs `master` vs custom)
@@ -46,5 +48,6 @@ mutating worktrees.
 ## Further Reading
 
 - `create.md` — full create procedure (PR vs issue detection, env-file copy, state registration)
+- `review.md` — review-worktree procedure (PR head checkout, deps install, editor launch)
 - `remove.md` — interactive selection + safety-check matrix (issue closed? branch merged? uncommitted changes?)
 - `prune.md` — batch evaluation, classification, confirmation, removal
