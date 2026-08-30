@@ -1,6 +1,6 @@
 ---
 name: resolve-conflicts
-description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge, rebase, or cherry-pick stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the operation first, and come back only if it stops."
+description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge, rebase, or cherry-pick stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the operation first, and come back only if it stops — and SKIP for cherry-pick -n conflicts, which leave no operation state: resolve those as ordinary unmerged paths."
 ---
 
 # Resolve Conflicts — finish the operation without losing either side
@@ -141,13 +141,18 @@ if [ "$RC_OP" = none ]; then
   echo "WORKFLOW_RESULT=INCOMPLETE"
   echo "WORKFLOW_REASON=no-operation-in-progress"
 elif [ "$RC_OP" = merge ]; then
-  # Everything the branch changed relative to the incoming side. This is the
-  # reviewed work that must survive resolution.
-  git diff "$RC_ONTO...$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
+  # Everything each side changed relative to the other. Two-dot from an
+  # explicit base, not three-dot: an --allow-unrelated-histories merge has no
+  # merge base, and a failed three-dot would leave EMPTY baseline files that
+  # Step 6 vacuously passes — the empty tree is the correct base there.
+  RC_MB=$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD" 2>/dev/null) \
+    || RC_MB=$(git hash-object -t tree /dev/null)
+  # The reviewed work that must survive resolution:
+  git diff "$RC_MB" "$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
   # And the mirror: the INCOMING side's changes, which a resolve-to-ours can
   # silently discard while every ours-before hunk still survives. Step 6
   # checks both directions.
-  git diff "$RC_ORIG_HEAD...$RC_ONTO" > "$RC_RUN_DIR/theirs-before.diff"
+  git diff "$RC_MB" "$RC_ONTO" > "$RC_RUN_DIR/theirs-before.diff"
 else
   # rebase and cherry-pick: ONE BASELINE PER REPLAYED COMMIT, all captured at
   # the first stop. Later commits may apply cleanly and never re-enter this
@@ -272,11 +277,13 @@ if [ "$RC_OP" = rebase ] && grep -q '^refs/heads/' "$RC_STATE_DIR/head-name" 2>/
         echo "PUSH_UNRESOLVED: ${RC_PUSH} does not sit under remote ${RC_PR} — Step 7 will skip the push"
         RC_REMOTE=""; RC_DEST=""; RC_EXPECT="" ;;
     esac
-  elif [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ]; then
+  elif [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ] \
+    || [ "$(git config push.default 2>/dev/null)" = nothing ]; then
     # @{push} can fail while a destination IS configured (a refs/for/* push
-    # refspec has no local tracking ref). Guessing origin/<branch> there
-    # would rewrite the wrong remote — record no lease and hand the push to
-    # the caller, who knows their config.
+    # refspec has no local tracking ref) — guessing origin/<branch> there
+    # would rewrite the wrong remote. And push.default=nothing is an explicit
+    # no-default-push policy this skill must not synthesize a destination
+    # around. Record no lease; the caller pushes per their own config.
     echo "PUSH_UNRESOLVED: ${RC_BRANCH} has push config Step 7 cannot resolve — it will skip the push"
     RC_REMOTE=""; RC_DEST=""; RC_EXPECT=""
   else
@@ -295,7 +302,12 @@ fi
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
-the skill's own authority — which operation, onto what, is the caller's decision.
+the skill's own authority — which operation, onto what, is the caller's decision. One
+known shape reaches here with real conflicts in the tree: **`git cherry-pick -n`**
+(no-commit) leaves neither `CHERRY_PICK_HEAD` nor a sequencer on conflict, so there is no
+operation state to baseline and no `--continue` to run. Say so — the unmerged paths are
+resolved as ordinary edits and committed by the caller; this skill's baseline/integrity
+machinery does not apply to them.
 
 A `MAINLINE_NEEDED` line means a replayed **merge commit**'s baseline could not be derived
 mechanically: recover the `-m <n>` parent number from the command the caller actually ran
