@@ -153,7 +153,9 @@ repeat up to 4 more times:
     if id ∈ QUEUE_TERMINAL or the resolution map has no row for id: stop
     facts[n] := facts[n-1] overlaid with resolution(id)
     next := row(facts[n])
-    if next.id already appears in queue: stop            # loop guard
+    if next.id already appears in queue and next.id != "wait-ci": stop   # loop guard;
+        # wait-ci legitimately recurs after every push-projecting step and must
+        # not truncate the path — the cap of 5 still bounds the queue
     append next, marked projected
 ```
 
@@ -205,7 +207,7 @@ drive.
 | `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
 | `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
 | `fix-plan` | edit the issue's Plan section by hand; the proposed replacement text is in the report page and `$RUN_DIR/plan-*.md` |
-| `wait-ci` | `gh pr checks <n> --watch` |
+| `wait-ci` | `gh pr checks <n> -R <host>/<slug> --watch` — repo-qualified, since a fork checkout's inferred repository may not be the resolved base |
 | `ui-review` | open `<preview_url><route>` for each listed route, or run the repo's dev server and visit them |
 | `complete-gate` | run the contract gate (`<gate.run>`) at the head commit, then post the evidence the contract names — workpad update, review comment, label |
 | `human-approval` | this **is** the local step: read the report page, then approve (`gh pr review <n> --approve`), merge, or move the board item per the contract |

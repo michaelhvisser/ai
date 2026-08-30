@@ -55,8 +55,9 @@ part of the surface.
   not enough: a modern app executes its own code on load — analytics beacons, session
   initialization, mount-time mutations — against real backends. Capture only in a context
   where the binding can actually enforce read-only: JavaScript disabled, or network
-  interception rejecting every non-GET request (`chrome-devtools` offers these controls;
-  a profile extension does not). With JS disabled, server-rendered content still captures;
+  interception rejecting every non-GET request **and all WebSocket traffic** — the upgrade
+  handshake is itself a GET, and the frames behind it carry mutations no method filter
+  sees (`chrome-devtools` offers these controls; a profile extension does not). With JS disabled, server-rendered content still captures;
   a page that needs client JS comes out skeletal — say so in the visual summary rather
   than trade a mutation for a prettier screenshot. When the bound browser can enforce
   neither control, do not navigate the preview at all: record

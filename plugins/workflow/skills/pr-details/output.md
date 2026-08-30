@@ -143,7 +143,7 @@ version-1 consumer read is unchanged.
      "cost":"local, minutes"},
     {"pos":2,"id":"wait-ci","row":17,"projected":true,
      "command":"wait for CI on the new head","why":"the rebase resets every at-head fact",
-     "local":"gh pr checks 161 --watch","cost":"wall time only"},
+     "local":"gh pr checks 161 -R github.com/threefold-solutions/client-portals --watch","cost":"wall time only"},
     {"pos":3,"id":"antagonist-review","row":19,"projected":true,
      "command":"/workflow:antagonist-review 161","why":"no review evidence can survive the rebase; diff 979 ≥ 150",
      "local":"review gh pr diff 161 yourself, or run the language plugin's review-deep",
