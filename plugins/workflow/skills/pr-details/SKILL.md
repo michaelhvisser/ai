@@ -316,12 +316,15 @@ Everything else (`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`,
 those the gate offers only the local recipe and Stop. Never present a Run option that
 cannot actually run.
 
-**Rebase dispatch binds to the PR's checkout and the PR's head repository, never the
-shell's.** The skill reports from any checkout — another branch, detached HEAD, a dirty
-tree — so running the rebase recipe in the ambient directory can rebase and force-push an
-unrelated branch. Offer Run for `rebase` only when Phase 2e's local facts show the
-checkout **at the PR head and clean**, and push the rebased commit itself, to the remote
-that actually hosts the head:
+**Every mutating dispatch binds to the PR's checkout, never the shell's.** The skill
+reports from any checkout — another branch, detached HEAD, a dirty tree — and every
+dispatchable skill can reach a fixer that commits and pushes from the ambient directory
+(`codex-ship` invokes `address-review`; `antagonist-review` dispatches its own fixer). So
+the Run options are offered **only when Phase 2e's local facts show a clean checkout at
+the PR head**; otherwise the gate names the gap — "checkout is not at the PR head; open
+its worktree (`/workflow:create-worktree <n>` review mode) and run `<command>` there" —
+and offers only the local recipe and Stop. For `rebase` specifically, the executed push
+sends the rebased commit itself, to the remote that actually hosts the head:
 
 ```
 git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>

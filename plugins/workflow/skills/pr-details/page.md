@@ -51,9 +51,16 @@ part of the surface.
 - Routes come from Phase 5's route mapping, same cap of 5, captured at desktop width
   (~1280px). One shot per route; a route that needs a second viewport is a job for the real
   `ui-review` step, not this glance.
-- A route that renders a sign-in or access-check screen records `auth-blocked` for that route
-  and moves on. Do not log in, even with a session the browser profile already holds a
-  credential for — an authenticated crawl is a decision the user green-lights, not a default.
+- **Authenticated capture needs an explicit green light, and cookies count as
+  authentication.** A profile-bound browser silently sends its existing session, so a route
+  can render authenticated content without ever showing a sign-in screen — "don't log in"
+  alone does not keep the capture unauthenticated. Prefer a fresh unauthenticated context
+  when the binding offers one. When only the profile-bound browser exists and a route
+  renders what is evidently authenticated content, ask once (missing intent,
+  `lib/decision-gates.md`): the screenshots would embed that content in the local report
+  page. Without an affirmative answer — or in any non-interactive run — record
+  `auth-blocked` for the route and move on. A route that renders a sign-in or access-check
+  screen records `auth-blocked` directly. Never log in on the user's behalf.
 - Files → `$RUN_DIR/shots/<route-slug>.png`. Mixed results (some captured, some blocked) →
   `shots_status: partial`.
 

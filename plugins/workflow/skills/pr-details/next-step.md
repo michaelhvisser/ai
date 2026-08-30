@@ -193,7 +193,7 @@ drive.
 
 | id | local recipe |
 |---|---|
-| `rebase` | from a clean checkout of the PR head: `git fetch origin && git rebase origin/<base>`, then `git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>` — the `HEAD:` refspec pushes the rebased commit itself, and `<head-remote>` is the remote hosting the PR head (`origin` for a same-repo PR; the fork's remote for a fork PR), so the push can never force-update an unrelated same-named branch; on conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
+| `rebase` | from a clean checkout of the PR head: `git fetch <base-remote> && git rebase <base-remote>/<base>`, then `git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>`. `<base-remote>` is the remote whose URL matches the PR's **base** repository (usually `origin`; on a fork checkout often `upstream` — rebasing onto a fork's stale `origin/<base>` is the trap), and `<head-remote>` matches the **head** repository; the `HEAD:` refspec pushes the rebased commit itself, so the push can never force-update an unrelated same-named branch. On conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
 | `address-review` | open each unresolved thread (URLs in the report), fix in the editor, push, then reply and resolve on GitHub |
 | `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
 | `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
