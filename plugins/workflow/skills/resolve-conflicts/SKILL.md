@@ -61,8 +61,11 @@ if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   # first-pick-parent arithmetic, and merged side-branch history breaks
   # patch counting.
   if [ -f "$RC_STATE_DIR/git-rebase-todo" ] || [ -f "$RC_STATE_DIR/done" ]; then
+    # `merge -C <sha> <label>` lines appear under --rebase-merges: the
+    # original merge commit's own content (an evil merge, an embedded
+    # resolution) needs a baseline like any pick.
     RC_PICKS=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
-      | awk '/^(pick|edit|reword|fixup|squash) /{print $2}')
+      | awk '/^(pick|edit|reword|fixup|squash) /{print $2} /^merge -[Cc] /{print $3}')
   else
     RC_PICKS=$(awk '/^From [0-9a-f]{40}/{print $2}' "$RC_STATE_DIR"/[0-9]* 2>/dev/null)
   fi
@@ -86,7 +89,15 @@ fi
 case "$RC_OP" in
   rebase)      RC_ID="${RC_ORIG_HEAD}:${RC_ONTO}" ;;
   merge)       RC_ID="$RC_ONTO" ;;
-  cherry-pick) RC_ID=$(cat "$RC_GIT_DIR/sequencer/head" 2>/dev/null || git rev-parse CHERRY_PICK_HEAD) ;;
+  cherry-pick)
+    # sequencer/head alone collides when a second, different sequence starts
+    # from the same HEAD after an abort; the sequencer directory's inode is
+    # new per sequence, so head:inode separates them.
+    if [ -d "$RC_GIT_DIR/sequencer" ]; then
+      RC_ID="$(cat "$RC_GIT_DIR/sequencer/head" 2>/dev/null):$(ls -di "$RC_GIT_DIR/sequencer" | awk '{print $1}')"
+    else
+      RC_ID=$(git rev-parse CHERRY_PICK_HEAD)
+    fi ;;
   *)           RC_ID="" ;;
 esac
 
@@ -154,12 +165,18 @@ else
     RC_P=$(git rev-parse "$RC_P")
     RC_OUT="$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_P").diff"
     if git rev-parse -q --verify "${RC_P}^2" >/dev/null 2>&1; then
-      # A merge commit being picked: ^1 is NOT automatically the right base —
-      # the pick was started with -m <n>, and for a single pick git records
-      # <n> nowhere. Determine it from the command the caller actually ran
-      # (missing intent if unknowable) and write the baseline by hand:
-      # git diff "<sha>^<n>" "<sha>" > "$RC_OUT"
-      echo "MAINLINE_NEEDED: $RC_P — baseline requires the -m parent number"
+      if [ "$RC_OP" = rebase ]; then
+        # --rebase-merges replays merges along the first-parent line, so the
+        # original merge's own content baselines against parent 1.
+        git diff "${RC_P}^1" "$RC_P" > "$RC_OUT"
+      else
+        # A merge commit being cherry-picked: ^1 is NOT automatically the
+        # right base — the pick was started with -m <n>, and for a single
+        # pick git records <n> nowhere. Determine it from the command the
+        # caller actually ran (missing intent if unknowable) and write the
+        # baseline by hand: git diff "<sha>^<n>" "<sha>" > "$RC_OUT"
+        echo "MAINLINE_NEEDED: $RC_P — baseline requires the -m parent number"
+      fi
     elif git rev-parse -q --verify "${RC_P}~1" >/dev/null 2>&1; then
       git diff "${RC_P}~1" "$RC_P" > "$RC_OUT"
     else
@@ -201,11 +218,14 @@ question), then write `git diff "<sha>^<n>" "<sha>"` to the named baseline file 
 continuing past Step 0.
 
 **Every later block that uses an `RC_*` variable begins with this loader** — repeat it
-rather than assuming shell state survived from Step 0:
+rather than assuming shell state survived from Step 0, and always parse, never source
+(the file can carry a branch name, and git permits shell metacharacters in refs):
 
 ```bash
 RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
-[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
+RC_OP=$(rc_get RC_OP); RC_ONTO=$(rc_get RC_ONTO); RC_ORIG_HEAD=$(rc_get RC_ORIG_HEAD)
+RC_RUN_DIR=$(rc_get RC_RUN_DIR)
 ```
 
 **Sides invert between merge and rebase.** Misreading this table is the most common cause
