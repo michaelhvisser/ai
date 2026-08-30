@@ -53,7 +53,7 @@ SHA and how big the diff is.
 | `address-review` | Your language plugin's `address-review` (e.g. `/ts-workflow:address-review`) |
 | `ui-review` | Your language plugin's browser/E2E verification (e.g. `/ts-workflow:e2e-verify`) |
 | `fix-plan` | Apply the plan-check's proposed issue edits — a human action, on the issue |
-| `complete-gate` | Run the repo's own verification gate, then re-run `pr-details` |
+| `complete-gate` | Complete the specific contract conjunct the report's `why:` line names — the local gate run, a deep review at the head SHA, a refreshed issue workpad — then re-run `pr-details`. The gate command alone clears it only when the gate was the missing conjunct |
 | `wait-ci` | Nothing — CI is running |
 | `hand-to-detent` / `human-approval` / `move-to-human-review` | Board or human owns the next move |
 | `merged` / `closed` | Done |

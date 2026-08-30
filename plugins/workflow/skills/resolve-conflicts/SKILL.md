@@ -52,12 +52,21 @@ if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   # merge-base..orig-head, but `git rebase --onto NEW UPSTREAM` replays only
   # UPSTREAM..orig-head — a merge-base three-dot diff would drag the commits
   # the command deliberately excluded into the baseline, and Step 6 would
-  # then demand they survive. Read the pick list from the rebase state.
-  RC_FIRST_PICK=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
-    | grep -m1 -E '^(pick|edit|reword|fixup|squash) ' | awk '{print $2}')
-  [ -n "$RC_FIRST_PICK" ] \
-    && RC_BASE=$(git rev-parse -q --verify "${RC_FIRST_PICK}^" 2>/dev/null) \
-    || RC_BASE=""
+  # then demand they survive. Merge backend: read the pick list. Apply
+  # backend (`--apply`) has no pick list, but `last` counts the patch series
+  # format-patch generated over UPSTREAM..orig-head, and that series is
+  # linear, so orig-head~last is UPSTREAM. Merge-base is the last resort.
+  RC_BASE=""
+  if [ -f "$RC_STATE_DIR/git-rebase-todo" ] || [ -f "$RC_STATE_DIR/done" ]; then
+    RC_FIRST_PICK=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
+      | grep -m1 -E '^(pick|edit|reword|fixup|squash) ' | awk '{print $2}')
+    [ -n "$RC_FIRST_PICK" ] \
+      && RC_BASE=$(git rev-parse -q --verify "${RC_FIRST_PICK}^" 2>/dev/null) \
+      || RC_BASE=""
+  elif [ -f "$RC_STATE_DIR/last" ]; then
+    RC_LAST=$(cat "$RC_STATE_DIR/last")
+    RC_BASE=$(git rev-parse -q --verify "${RC_ORIG_HEAD}~${RC_LAST}" 2>/dev/null) || RC_BASE=""
+  fi
   [ -n "$RC_BASE" ] || RC_BASE=$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")
 elif [ -f "$RC_GIT_DIR/MERGE_HEAD" ]; then
   RC_OP=merge
@@ -251,6 +260,11 @@ after must be one of:
 1. **An identical change already on the incoming side** — confirm with
    `git log -S'<vanished text>' --oneline "$RC_ONTO"` or by reading the incoming commit.
 2. **A deliberate drop recorded in Step 3's trade-offs.**
+3. **Cherry-pick only: superseded inside the picked series itself** — a later picked
+   commit modified or removed what an earlier one introduced, so the transient hunk is
+   rightly absent from the net result. Prove it by pointing at the later
+   `ours-before-<sha>.diff` that touches the same lines; the series' **net** effect is
+   what must survive, not each intermediate state.
 
 Anything else is a lost reviewed change: reopen the resolution and restore it before
 declaring done. This check is the completion criterion for the whole skill — "the rebase
