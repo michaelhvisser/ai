@@ -88,7 +88,8 @@ gh pr view "<pr-number>" --json isCrossRepository,author --jq '{fork: .isCrossRe
 - **Fork PR** (`fork: true`) — untrusted by default. This is missing intent
   (`lib/decision-gates.md`): ask whether to install with lifecycle scripts
   disabled (`npm install --ignore-scripts`, `pnpm install --ignore-scripts`,
-  `yarn install --ignore-scripts`, `bun install --ignore-scripts`), install
+  `yarn install --mode=skip-build` on Yarn Berry / `--ignore-scripts` on
+  classic v1, `bun install --ignore-scripts`), install
   normally because the user vouches for this author, or skip installation.
   When scripts were skipped, say so in the report — packages needing a build
   step may not work until the user opts in.

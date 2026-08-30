@@ -69,14 +69,31 @@ copy_env_files() {
   local source_dir="$1"
   local worktree_path="$2"
   local copied=0
+  local wt_real
+  wt_real=$(cd "$worktree_path" && pwd -P)
   while IFS= read -r file; do
     [ -n "$file" ] || continue
-    local dir
+    local dir dest dest_dir_real
     dir=$(dirname "$file")
     if [ "$dir" != "." ]; then
       mkdir -p "$worktree_path/$dir"
     fi
-    cp -P "$source_dir/$file" "$worktree_path/$file"
+    dest="$worktree_path/$file"
+    # The worktree content is under the PR author's control: a tracked
+    # symlink at the destination (or a symlinked parent directory) would
+    # make this copy write the reviewer's secrets to an arbitrary path
+    # outside the worktree. cp -P protects only the SOURCE side, so resolve
+    # the destination and refuse anything that escapes or is a symlink.
+    dest_dir_real=$(cd "$worktree_path/$dir" 2>/dev/null && pwd -P) || dest_dir_real=""
+    case "${dest_dir_real}/" in
+      "${wt_real}/"*) : ;;
+      *) echo "ENV_COPY_REFUSED: $file (destination resolves outside the worktree)"; continue ;;
+    esac
+    if [ -L "$dest" ]; then
+      echo "ENV_COPY_REFUSED: $file (destination is a symlink)"
+      continue
+    fi
+    cp -P "$source_dir/$file" "$dest"
     echo "Copied $file"
     copied=$((copied + 1))
   done
@@ -133,11 +150,13 @@ extract_issue_from_pr() {
 resolve_item() {
   local number="$1"
   local pr_json issue_json pr_title linked_issue
-  pr_json=$(gh pr view "$number" --json number,title,headRefName,body 2>/dev/null || true)
+  # gh resolves the repository from its cwd; with --source-dir that is not
+  # necessarily the shell's cwd, so every lookup runs from the source repo.
+  pr_json=$(cd "$SOURCE_DIR" && gh pr view "$number" --json number,title,headRefName,body 2>/dev/null || true)
   if [ -n "$pr_json" ]; then
     pr_title=$(printf '%s\n' "$pr_json" | jq -r '.title // empty')
     if linked_issue=$(extract_issue_from_pr "$pr_json"); then
-      issue_json=$(gh issue view "$linked_issue" --json number,title,state 2>/dev/null || true)
+      issue_json=$(cd "$SOURCE_DIR" && gh issue view "$linked_issue" --json number,title,state 2>/dev/null || true)
       if [ -n "$issue_json" ]; then
         ITEM_NUMBER="$linked_issue"
         ITEM_TITLE=$(printf '%s\n' "$issue_json" | jq -r '.title')
@@ -151,7 +170,7 @@ resolve_item() {
     return 0
   fi
 
-  issue_json=$(gh issue view "$number" --json number,title,state 2>/dev/null || true)
+  issue_json=$(cd "$SOURCE_DIR" && gh issue view "$number" --json number,title,state 2>/dev/null || true)
   [ -n "$issue_json" ] || die "Issue or PR #$number not found"
   ITEM_NUMBER=$(printf '%s\n' "$issue_json" | jq -r '.number')
   ITEM_TITLE=$(printf '%s\n' "$issue_json" | jq -r '.title')
@@ -372,7 +391,10 @@ run_review() {
   MAIN_REPO_ROOT=$(main_repo_root "$SOURCE_DIR")
 
   local pr_json head_ref pr_state pr_title
-  pr_json=$(gh pr view "$number" --json number,title,headRefName,state 2>/dev/null || true)
+  # Resolve against the source repository, not the shell's cwd — with
+  # --source-dir they can differ, and the fetch below targets this repo's
+  # origin, so the metadata must come from the same place.
+  pr_json=$(cd "$MAIN_REPO_ROOT" && gh pr view "$number" --json number,title,headRefName,state 2>/dev/null || true)
   [ -n "$pr_json" ] || die "PR #$number not found"
   head_ref=$(printf '%s\n' "$pr_json" | jq -r '.headRefName // ""')
   pr_state=$(printf '%s\n' "$pr_json" | jq -r '.state // ""')
