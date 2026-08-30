@@ -139,7 +139,7 @@ version-1 consumer read is unchanged.
   "queue": [
     {"pos":1,"id":"rebase","row":10,"projected":false,
      "command":"rebase onto dev","why":"4 commits behind dev under a strict ruleset",
-     "local":"git fetch origin && git rebase origin/dev, then git push --force-with-lease origin <headRefName>",
+     "local":"git fetch <base-remote> && git rebase <base-remote>/dev, then git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>",
      "cost":"local, minutes"},
     {"pos":2,"id":"wait-ci","row":17,"projected":true,
      "command":"wait for CI on the new head","why":"the rebase resets every at-head fact",

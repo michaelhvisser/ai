@@ -51,6 +51,11 @@ part of the surface.
 - Routes come from Phase 5's route mapping, same cap of 5, captured at desktop width
   (~1280px). One shot per route; a route that needs a second viewport is a job for the real
   `ui-review` step, not this glance.
+- **A `[param]` segment is not navigable as-is** — the placeholder URL captures a 404 and
+  the visual summary would falsely call the page broken. Substitute a concrete value only
+  when the PR itself names one (a slug or id in its body, diff, or tests); otherwise
+  record the route with `status: "param-unresolved"`, no file, and list it under the
+  routes to check by hand. Never save a placeholder response as a screenshot.
 - **Authenticated capture needs an explicit green light, and cookies count as
   authentication.** A profile-bound browser silently sends its existing session, so a route
   can render authenticated content without ever showing a sign-in screen — "don't log in"
