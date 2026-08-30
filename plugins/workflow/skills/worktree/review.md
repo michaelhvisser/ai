@@ -45,16 +45,18 @@ For each PR number:
 
 The script:
 
-- resolves the PR's `headRefName` and fetches it
+- force-fetches `refs/pull/<num>/head` into a local `refs/pr-review/<num>`
+  ref — this works for cross-repository (fork) PRs and PRs whose head branch
+  was deleted, where `origin/<headRef>` does not exist
 - creates `../<reponame>-review-pr-<num>-<title-slug>/` on a **local**
-  branch `review-pr-<num>` started from `origin/<headRef>` — it never checks
-  out the PR's own branch, which may already be claimed by an agent daemon's
-  workpad or another worktree
-- sets upstream tracking to `origin/<headRef>`, so a later `git pull` in the
-  worktree picks up new rework commits
-- on reuse, fast-forwards to the current head; if the local branch diverged it
-  prints `WORKTREE_STALE` and leaves it untouched — surface that to the user
-  instead of resetting
+  branch `review-pr-<num>` started from that ref — it never checks out the
+  PR's own branch, which may already be claimed by an agent daemon's workpad
+  or another worktree
+- on reuse (keyed on the stable `review-pr-<num>` branch, so a changed PR
+  title still finds it), re-fetches and fast-forwards to the current head —
+  re-run the skill to pick up rework commits, there is no `git pull` upstream;
+  if the local branch diverged it prints `WORKTREE_STALE` and leaves it
+  untouched — surface that to the user instead of resetting
 - prints `PR_STATE_WARNING` when the PR is merged or closed — still usable,
   but tell the user
 

@@ -390,38 +390,41 @@ run_review() {
   BRANCH_NAME="review-pr-${number}"
   WORKTREE_CREATED="false"
 
-  # The PR head branch may be checked out in another worktree (an agent
-  # daemon workpad, or a colleague clone) — never claim it. A dedicated
-  # local review branch created FROM origin/<head_ref> carries identical
-  # content and cannot collide.
-  git -C "$MAIN_REPO_ROOT" fetch origin "$head_ref"
+  # The PR head branch may live on a fork (cross-repository PR) or be deleted
+  # once the PR merges, so origin/<headRefName> is not a reliable fetch source.
+  # GitHub serves refs/pull/<n>/head on the base repository for every PR —
+  # open, closed, merged, or cross-repo. Force-fetch it into a local review
+  # ref (shared across worktrees) so force-pushed heads track too. The head
+  # branch itself may be checked out in another worktree — never claim it; the
+  # dedicated review branch carries identical content and cannot collide.
+  local pr_head_ref="refs/pr-review/${number}"
+  git -C "$MAIN_REPO_ROOT" fetch --force origin "refs/pull/${number}/head:${pr_head_ref}"
 
+  # Reuse is keyed on the stable review-pr-<n> branch, never the title-derived
+  # path: PR titles change between invocations, the branch name does not.
   local existing_path
-  existing_path=$(existing_worktree_path "$MAIN_REPO_ROOT" "$BRANCH_NAME" "$WORKTREE_PATH")
+  existing_path=$(branch_checked_out_path "$MAIN_REPO_ROOT" "$BRANCH_NAME")
   if [ -n "$existing_path" ]; then
     WORKTREE_ABS_PATH=$(cd "$existing_path" && pwd)
+    WORKTREE_PATH="$WORKTREE_ABS_PATH"
+    WORKTREE_NAME=$(basename "$WORKTREE_ABS_PATH")
     echo "WORKTREE_EXISTS: $WORKTREE_ABS_PATH"
     # Reuse: fast-forward to the current PR head so rework commits appear.
     # A review worktree holds no local commits by contract; if it somehow
     # does, refuse rather than discard them.
-    if git -C "$WORKTREE_ABS_PATH" merge --ff-only "origin/$head_ref" >/dev/null 2>&1; then
-      echo "WORKTREE_UPDATED: origin/$head_ref"
+    if git -C "$WORKTREE_ABS_PATH" merge --ff-only "$pr_head_ref" >/dev/null 2>&1; then
+      echo "WORKTREE_UPDATED: $pr_head_ref"
     else
-      echo "WORKTREE_STALE: local branch has diverged from origin/$head_ref; not touching it"
+      echo "WORKTREE_STALE: local branch has diverged from $pr_head_ref; not touching it"
     fi
   else
-    local checked_out_path
-    checked_out_path=$(branch_checked_out_path "$MAIN_REPO_ROOT" "$BRANCH_NAME")
-    if [ -n "$checked_out_path" ]; then
-      die "Branch $BRANCH_NAME is checked out at $checked_out_path"
-    fi
     if [ -e "$WORKTREE_PATH" ] || [ -L "$WORKTREE_PATH" ]; then
       die "Target path already exists: $WORKTREE_PATH"
     fi
     if git -C "$MAIN_REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
       die "Branch $BRANCH_NAME already exists but is not a registered worktree; remove or rename it first"
     fi
-    git -C "$MAIN_REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "origin/$head_ref"
+    git -C "$MAIN_REPO_ROOT" worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$pr_head_ref"
     WORKTREE_ABS_PATH=$(cd "$WORKTREE_PATH" && pwd)
     WORKTREE_CREATED="true"
     echo "WORKTREE_CREATED: $WORKTREE_ABS_PATH"
@@ -445,7 +448,7 @@ run_review() {
 
   echo "Worktree absolute path: $WORKTREE_ABS_PATH"
   echo "Branch: $BRANCH_NAME"
-  echo "PR head ref: origin/$head_ref"
+  echo "PR head ref: $pr_head_ref (refs/pull/${number}/head, branch: $head_ref)"
   echo "PR state: $pr_state"
 }
 
