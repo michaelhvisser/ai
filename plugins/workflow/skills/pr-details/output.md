@@ -9,8 +9,8 @@ carried inside the JSON as `warnings[]`.
 
 ## §1 Terminal report
 
-≤ 40 lines, fixed section order: header, `STATUS`, `PURPOSE` (one block per linked issue),
-`PLAN CHECK`, `UI REVIEW`, `NEXT STEP`.
+≤ 48 lines, fixed section order: header, `STATUS`, `PURPOSE` (one block per linked issue),
+`PLAN CHECK`, `UI REVIEW`, `QUALITY`, `NEXT STEPS`.
 
 ```
 === PR #<n> · <title> ===
@@ -32,12 +32,20 @@ PLAN CHECK  (<model> @ <effort> · <elapsed>)
   PLAN_ADEQUATE: <yes|partial|no>
   <Gn> <severity>  <gap text> — <path:line>
 
-UI REVIEW   <warranted (severity) — routes …|not warranted — reason>
+UI REVIEW   <warranted (severity) — routes … · shots: <shots_status>|not warranted — reason>
 
-NEXT STEP   → <command or action>                     [row <n>]  <verdict qualifier>
-  why:   <rationale naming the facts that fired the row>
-  then:  <secondary command>
-  note:  <annotation>
+QUALITY     <codex-ship ✓ at head|✗|stale> · <antagonist …> · <deep review …> · <e2e …|n/a>
+            still required before merge: <list, or "nothing — ladder satisfied at this head">
+
+NEXT STEPS
+  1 → <command or action>                             [row <n>]  <verdict qualifier>
+      why:   <rationale naming the facts that fired the row>
+      local: <the §6 recipe, one line>
+  2 → <command or action>                             [row <n> · projected]
+      why:   <one line>
+  …
+  then:  /workflow:pr-details <n>
+  page:  <run dir>/report.html
   files: <run dir>
 ```
 
@@ -45,21 +53,30 @@ Rules:
 
 - At most **5** unresolved threads inline, then `+n more`.
 - Gaps capped at **5**, each with its severity.
-- The final `files:` line names `$RUN_DIR` and the artifacts in it.
+- The queue prints every entry (cap 5, `next-step.md` §5); entry 1 carries the full `why:` and
+  `local:` lines, later entries one `why:` line each and the `projected` tag. The page carries
+  every entry's local recipe.
+- `QUALITY` names each rung of the review ladder as **at head**, **stale** (evidence names an
+  older SHA), or **not run**, then the second line derives "still required" from the same
+  facts the table read — never from a separate judgment.
+- The final `files:` line names `$RUN_DIR`; the `page:` line names the report page unless
+  `--no-page`.
 - ASCII-safe except `✓` and `✗`.
 - Rows 25–29 append the verdict qualifier:
-  `NEXT STEP  → hand to Detent (Merging)  [row 25]  ready pending: local gate (pnpm lint && pnpm test && pnpm build)`.
+  `1 → hand to Detent (Merging)  [row 25]  ready pending: local gate (pnpm lint && pnpm test && pnpm build)`.
 - Warning lines (unavailable plan model, truncated file list, advisory ruleset, `h` is an upper
-  bound) go to **stderr**, never into this block.
+  bound, degraded screenshots) go to **stderr**, never into this block.
 
-## §2 `--json` schema, version 1
+## §2 `--json` schema, version 2
 
 Stdout carries this object and nothing else. The same object is written to
 `$RUN_DIR/facts.json` on every run, `--json` or not; no sibling skill consumes it yet.
+Version 2 adds `quality`, `queue[]`, `page`, and the `ui` screenshot fields; everything a
+version-1 consumer read is unchanged.
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "generated_at": "2026-08-20T12:00:00Z",
   "host": "github.com",
   "repo": "threefold-solutions/client-portals",
@@ -110,7 +127,24 @@ Stdout carries this object and nothing else. The same object is written to
                               "verify_by":"…","raw_path":"…/plan-fable.md"}]}},
                  "combined":"yes","split":false},
   "ui": {"warranted":false,"severity":null,"files":[],"routes":[],"evidence_present":false,
-         "reason":"no UI paths changed"},
+         "reason":"no UI paths changed",
+         "preview_url":null,"shots_status":"not-warranted",
+         "screenshots":[{"route":"/admin/settings","file":"shots/admin-settings.png","status":"captured"}],
+         "visual_summary":null},
+  "quality": {
+    "codex_ship":{"ran":true,"at_head":true,"clean":true,"evidence":"Reviewed commit ae3b03e2"},
+    "antagonist":{"ran":false,"at_head":false,"evidence":null},
+    "deep_review":{"ran":true,"at_head":false,"evidence":"comment predates force-push"},
+    "e2e":{"ran":false,"at_head":false,"applicable":false},
+    "still_required":["antagonist-review"]},
+  "queue": [
+    {"pos":1,"id":"antagonist-review","row":21,"projected":false,
+     "command":"/workflow:antagonist-review 261","why":"…",
+     "local":"review gh pr diff 261 yourself, or run review-deep",
+     "cost":"tokens: high · wall: 10–30 min"},
+    {"pos":2,"id":"complete-gate","row":23,"projected":true,
+     "command":"complete the pre-review gate","why":"…","local":"…","cost":"local run"}],
+  "page": {"path":"…/run/261-…/report.html","opened":true},
   "ready": {"verifiable":false,
             "conjuncts":[{"id":"C1","grade":"verified","state":"true","text":"required checks pass"},
                          {"id":"C3","grade":"verified","state":"false","text":"behind_by == 0 under strict"},
@@ -139,6 +173,11 @@ except on rows 25–29, where it is `"ready"` or `"ready pending: …"`, and `ne
 carries the conjunct ids in that case. **There is no "optional" value anywhere in the schema** —
 a weaker secondary suggestion lives in `then[]` or `notes[]`.
 
+`queue[]` uses the same vocabulary. `queue[0]` is `next_step` restated (same `id`, same `row`)
+with the `command`, `local`, and `cost` render fields added; entries with `projected: true`
+are path, not fact (`next-step.md` §5). A version-1 consumer that only reads `next_step`
+loses nothing.
+
 ## §3 Exit codes
 
 | Exit | Meaning |
@@ -152,4 +191,6 @@ a weaker secondary suggestion lives in `then[]` or `notes[]`.
 ## §4 Scratch hygiene
 
 Scratch files live under the session scratchpad only; never commit or post them, and do not
-paste secrets into model prompts.
+paste secrets into model prompts. The report page and the screenshots are scratch files like
+any other: `report.html` opens locally and is never published, uploaded, or served, and
+`shots/*.png` may show authenticated preview content, so neither leaves the run directory.

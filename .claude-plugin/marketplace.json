@@ -13,7 +13,7 @@
       "name": "workflow",
       "source": "./plugins/workflow",
       "description": "Language-agnostic PR and review workflow skills — read-only PR situation reports, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "keywords": [
         "workflow",
         "github",
