@@ -20,6 +20,7 @@ Clear any active worktree state so the pre-tool-use hook doesn't block cleanup c
 - Default branch: !`git remote show origin 2>/dev/null | grep 'HEAD branch' | sed 's/.*: //' || echo "main"`
 - All worktrees: !`git worktree list 2>&1 || echo "No worktrees found"`
 - Issue worktrees: !`git worktree list 2>/dev/null | grep -E "issue-[0-9]+" || echo "No issue worktrees found"`
+- Review worktrees: !`git worktree list 2>/dev/null | grep -E "review-pr-[0-9]+" || echo "No review worktrees found"`
 
 ---
 
@@ -32,17 +33,17 @@ Clear any active worktree state so the pre-tool-use hook doesn't block cleanup c
 !REPO_NAME=`basename \`git rev-parse --show-toplevel\``
 !echo "Repository: $REPO_NAME"
 
-### 2. List All Issue Worktrees
+### 2. List Candidate Worktrees
 
-!echo "Scanning for issue worktrees..."
+!echo "Scanning for issue and review worktrees..."
 !git worktree list
 
-Filter for worktrees matching the `{REPO_NAME}-issue-*` pattern and display them as a numbered list.
+Filter for worktrees matching `{REPO_NAME}-issue-*` or `{REPO_NAME}-review-pr-*` and display them as one numbered list.
 
-!git worktree list | grep -E "/${REPO_NAME}-issue-[0-9]+" | cat -n
+!git worktree list | grep -E "/${REPO_NAME}-(issue|review-pr)-[0-9]+" | cat -n
 
-If no issue worktrees are found, inform the user and stop:
-"No issue worktrees found matching the pattern '{REPO_NAME}-issue-*'"
+If none are found, inform the user and stop:
+"No issue or review worktrees found"
 
 ### 3. Ask User to Select Worktree
 
@@ -51,15 +52,24 @@ Use AskUserQuestion to ask: "Which worktree would you like to remove? Enter the 
 Store the selected worktree path and extract:
 - `WORKTREE_PATH`: The full path to the worktree
 - `BRANCH_NAME`: The branch associated with the worktree
-- `ISSUE_NUM`: The issue number extracted from the directory name
-
-To extract issue number from path:
-!ISSUE_NUM=`echo "$WORKTREE_PATH" | grep -oE 'issue-[0-9]+' | grep -oE '[0-9]+'`
-!echo "Issue number: $ISSUE_NUM"
 
 To get branch name:
 !BRANCH_NAME=`git worktree list --porcelain | grep -A2 "worktree $WORKTREE_PATH" | grep "branch" | sed 's/branch refs\/heads\///'`
 !echo "Branch: $BRANCH_NAME"
+
+**Classify by the branch, not the path** (a repo name or title slug can itself
+contain `review-pr-` or `issue-`): a branch matching `review-pr-<digits>`
+exactly is a **review worktree** — take `PR_NUM` from it and follow the review
+variant in Steps 4–5; anything else is an **issue worktree** — extract
+`ISSUE_NUM`:
+
+!ISSUE_NUM=`echo "$WORKTREE_PATH" | grep -oE 'issue-[0-9]+' | grep -oE '[0-9]+'`
+!echo "Issue number: $ISSUE_NUM"
+
+For a review worktree:
+
+!PR_NUM=`echo "$BRANCH_NAME" | grep -oE '^review-pr-[0-9]+$' | grep -oE '[0-9]+'`
+!echo "PR number: $PR_NUM"
 
 ### 4. Check Worktree Status
 
@@ -80,6 +90,16 @@ If there are uncommitted changes, warn the user immediately.
 !echo "Default branch: $DEFAULT_BRANCH"
 !git fetch origin "$DEFAULT_BRANCH" --quiet
 !MERGED=`git branch --merged "origin/$DEFAULT_BRANCH" | grep -F "$BRANCH_NAME" || echo ""`
+
+#### Review worktree variant (branch `review-pr-<n>`)
+
+The branch is local-only and never merges, so the issue/merge checks above do
+not apply. Instead check the PR state and the review contract (no local
+commits beyond the fetched PR head, no uncommitted changes):
+
+!gh pr view "$PR_NUM" --json state --jq '.state'
+!LOCAL_COMMITS=`git -C "$WORKTREE_PATH" rev-list --count "refs/pr-review/${PR_NUM}..HEAD" 2>/dev/null || echo "unknown"`
+!echo "Local commits beyond PR head: $LOCAL_COMMITS"
 
 ### 5. Determine Safety and Proceed
 
@@ -107,6 +127,19 @@ Ask: "Also delete the local branch '$BRANCH_NAME'?"
 
 If confirmed:
 !git branch -d "$BRANCH_NAME"
+
+#### Review worktree: safe removal
+
+Safe when the PR state is `MERGED` or `CLOSED`, `LOCAL_COMMITS` is `0`, and
+there are no uncommitted changes. Confirm as above, then:
+
+!git worktree remove "$WORKTREE_PATH"
+!git branch -D "$BRANCH_NAME"
+!git update-ref -d "refs/pr-review/${PR_NUM}"
+
+`-D` is correct here: a `review-pr-<n>` branch never merges, and the zero
+local-commit check proved it holds nothing of its own. Anything else (open PR,
+local commits, uncommitted changes) follows the NOT SAFE path below.
 
 #### If NOT SAFE (issue open OR branch not merged OR has uncommitted changes):
 

@@ -23,10 +23,16 @@ require_tool() {
 }
 
 slugify() {
+  # Cap at 60 chars: the slug is one path component alongside the repo name
+  # and issue/review prefixes, and common filesystems cap a component at 255
+  # bytes — a long PR or issue title must not make worktree add fail with
+  # "File name too long".
   printf '%s\n' "$1" \
     | sed 's/[^a-zA-Z0-9-]/-/g' \
     | tr '[:upper:]' '[:lower:]' \
-    | sed 's/--*/-/g; s/^-//; s/-$//'
+    | sed 's/--*/-/g; s/^-//; s/-$//' \
+    | cut -c1-60 \
+    | sed 's/-$//'
 }
 
 main_repo_root() {
