@@ -254,24 +254,33 @@ if [ "$RC_OP" = rebase ] && grep -q '^refs/heads/' "$RC_STATE_DIR/head-name" 2>/
   RC_EXPECT="$RC_ORIG_HEAD"
   # The branch's CONFIGURED push destination, not a hardcoded origin/<name> —
   # pushRemote / remote.pushDefault / a push refspec can all redirect it.
+  # The effective push remote, resolved from config — never split out of the
+  # abbreviated @{push} form, because git permits remote NAMES containing
+  # slashes (`team/prod`), which a first-slash split mis-parses into the
+  # wrong repository and ref.
+  RC_PR=$(git config "branch.${RC_BRANCH}.pushRemote" 2>/dev/null \
+    || git config remote.pushDefault 2>/dev/null \
+    || git config "branch.${RC_BRANCH}.remote" 2>/dev/null || echo origin)
   RC_PUSH=$(git rev-parse --abbrev-ref "${RC_BRANCH}@{push}" 2>/dev/null) || RC_PUSH=""
   if [ -n "$RC_PUSH" ]; then
-    RC_REMOTE=${RC_PUSH%%/*}; RC_DEST=${RC_PUSH#*/}
-  else
+    case "$RC_PUSH" in
+      "${RC_PR}/"*)
+        RC_REMOTE="$RC_PR"; RC_DEST=${RC_PUSH#"${RC_PR}/"} ;;
+      *)
+        # @{push} resolved to something not under the effective remote
+        # (triangular config) — do not guess a rewrite target.
+        echo "PUSH_UNRESOLVED: ${RC_PUSH} does not sit under remote ${RC_PR} — Step 7 will skip the push"
+        RC_REMOTE=""; RC_DEST=""; RC_EXPECT="" ;;
+    esac
+  elif [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ]; then
     # @{push} can fail while a destination IS configured (a refs/for/* push
     # refspec has no local tracking ref). Guessing origin/<branch> there
-    # would rewrite the wrong remote — so guess only when the effective push
-    # remote carries no push refspecs at all; otherwise record no lease and
-    # hand the push to the caller, who knows their config.
-    RC_PR=$(git config "branch.${RC_BRANCH}.pushRemote" 2>/dev/null \
-      || git config remote.pushDefault 2>/dev/null \
-      || git config "branch.${RC_BRANCH}.remote" 2>/dev/null || echo origin)
-    if [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ]; then
-      RC_REMOTE=""; RC_DEST=""; RC_EXPECT=""
-      echo "PUSH_UNRESOLVED: ${RC_BRANCH} has push config Step 7 cannot resolve — it will skip the push"
-    else
-      RC_REMOTE="$RC_PR"; RC_DEST="$RC_BRANCH"
-    fi
+    # would rewrite the wrong remote — record no lease and hand the push to
+    # the caller, who knows their config.
+    echo "PUSH_UNRESOLVED: ${RC_BRANCH} has push config Step 7 cannot resolve — it will skip the push"
+    RC_REMOTE=""; RC_DEST=""; RC_EXPECT=""
+  else
+    RC_REMOTE="$RC_PR"; RC_DEST="$RC_BRANCH"
   fi
 else
   RC_BRANCH=$(git symbolic-ref --quiet --short HEAD) || RC_BRANCH=""
