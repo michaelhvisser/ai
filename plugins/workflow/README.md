@@ -24,16 +24,47 @@ Add the marketplace, then install the plugin:
 | `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists, whether its plan is right, and the single next step to take |
 | `/workflow:antagonist-review [PR]` | Cross-model adversarial review with quorum tie-breaks: a strong finder model finds defects, the local Codex CLI attacks every one, a third model breaks ties, and a human settles only what the models genuinely cannot — then Codex fixes the confirmed set and the loop re-reviews until clean |
 | `/workflow:codex-ship [PR]` | Triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop), corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value |
+| `/workflow:resolve-conflicts` | Resolve an in-progress merge/rebase conflict hunk by hunk on intent, verify with the repo's own checks, and prove no reviewed change was silently dropped |
 | `/workflow:commit` | Create a git commit with an auto-generated conventional message from staged changes |
 | `/workflow:create-pr` | Open a pull request using the repo's PR template |
 | `/workflow:create-worktree <number>` | Create (or reuse) a git worktree for a GitHub issue or PR |
 | `/workflow:remove-worktree` | Interactively select and remove a git worktree |
 | `/workflow:prune-worktree` | Batch cleanup of all completed issue and PR-review worktrees |
 
-`commit`, `create-pr`, `worktree`, and `pr-details` are also reachable in Codex
-as `$workflow:commit`, `$workflow:create-pr`, `$workflow:worktree <action>`, and
-`$workflow:pr-details`. Codex requires the qualified plugin name; bare skill
-names are not resolver aliases.
+`commit`, `create-pr`, `worktree`, `pr-details`, and `resolve-conflicts` are also
+reachable in Codex as `$workflow:commit`, `$workflow:create-pr`,
+`$workflow:worktree <action>`, `$workflow:pr-details`, and
+`$workflow:resolve-conflicts`. Codex requires the qualified plugin name; bare
+skill names are not resolver aliases.
+
+## The Flow
+
+The main loop for driving one PR to merge: run `pr-details`, run the one skill
+it names, run `pr-details` again — until the answer is a terminal or
+human-owned step. You never have to decide which review skill to spend tokens
+on; the decision table decides, keyed on what already ran at the current head
+SHA and how big the diff is.
+
+| `next_step.id` from `pr-details` | What to run |
+|---|---|
+| `rebase` | Rebase onto the base branch; if it stops on conflicts → `/workflow:resolve-conflicts` |
+| `codex-ship` | `/workflow:codex-ship` |
+| `antagonist-review` | `/workflow:antagonist-review` |
+| `address-review` | Your language plugin's `address-review` (e.g. `/ts-workflow:address-review`) |
+| `ui-review` | Your language plugin's browser/E2E verification (e.g. `/ts-workflow:e2e-verify`) |
+| `fix-plan` | Apply the plan-check's proposed issue edits — a human action, on the issue |
+| `complete-gate` | Run the repo's own verification gate, then re-run `pr-details` |
+| `wait-ci` | Nothing — CI is running |
+| `hand-to-detent` / `human-approval` / `move-to-human-review` | Board or human owns the next move |
+| `merged` / `closed` | Done |
+
+Everything else in the vocabulary (`blocked`, `no-active-issue`,
+`close-superseded`, `close-duplicate`, `board-terminal`, `facts-incomplete`,
+`finish-draft`, `needs-human`) names a situation, not a skill — the report's
+`why` line says what a human needs to settle.
+
+**On-ramps** into the loop: `create-worktree` to pick up an issue or PR in an
+isolated worktree, then `commit` and `create-pr` to get a PR into existence.
 
 ## Where to Start: `pr-details`
 
