@@ -32,7 +32,7 @@ cross-platform capability-binding rules.
 Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving any workflow
 choice.
 
-**Usage:** `/workflow:antagonist-review [PR-number] [--base <ref>] [--max-fix-rounds <n>] [--effort low|medium|high|xhigh] [--no-post] [focus ...]`
+**Usage:** `/workflow:antagonist-review [PR-number|PR-URL] [--base <ref>] [--max-fix-rounds <n>] [--effort low|medium|high|xhigh] [--no-post] [focus ...]`
 
 **Examples:**
 `/workflow:antagonist-review` (current branch vs auto-detected base) ·

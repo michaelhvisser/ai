@@ -47,7 +47,7 @@ this skill triages each one first, records *why* it dismissed anything, **dismis
 the PR itself** (resolves the review thread with the reason, so it doesn't linger or block
 merging), and never silently waves slop through.
 
-**Usage:** `/workflow:codex-ship [PR-number] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
+**Usage:** `/workflow:codex-ship [PR-number|PR-URL] [--max-rounds <n>] [--second-opinion mandatory|auto|off]`
 
 **Examples:** `/workflow:codex-ship 152` · `/workflow:codex-ship 152 --max-rounds 15` ·
 `/workflow:codex-ship --second-opinion mandatory`
