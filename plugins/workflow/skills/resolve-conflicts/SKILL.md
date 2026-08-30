@@ -36,6 +36,14 @@ RC_STATE_FILE="$RC_GIT_DIR/resolve-conflicts.state"
 # legally contain shell metacharacters (`git check-ref-format` accepts
 # `refs/heads/a;rm -rf ~`), so sourcing the file would execute them.
 rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
+# Deleting a directory the state file names is allowed ONLY inside this
+# skill's own tmp namespace — the state file lives in .git, which the
+# repository's author controls, and must never steer an rm -rf elsewhere.
+rc_rm_run_dir() {
+  case "$1" in
+    "${TMPDIR:-/tmp}"/resolve-conflicts.*) rm -rf "$1" ;;
+  esac
+}
 # Previous run's state, trusted further down strictly when both the operation
 # KIND and the operation IDENTITY match what is detected now — an --abort
 # leaves this file behind, and a later operation (even of the same kind) must
@@ -116,13 +124,41 @@ esac
 
 if [ "$RC_OP" = cherry-pick ]; then
   # HEAD at the FIRST stop of the sequence, restored from prior state only
-  # when it belongs to THIS sequence, so Step 6's after-diff spans every
-  # picked commit — while an aborted earlier operation's RC_ONTO cannot
-  # smuggle in.
-  if [ "$RC_PREV_OP" = cherry-pick ] && [ "$RC_PREV_ID" = "$RC_ID" ] && [ -n "$RC_PREV_ONTO" ]; then
-    RC_ONTO="$RC_PREV_ONTO"
-  else
-    RC_ONTO=$(git rev-parse HEAD)
+  # when it provably belongs to THIS sequence. Identity alone cannot prove
+  # that (a replaced sequence from the same HEAD shares sequencer/head), so
+  # the restore is validated against live facts: every commit landed since
+  # the stored snapshot must be covered by a captured baseline (patch-id or
+  # subject). An uncovered landed commit means the snapshot predates this
+  # run's involvement — restoring it would pull commits Step 6 has no
+  # baseline for into scope, where dropping their changes could pass.
+  RC_ONTO=$(git rev-parse HEAD)
+  if [ "$RC_PREV_OP" = cherry-pick ] && [ "$RC_PREV_ID" = "$RC_ID" ] \
+    && [ -n "$RC_PREV_ONTO" ] && [ -d "$RC_PREV_RUN_DIR" ]; then
+    find "$RC_PREV_RUN_DIR" -maxdepth 1 -name 'ours-before-*.diff' \
+      | sed 's#.*/ours-before-##; s#\.diff$##' > "$RC_PREV_RUN_DIR/.bshas"
+    : > "$RC_PREV_RUN_DIR/.bids"; : > "$RC_PREV_RUN_DIR/.bsubs"
+    while IFS= read -r RC_B; do
+      [ -n "$RC_B" ] || continue
+      git show --format= "$RC_B" 2>/dev/null | git patch-id --stable \
+        | awk '{print $1}' >> "$RC_PREV_RUN_DIR/.bids"
+      git log -1 --format=%s "$RC_B" 2>/dev/null >> "$RC_PREV_RUN_DIR/.bsubs"
+    done < "$RC_PREV_RUN_DIR/.bshas"
+    RC_UNCOVERED=$(git rev-list "$RC_PREV_ONTO"..HEAD 2>/dev/null \
+      | while IFS= read -r RC_L; do
+          RC_LP=$(git show --format= "$RC_L" | git patch-id --stable | awk '{print $1}')
+          grep -qx "$RC_LP" "$RC_PREV_RUN_DIR/.bids" && continue
+          RC_LS=$(git log -1 --format=%s "$RC_L")
+          grep -qxF "$RC_LS" "$RC_PREV_RUN_DIR/.bsubs" && continue
+          echo "$RC_L"
+        done)
+    if [ -z "$RC_UNCOVERED" ]; then
+      RC_ONTO="$RC_PREV_ONTO"
+    else
+      # The stored state belongs to a replaced sequence: retire its run dir
+      # so its baselines cannot join this run, and start fresh.
+      rc_rm_run_dir "$RC_PREV_RUN_DIR"
+      RC_PREV_RUN_DIR=""
+    fi
   fi
 fi
 
@@ -132,10 +168,14 @@ fi
 # abandoned operation's baselines are never compared against this one.
 if [ "$RC_OP" = none ]; then
   RC_RUN_DIR=""   # nothing to capture — do not leak an empty directory
+  [ -n "$RC_PREV_RUN_DIR" ] && rc_rm_run_dir "$RC_PREV_RUN_DIR"
 elif [ "$RC_PREV_OP" = "$RC_OP" ] && [ "$RC_PREV_ID" = "$RC_ID" ] \
   && [ -n "$RC_PREV_RUN_DIR" ] && [ -d "$RC_PREV_RUN_DIR" ]; then
   RC_RUN_DIR="$RC_PREV_RUN_DIR"
 else
+  # A rejected previous dir (different kind or identity) holds full source
+  # diffs — remove it rather than leave it in /tmp indefinitely.
+  [ -n "$RC_PREV_RUN_DIR" ] && rc_rm_run_dir "$RC_PREV_RUN_DIR"
   RC_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/resolve-conflicts.XXXXXX")
 fi
 
@@ -518,6 +558,10 @@ a finished operation's facts:
 RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
 rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
 RC_RUN_DIR=$(rc_get RC_RUN_DIR)
-[ -n "$RC_RUN_DIR" ] && rm -rf "$RC_RUN_DIR"
+# Delete only inside this skill's own namespace — the state file sits in
+# .git, which the repository's author controls.
+case "$RC_RUN_DIR" in
+  "${TMPDIR:-/tmp}"/resolve-conflicts.*) rm -rf "$RC_RUN_DIR" ;;
+esac
 rm -f "$RC_STATE_FILE"
 ```
