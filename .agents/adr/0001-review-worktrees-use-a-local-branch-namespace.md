@@ -10,9 +10,10 @@ checks out the PR's head branch; we deliberately do not.
   already checked out in the daemon's own workpad; claiming it either fails or,
   worse, tramples an active lane.
 - **A review worktree must be push-inert.** Reviewing on the real branch makes
-  an accidental `git push` land on the PR. A local branch with tracking set to
-  `origin/<headRef>` gives `git pull` (follow rework commits) without a
-  symmetric safe `git push`.
+  an accidental `git push` land on the PR. A local branch started from the
+  fetched `refs/pr-review/<n>` has no upstream at all — no `git pull`, no
+  `git push` target; rework commits arrive by re-running the review skill,
+  which re-fetches and moves a clean tree forward.
 
 ## Why `review-pr-<n>` and not `review/pr-<n>`
 
