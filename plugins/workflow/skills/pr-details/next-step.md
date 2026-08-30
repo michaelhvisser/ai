@@ -210,7 +210,7 @@ drive.
 | `wait-ci` | `gh pr checks <n> -R <host>/<slug> --watch` — repo-qualified, since a fork checkout's inferred repository may not be the resolved base |
 | `ui-review` | open `<preview_url><route>` for each listed route, or run the repo's dev server and visit them |
 | `complete-gate` | run the contract gate (`<gate.run>`) at the head commit, then post the evidence the contract names — workpad update, review comment, label |
-| `human-approval` | this **is** the local step: read the report page, then approve (`gh pr review <n> --approve`), merge, or move the board item per the contract |
+| `human-approval` | this **is** the local step: read the report page, then approve (`gh pr review <n> -R <host>/<slug> --approve` — repo-qualified: this is an outward-facing write and the ambient checkout may be a fork with a same-numbered PR), merge, or move the board item per the contract |
 | `move-to-human-review` | post the gate evidence, then move the issue's board item |
 | `hand-to-detent` | set the issue's board Status to the merge lane; the daemon takes it from there |
 | everything else | situation-specific — the `why:` line names what a human needs to settle |

@@ -421,7 +421,7 @@ QUALITY     codex-ship ✓ at head · antagonist ✗ not run · deep review stal
             still required before merge: antagonist-review (row 21) · deep review at head (C9)
 
 NEXT STEPS
-  1 → /workflow:antagonist-review 261                 [row 21]
+  1 → /workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/261   [row 21]
       why:   codex-ship clean at head but no second-family review, and the diff is 354 lines ≥ 150
       local: review gh pr diff 261 yourself, or run the language plugin's review-deep
   2 → complete the pre-review gate                    [row 23 · projected]

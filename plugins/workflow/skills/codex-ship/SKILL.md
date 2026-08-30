@@ -116,10 +116,13 @@ for arg in $ARGUMENTS; do
   case "$arg" in
     --max-rounds)      SKIP_NEXT="rounds" ;;
     --second-opinion)  SKIP_NEXT="so" ;;
-    https://*)         # full PR URL: pins the repository, so a fork checkout's
-                       # same-numbered PR can never be addressed by mistake
+    https://*)         # full PR URL: pins host and repository, so a fork
+                       # checkout's same-numbered PR can never be addressed by
+                       # mistake, and a GHE URL never falls back to github.com
+                       URL_HOST=$(printf '%s' "$arg" | sed -E 's#^https?://([^/]+)/.*#\1#')
                        URL_REPO=$(printf '%s' "$arg" | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#')
-                       PR_NUM=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#') ;;
+                       PR_NUM=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+                       export GH_HOST="$URL_HOST" ;;   # every gh call targets the URL's host
     *)                 PR_NUM="$arg" ;;
   esac
 done
@@ -143,6 +146,11 @@ Store `PR_NUM`, `REPO`, `MAX_ROUNDS`, `SECOND_OPINION_ARG`.
 ## Phase 0: Preflight
 
 1. **Working tree clean?** `git status --porcelain` must be empty. If not, stop and ask.
+   **And the target must be the ambient repository**: when a URL pinned `REPO` and the
+   ambient checkout's repository differs, stop — the fixer (`address-review` takes only a
+   number and resolves its repo from the checkout) and the ship phase both act on the
+   ambient tree, so a cross-repo run would fix or ship the wrong PR. Tell the user to run
+   from a checkout of `$REPO`.
 2. **API budget** — GitHub meters GraphQL and REST *separately*, and this skill leans on both.
    Check before the first round; `/rate_limit` is free and never counts against either budget:
    ```bash

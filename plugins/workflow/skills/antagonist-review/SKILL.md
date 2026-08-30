@@ -84,10 +84,12 @@ for arg in $ARGUMENTS; do
     --max-fix-rounds) SKIP_NEXT="rounds" ;;
     --effort)         SKIP_NEXT="effort" ;;
     --no-post)        POST_COMMENT=false ;;
-    https://*)        # full PR URL: pins the repository, so a fork checkout's
-                      # same-numbered PR can never be addressed by mistake
+    https://*)        # full PR URL: pins host and repository, so a fork
+                      # checkout's same-numbered PR can never be addressed by
+                      # mistake, and a GHE URL never falls back to github.com
                       PR_REPO=$(printf '%s' "$arg" | sed -E 's#^https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#')
-                      [ -z "$PR_NUM" ] && PR_NUM=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#') ;;
+                      [ -z "$PR_NUM" ] && PR_NUM=$(printf '%s' "$arg" | sed -E 's#.*/pull/([0-9]+).*#\1#')
+                      export GH_HOST=$(printf '%s' "$arg" | sed -E 's#^https?://([^/]+)/.*#\1#') ;;
     [0-9]*)           [ -z "$PR_NUM" ] && PR_NUM="$arg" || FOCUS="$FOCUS $arg" ;;
     *)                FOCUS="$FOCUS $arg" ;;
   esac
