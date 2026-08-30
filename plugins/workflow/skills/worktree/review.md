@@ -62,6 +62,12 @@ The script:
 
 Read `Worktree absolute path:` from the output for each PR.
 
+**A `WORKTREE_STALE` line stops the flow for that PR here.** The tree holds
+local commits or diverged history the fast-forward refused to touch, so do not
+install dependencies into it or open it in an editor as if it showed the PR
+head. Report the line and follow the missing-intent gate: review the stale
+tree anyway, reset it by hand, or skip this PR.
+
 ### Step 4: Install Dependencies
 
 **Trust gate first.** The worktree now contains code the PR author controls, and

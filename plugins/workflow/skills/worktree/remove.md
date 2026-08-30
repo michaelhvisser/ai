@@ -26,9 +26,13 @@ removal.
 
 ### Step 3: Safety Checks
 
-The checks differ by worktree kind — classify from the path first.
+The checks differ by worktree kind — classify by the **checked-out branch**
+(`git -C "$WORKTREE_PATH" branch --show-current`), not the path: a repo name
+or title slug can itself contain `review-pr-` or `issue-`. A branch matching
+`review-pr-<digits>` exactly is a review worktree; anything else follows the
+issue rules.
 
-**Issue worktree** (`*-issue-*`):
+**Issue worktree**:
 
 1. **Issue status**: Is the linked issue closed?
    ```bash

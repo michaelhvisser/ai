@@ -34,7 +34,7 @@ mutating worktrees.
 
 - **Worktree path**: `../<reponame>-issue-<num>-<title-slug>/` — sibling to the source repo, never inside it
 - **Branch name**: `issue-<num>-<title-slug>`
-- **Review variant**: path `../<reponame>-review-pr-<num>-<title-slug>/`, local branch `review-pr-<num>` tracking `origin/<pr-head>` — checked out at the PR head, never the PR's own branch (see `review.md`)
+- **Review variant**: path `../<reponame>-review-pr-<num>-<title-slug>/`, local branch `review-pr-<num>` started from the fetched `refs/pr-review/<num>` — checked out at the PR head, never the PR's own branch, with no upstream (re-run `review` to refresh; see `review.md`)
 - **Title slug**: lowercase, alnum + hyphens, derived from `gh issue view --json title`
 - **Identifier rule**: `issue-<NUM>-` prefix is the trusted issue marker on a branch — `fix/2fa-login` contains a number but is NOT an issue branch
 - **Default branch**: `git remote show origin | grep 'HEAD branch'` (handles repos with `main` vs `master` vs custom)
