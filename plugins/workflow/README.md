@@ -28,7 +28,7 @@ Add the marketplace, then install the plugin:
 | `/workflow:create-pr` | Open a pull request using the repo's PR template |
 | `/workflow:create-worktree <number>` | Create (or reuse) a git worktree for a GitHub issue or PR |
 | `/workflow:remove-worktree` | Interactively select and remove a git worktree |
-| `/workflow:prune-worktree` | Batch cleanup of all completed issue worktrees |
+| `/workflow:prune-worktree` | Batch cleanup of all completed issue and PR-review worktrees |
 
 `commit`, `create-pr`, `worktree`, and `pr-details` are also reachable in Codex
 as `$workflow:commit`, `$workflow:create-pr`, `$workflow:worktree <action>`, and

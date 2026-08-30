@@ -1,19 +1,19 @@
 ---
-description: "Batch cleanup of all completed issue worktrees"
+description: "Batch cleanup of all completed issue and PR-review worktrees"
 allowed-tools: ["Bash(git:*)", "Bash(gh:*)", "Bash(echo:*)", "Bash(basename:*)", "Bash(grep:*)", "Bash(*worktree-state*)", "Read", "AskUserQuestion"]
 ---
 
-# Prune Issue Worktrees
+# Prune Worktrees
 
-This command safely removes worktrees for completed GitHub issues.
+This command safely removes worktrees whose work is done: issue worktrees for
+completed GitHub issues, and review worktrees for merged or closed PRs.
 
 **What it does:**
 
-1. Scans for worktrees matching the `{reponame}-issue-*` pattern
-2. Checks each associated GitHub issue status
-3. Verifies branches are merged into the default branch
-4. Removes worktrees for closed/merged issues
-5. Cleans up local branches
+1. Scans for worktrees matching `{reponame}-issue-*` and `{reponame}-review-pr-*`
+2. Issue worktrees: checks the issue status and that the branch merged
+3. Review worktrees: checks the PR state and the no-local-commits contract
+4. Removes worktrees that pass, cleans up local branches
 
 **Safety checks:**
 
@@ -34,6 +34,7 @@ Clear any active worktree state so the pre-tool-use hook doesn't block cleanup c
 - Default branch: !`git remote show origin 2>/dev/null | grep 'HEAD branch' | sed 's/.*: //' || echo "main"`
 - All worktrees: !`git worktree list 2>&1 || echo "No worktrees found"`
 - Issue worktrees: !`git worktree list 2>/dev/null | grep -E "issue-[0-9]+" || echo "No issue worktrees found"`
+- Review worktrees: !`git worktree list 2>/dev/null | grep -E "review-pr-[0-9]+" || echo "No review worktrees found"`
 
 ---
 
@@ -54,7 +55,13 @@ List all worktrees:
 
 !git worktree list
 
-For each worktree matching the `{REPO_NAME}-issue-*` pattern:
+Classify each candidate worktree by its **checked-out branch**
+(`git -C "$WORKTREE_PATH" branch --show-current`) — a repo name or title slug
+can itself contain `review-pr-` or `issue-`. A branch matching
+`review-pr-<digits>` exactly is a review worktree; otherwise treat a
+`{REPO_NAME}-issue-*` path as an issue worktree.
+
+For each **issue worktree**:
 
 1. Extract issue number from directory name using: `grep -oE '[0-9]+'`
 2. **Validate issue number is numeric** (security: prevent command injection)
@@ -62,7 +69,15 @@ For each worktree matching the `{REPO_NAME}-issue-*` pattern:
 4. Check if branch is merged: `git branch --merged "$DEFAULT_BRANCH" | grep -F "$BRANCH_NAME"`
 5. If issue is closed AND branch is merged, offer to remove
 
-**Security note:** Always validate extracted issue numbers are numeric before using in gh commands, and quote all variables in shell commands.
+For each **review worktree** (the branch never merges, so the merged check
+does not apply):
+
+1. Take the PR number from the branch: `PR_NUM` is `review-pr-<n>` minus the prefix (validate numeric)
+2. Check PR state: `gh pr view "$PR_NUM" --json state` — `MERGED` or `CLOSED` = done
+3. Check the review contract held: `git -C "$WORKTREE_PATH" rev-list --count "refs/pr-review/${PR_NUM}..HEAD"` is `0` and `git -C "$WORKTREE_PATH" status --porcelain` is empty
+4. If all pass, offer to remove; cleanup uses `git branch -D "review-pr-${PR_NUM}"` (never merges, proven empty) and `git update-ref -d "refs/pr-review/${PR_NUM}"`
+
+**Security note:** Always validate extracted issue/PR numbers are numeric before using in gh commands, and quote all variables in shell commands.
 
 ## Safety Features
 

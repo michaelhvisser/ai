@@ -1,6 +1,6 @@
 ---
 name: tmux-start
-description: "Start issue work in a new tmux window with its own worktree. Use when the user has tmux running and wants issue startup to continue outside the current session. SKIP when not inside a tmux session ($TMUX unset) or when the user wants to work in the current session; use start-issue directly."
+description: "Start issue work in a new tmux window with its own worktree."
 argument-hint: "<issue-number>"
 disable-model-invocation: true
 ---
