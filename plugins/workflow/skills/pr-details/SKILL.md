@@ -305,21 +305,34 @@ Skip the gate entirely when `--no-gate` or `--json`, or when `queue[0]` is a
 structured input does not skip it: per `driver-interaction.md`, ask the same one question
 as concise text in the final response and stop; the user's answer resumes the gate.
 
-**Dispatchability is checked, not assumed.** A queue entry is dispatchable when its id maps
-to a skill actually invocable in this session (`codex-ship` and `antagonist-review` from
-this plugin; `address-review` and `ui-review` through the language plugin the flow map
-names, when installed), or when it is `rebase` — the one mechanical entry. Everything else
-(`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`, `move-to-human-review`, …) is an
-action the report describes, not a skill to launch: for those the gate offers only the
-local recipe and Stop. Never present a Run option that cannot actually run.
+**Dispatchability is checked, not assumed.** The id→skill mapping is explicit:
+`codex-ship` → `/workflow:codex-ship`; `antagonist-review` → `/workflow:antagonist-review`;
+`address-review` → the language plugin's `address-review`; `ui-review` → the language
+plugin's **E2E verification skill** (in `ts-workflow` that is `e2e-verify` — there is no
+skill literally named `ui-review`). An entry is dispatchable only when its mapped skill is
+actually invocable in this session, or when it is `rebase` — the one mechanical entry.
+Everything else (`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`,
+`move-to-human-review`, …) is an action the report describes, not a skill to launch: for
+those the gate offers only the local recipe and Stop. Never present a Run option that
+cannot actually run.
 
-**Rebase dispatch binds to the PR's checkout, never the shell's.** The skill reports from
-any checkout — another branch, detached HEAD, a dirty tree — so running the rebase recipe
-in the ambient directory can rebase and force-push an unrelated branch. Offer Run for
-`rebase` only when Phase 2e's local facts show the checkout **at the PR head and clean**;
-the executed push names its target explicitly
-(`git push --force-with-lease origin <headRefName>`), never an argumentless push.
-Otherwise the gate presents the recipe without running it.
+**Rebase dispatch binds to the PR's checkout and the PR's head repository, never the
+shell's.** The skill reports from any checkout — another branch, detached HEAD, a dirty
+tree — so running the rebase recipe in the ambient directory can rebase and force-push an
+unrelated branch. Offer Run for `rebase` only when Phase 2e's local facts show the
+checkout **at the PR head and clean**, and push the rebased commit itself, to the remote
+that actually hosts the head:
+
+```
+git push --force-with-lease <head-remote> HEAD:refs/heads/<headRefName>
+```
+
+`<head-remote>` is the configured remote whose URL matches `HEAD_REPO` (`facts.md` §0a
+already knows `IS_FORK`): `origin` for a same-repo PR, the fork's remote otherwise. The
+`HEAD:` refspec pushes what was just rebased even when the local branch is not named
+`<headRefName>`. When no configured remote points at the head repository — the usual case
+for a fork checked out via `refs/pull/*` — the entry is **not dispatchable**: present the
+recipe instead of running it.
 
 One question, at most four options:
 
