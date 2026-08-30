@@ -73,17 +73,28 @@ copy_env_files() {
   wt_real=$(cd "$worktree_path" && pwd -P)
   while IFS= read -r file; do
     [ -n "$file" ] || continue
-    local dir dest dest_dir_real
+    local dir dest dest_dir_real probe probe_real
     dir=$(dirname "$file")
-    if [ "$dir" != "." ]; then
-      mkdir -p "$worktree_path/$dir"
-    fi
     dest="$worktree_path/$file"
     # The worktree content is under the PR author's control: a tracked
     # symlink at the destination (or a symlinked parent directory) would
     # make this copy write the reviewer's secrets to an arbitrary path
-    # outside the worktree. cp -P protects only the SOURCE side, so resolve
-    # the destination and refuse anything that escapes or is a symlink.
+    # outside the worktree. cp -P protects only the SOURCE side, so the
+    # destination is validated here — and BEFORE mkdir -p, which would
+    # itself follow a symlinked existing component and create directories
+    # outside the worktree.
+    probe="$worktree_path/$dir"
+    while [ ! -d "$probe" ] && [ "$probe" != "$worktree_path" ]; do
+      probe=$(dirname "$probe")
+    done
+    probe_real=$(cd "$probe" 2>/dev/null && pwd -P) || probe_real=""
+    case "${probe_real}/" in
+      "${wt_real}/"*) : ;;
+      *) echo "ENV_COPY_REFUSED: $file (existing parent resolves outside the worktree)"; continue ;;
+    esac
+    if [ "$dir" != "." ]; then
+      mkdir -p "$worktree_path/$dir"
+    fi
     dest_dir_real=$(cd "$worktree_path/$dir" 2>/dev/null && pwd -P) || dest_dir_real=""
     case "${dest_dir_real}/" in
       "${wt_real}/"*) : ;;
@@ -411,6 +422,7 @@ run_review() {
   WORKTREE_PATH="$(cd "$MAIN_REPO_ROOT/.." && pwd -P)/${WORKTREE_NAME}"
   BRANCH_NAME="review-pr-${number}"
   WORKTREE_CREATED="false"
+  WORKTREE_REFUSED="false"
 
   # The PR head branch may live on a fork (cross-repository PR) or be deleted
   # once the PR merges, so origin/<headRefName> is not a reliable fetch source.
@@ -445,6 +457,7 @@ run_review() {
     if [ -n "$wt_dirty" ]; then
       # "Already up to date" from --ff-only would vouch for a dirty tree.
       echo "WORKTREE_DIRTY: uncommitted changes; not touching it"
+      WORKTREE_REFUSED="true"
     elif [ -n "$prev_pr_head" ] && [ "$wt_head" = "$prev_pr_head" ]; then
       # Clean and exactly at the previously fetched PR head: safe to follow
       # the PR wherever it went — including a force-push, which --ff-only
@@ -455,10 +468,12 @@ run_review() {
       # A stray local commit makes HEAD ahead of the fetched PR head, and
       # --ff-only would report "Already up to date" while keeping it.
       echo "WORKTREE_STALE: local commits beyond $pr_head_ref; not touching it"
+      WORKTREE_REFUSED="true"
     elif git -C "$WORKTREE_ABS_PATH" merge --ff-only "$pr_head_ref" >/dev/null 2>&1; then
       echo "WORKTREE_UPDATED: $pr_head_ref"
     else
       echo "WORKTREE_STALE: local branch has diverged from $pr_head_ref; not touching it"
+      WORKTREE_REFUSED="true"
     fi
   else
     if [ -e "$WORKTREE_PATH" ] || [ -L "$WORKTREE_PATH" ]; then
@@ -479,7 +494,11 @@ run_review() {
     ENV_FILES_COUNT=$(printf '%s\n' "$env_files" | awk 'NF { count++ } END { print count + 0 }')
     echo "ENV_FILES_FOUND: $ENV_FILES_COUNT"
     echo "$env_files"
-    if [ "$copy_env" = "true" ]; then
+    if [ "$WORKTREE_REFUSED" = "true" ]; then
+      # "Not touching it" has to include env files: an overwrite here could
+      # clobber an uncommitted .env in the very tree we just refused to move.
+      echo "ENV_FILES_SKIPPED: worktree refused (stale or dirty); resolve that first"
+    elif [ "$copy_env" = "true" ]; then
       printf '%s\n' "$env_files" | copy_env_files "$SOURCE_DIR" "$WORKTREE_ABS_PATH"
     else
       echo "ENV_FILES_SKIPPED"
