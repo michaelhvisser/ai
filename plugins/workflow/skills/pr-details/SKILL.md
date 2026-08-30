@@ -361,10 +361,13 @@ One question, at most four options:
    are absorbed rather than batch-breaking**: every dispatchable resolution projects CI to
    pending, so `wait-ci` sits between any two dispatches by construction, and the
    orchestrator handles it itself as part of the batch — and a freshly pushed head has a
-   registration window in which `gh pr checks <n> --watch` reports *no checks* and exits:
-   poll until the new head's checks exist, then watch them to completion, before
-   evaluating anything. Between steps, re-run
-   `pr-details <n> --no-plan-check --no-page --no-gate`, **carrying the original run's
+   registration window in which the checks watch reports *no checks* and exits: poll until
+   the new head's checks exist, then watch them to completion, before evaluating anything.
+   **Every batch command stays repo-qualified** — the ambient checkout may be a fork whose
+   default remote is not the base repository, so the watch is
+   `gh pr checks <n> -R <host>/<slug>` and the recheck passes the full PR URL (which pins
+   host, owner, and repo per `facts.md` §0a). Between steps, re-run
+   `pr-details <PR-URL> --no-plan-check --no-page --no-gate`, **carrying the original run's
    plan verdict into the recheck's table** (read `PLAN_COMBINED`/`PLAN_SPLIT` from the
    prior `facts.json` — Phase 4 is skipped for cost, not because the verdict expired, and
    without the carry a plan-keyed row can never reproduce). The carry is valid only while

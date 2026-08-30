@@ -29,10 +29,12 @@ reference repo — returns the Vercel preview URL:
 # screenshot — the wrong application while the report labels it preview.
 DEP_ID=$(pr_facts_gh api --hostname "$HOST" \
   "repos/$SLUG/deployments?sha=${HEAD_SHA}&per_page=20" \
-  --jq '[.[] | select(.environment | test("preview"; "i"))][0].id')
+  --jq '[.[] | select(.environment | test("preview"; "i"))][0].id // empty')
 [ -n "$DEP_ID" ] && PREVIEW_URL=$(pr_facts_gh api --hostname "$HOST" \
   "repos/$SLUG/deployments/${DEP_ID}/statuses?per_page=5" \
-  --jq '[.[] | select(.state=="success")][0].environment_url')
+  --jq '[.[] | select(.state=="success")][0].environment_url // empty')
+# `// empty` on both selectors: a no-match [0] yields the LITERAL "null",
+# which passes [ -n ] and turns the next call into deployments/null/statuses.
 ```
 
 No deployment whose environment matches preview, or empty `PREVIEW_URL` →

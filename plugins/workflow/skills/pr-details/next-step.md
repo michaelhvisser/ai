@@ -175,7 +175,7 @@ The resolution map — what "this step succeeded" is assumed to change, and noth
 
 | id | facts assumed afterwards |
 |---|---|
-| `rebase` | `behind_by = 0`, `mergeable = MERGEABLE` — **and a new head SHA**: `CI_STATE = pending`, every `*_AT_HEAD` false. Evidence dies with the SHA it named; a queue that keeps crediting it lies. |
+| `rebase` | `behind_by = 0`, `mergeable = MERGEABLE`, `merge_state = CLEAN` (the `BEHIND`/`DIRTY` values this step exists to fix must not survive it — a retained `BEHIND` makes C6 false forever and loops the queue into `complete-gate`) — **and a new head SHA**: the new-head resets. Evidence dies with the SHA it named; a queue that keeps crediting it lies. |
 | `address-review` | `UNRES_H = UNRES_B = 0`, `HUMAN_CR = false`, `needs-resolve-only` cleared, plus the new-head resets above — assume the fix pushes code; a resolve-only round is the cheaper surprise. |
 | `codex-ship` | `CS_AT_HEAD = true`, `UNRES_CODEX = 0`, `CODEX_CR = false` — plus the new-head resets: `CI_STATE = pending` and every **other** `*_AT_HEAD` false. Its fixer pushes when a finding is real; assume it does (a clean run is the cheaper surprise), and its own contract re-reviews at the final head, which is why `CS_AT_HEAD` survives the reset. |
 | `antagonist-review` | `AR_AT_HEAD = true` — plus the same new-head resets (`CI_STATE = pending`, other `*_AT_HEAD` false): the loop pushes fix commits when findings confirm. It never *owns* CI, so no resolution may ever fabricate green from pending — `wait-ci` follows in the projection instead. |
