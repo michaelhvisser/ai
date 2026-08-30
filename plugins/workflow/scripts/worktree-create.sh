@@ -398,6 +398,11 @@ run_review() {
   # branch itself may be checked out in another worktree — never claim it; the
   # dedicated review branch carries identical content and cannot collide.
   local pr_head_ref="refs/pr-review/${number}"
+  # The previous fetched head, captured before the force-fetch moves the ref:
+  # it is what lets reuse tell "the PR was force-pushed" apart from "someone
+  # committed locally".
+  local prev_pr_head=""
+  prev_pr_head=$(git -C "$MAIN_REPO_ROOT" rev-parse -q --verify "${pr_head_ref}^{commit}" 2>/dev/null) || prev_pr_head=""
   git -C "$MAIN_REPO_ROOT" fetch --force origin "refs/pull/${number}/head:${pr_head_ref}"
 
   # Reuse is keyed on the stable review-pr-<n> branch, never the title-derived
@@ -409,14 +414,24 @@ run_review() {
     WORKTREE_PATH="$WORKTREE_ABS_PATH"
     WORKTREE_NAME=$(basename "$WORKTREE_ABS_PATH")
     echo "WORKTREE_EXISTS: $WORKTREE_ABS_PATH"
-    # Reuse: fast-forward to the current PR head so rework commits appear.
-    # A review worktree holds no local commits by contract; if it somehow
-    # does, refuse rather than discard them.
-    # A stray local commit makes HEAD ahead of the fetched PR head, and
-    # --ff-only then reports "Already up to date" — success — while keeping
-    # it. The review contract says the branch holds no local commits, so
-    # refuse explicitly before the fast-forward can vouch for the tree.
-    if [ "$(git -C "$WORKTREE_ABS_PATH" rev-list --count "${pr_head_ref}..HEAD")" -gt 0 ]; then
+    # Reuse ladder. The review contract says the branch holds no local
+    # commits and no uncommitted changes; only a tree that provably kept the
+    # contract may be moved, and nothing is ever discarded silently.
+    local wt_head wt_dirty
+    wt_head=$(git -C "$WORKTREE_ABS_PATH" rev-parse HEAD)
+    wt_dirty=$(git -C "$WORKTREE_ABS_PATH" status --porcelain)
+    if [ -n "$wt_dirty" ]; then
+      # "Already up to date" from --ff-only would vouch for a dirty tree.
+      echo "WORKTREE_DIRTY: uncommitted changes; not touching it"
+    elif [ -n "$prev_pr_head" ] && [ "$wt_head" = "$prev_pr_head" ]; then
+      # Clean and exactly at the previously fetched PR head: safe to follow
+      # the PR wherever it went — including a force-push, which --ff-only
+      # alone could never track.
+      git -C "$WORKTREE_ABS_PATH" reset --hard "$pr_head_ref" >/dev/null
+      echo "WORKTREE_UPDATED: $pr_head_ref"
+    elif [ "$(git -C "$WORKTREE_ABS_PATH" rev-list --count "${pr_head_ref}..HEAD")" -gt 0 ]; then
+      # A stray local commit makes HEAD ahead of the fetched PR head, and
+      # --ff-only would report "Already up to date" while keeping it.
       echo "WORKTREE_STALE: local commits beyond $pr_head_ref; not touching it"
     elif git -C "$WORKTREE_ABS_PATH" merge --ff-only "$pr_head_ref" >/dev/null 2>&1; then
       echo "WORKTREE_UPDATED: $pr_head_ref"

@@ -53,20 +53,24 @@ The script:
   PR's own branch, which may already be claimed by an agent daemon's workpad
   or another worktree
 - on reuse (keyed on the stable `review-pr-<num>` branch, so a changed PR
-  title still finds it), re-fetches and fast-forwards to the current head —
-  re-run the skill to pick up rework commits, there is no `git pull` upstream;
-  if the local branch diverged it prints `WORKTREE_STALE` and leaves it
+  title still finds it), re-fetches and follows the PR head — a clean tree
+  sitting exactly at the previously fetched head moves even across a
+  force-push; re-run the skill to pick up rework commits, there is no
+  `git pull` upstream; anything else prints `WORKTREE_STALE` (local or
+  diverged commits) or `WORKTREE_DIRTY` (uncommitted changes) and is left
   untouched — surface that to the user instead of resetting
 - prints `PR_STATE_WARNING` when the PR is merged or closed — still usable,
   but tell the user
 
 Read `Worktree absolute path:` from the output for each PR.
 
-**A `WORKTREE_STALE` line stops the flow for that PR here.** The tree holds
-local commits or diverged history the fast-forward refused to touch, so do not
-install dependencies into it or open it in an editor as if it showed the PR
-head. Report the line and follow the missing-intent gate: review the stale
-tree anyway, reset it by hand, or skip this PR.
+**A `WORKTREE_STALE` or `WORKTREE_DIRTY` line stops the flow for that PR
+here.** The tree holds local commits, uncommitted changes, or diverged history
+the script refused to touch, so do not install dependencies into it or open it
+in an editor as if it showed the PR head. Report the line and follow the
+missing-intent gate: review the tree anyway, reset it by hand, or skip this
+PR. (A clean worktree sitting exactly at the previously fetched head is moved
+automatically, force-pushes included.)
 
 ### Step 4: Install Dependencies
 
@@ -89,7 +93,13 @@ gh pr view "<pr-number>" --json isCrossRepository,author --jq '{fork: .isCrossRe
   When scripts were skipped, say so in the report — packages needing a build
   step may not work until the user opts in.
 
-Then detect the package manager from the lockfile and install:
+Then detect the package manager from the worktree's lockfile and install.
+**Run every install from inside the worktree** — the shell is still sitting in
+the source checkout, so an unscoped install lands in the wrong repository:
+
+```bash
+( cd "<worktree-path>" && <install command> )
+```
 
 | Lockfile present | Command |
 |---|---|
