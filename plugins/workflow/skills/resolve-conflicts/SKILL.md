@@ -1,6 +1,6 @@
 ---
 name: resolve-conflicts
-description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge, rebase, or cherry-pick stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the operation first, and come back only if it stops — and SKIP for cherry-pick -n conflicts, which leave no operation state: resolve those as ordinary unmerged paths."
+description: "Resolve an in-progress git merge, rebase, or cherry-pick conflict hunk by hunk on intent: research why each side changed, preserve both intents, verify with the repo's own checks, and prove afterwards that no reviewed change was silently dropped. Use when a merge, rebase, or cherry-pick stops on conflicts, or when pr-details says rebase and the rebase does not apply cleanly. SKIP when no operation is in progress — start the operation first, and come back only if it stops — and SKIP for cherry-pick -n and merge --squash conflicts, which leave no operation state: resolve those as ordinary unmerged paths."
 ---
 
 # Resolve Conflicts — finish the operation without losing either side
@@ -48,10 +48,10 @@ rc_rm_run_dir() {
 # KIND and the operation IDENTITY match what is detected now — an --abort
 # leaves this file behind, and a later operation (even of the same kind) must
 # not inherit it.
-RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""
+RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_RUN_DIR=""
 if [ -f "$RC_STATE_FILE" ]; then
   RC_PREV_OP=$(rc_get RC_OP); RC_PREV_ID=$(rc_get RC_ID)
-  RC_PREV_ONTO=$(rc_get RC_ONTO); RC_PREV_RUN_DIR=$(rc_get RC_RUN_DIR)
+  RC_PREV_RUN_DIR=$(rc_get RC_RUN_DIR)
 fi
 
 RC_PICKS=""
@@ -123,43 +123,13 @@ case "$RC_OP" in
 esac
 
 if [ "$RC_OP" = cherry-pick ]; then
-  # HEAD at the FIRST stop of the sequence, restored from prior state only
-  # when it provably belongs to THIS sequence. Identity alone cannot prove
-  # that (a replaced sequence from the same HEAD shares sequencer/head), so
-  # the restore is validated against live facts: every commit landed since
-  # the stored snapshot must be covered by a captured baseline (patch-id or
-  # subject). An uncovered landed commit means the snapshot predates this
-  # run's involvement — restoring it would pull commits Step 6 has no
-  # baseline for into scope, where dropping their changes could pass.
-  RC_ONTO=$(git rev-parse HEAD)
-  if [ "$RC_PREV_OP" = cherry-pick ] && [ "$RC_PREV_ID" = "$RC_ID" ] \
-    && [ -n "$RC_PREV_ONTO" ] && [ -d "$RC_PREV_RUN_DIR" ]; then
-    find "$RC_PREV_RUN_DIR" -maxdepth 1 -name 'ours-before-*.diff' \
-      | sed 's#.*/ours-before-##; s#\.diff$##' > "$RC_PREV_RUN_DIR/.bshas"
-    : > "$RC_PREV_RUN_DIR/.bids"; : > "$RC_PREV_RUN_DIR/.bsubs"
-    while IFS= read -r RC_B; do
-      [ -n "$RC_B" ] || continue
-      git show --format= "$RC_B" 2>/dev/null | git patch-id --stable \
-        | awk '{print $1}' >> "$RC_PREV_RUN_DIR/.bids"
-      git log -1 --format=%s "$RC_B" 2>/dev/null >> "$RC_PREV_RUN_DIR/.bsubs"
-    done < "$RC_PREV_RUN_DIR/.bshas"
-    RC_UNCOVERED=$(git rev-list "$RC_PREV_ONTO"..HEAD 2>/dev/null \
-      | while IFS= read -r RC_L; do
-          RC_LP=$(git show --format= "$RC_L" | git patch-id --stable | awk '{print $1}')
-          grep -qx "$RC_LP" "$RC_PREV_RUN_DIR/.bids" && continue
-          RC_LS=$(git log -1 --format=%s "$RC_L")
-          grep -qxF "$RC_LS" "$RC_PREV_RUN_DIR/.bsubs" && continue
-          echo "$RC_L"
-        done)
-    if [ -z "$RC_UNCOVERED" ]; then
-      RC_ONTO="$RC_PREV_ONTO"
-    else
-      # The stored state belongs to a replaced sequence: retire its run dir
-      # so its baselines cannot join this run, and start fresh.
-      rc_rm_run_dir "$RC_PREV_RUN_DIR"
-      RC_PREV_RUN_DIR=""
-    fi
-  fi
+  # The sequence start comes from git's OWN sequencer state, never from a
+  # remembered snapshot: sequencer/head is "HEAD when the live sequence
+  # began", so an abandoned sequence's value can neither be restored by
+  # mistake nor need validating — the live sequencer belongs to the live
+  # sequence by definition. A single pick (no sequencer) has one stop, and
+  # its start is HEAD now.
+  RC_ONTO=$(cat "$RC_GIT_DIR/sequencer/head" 2>/dev/null || git rev-parse HEAD)
 fi
 
 # Re-entrant: a rebase stopping on a later commit, or a multi-commit
@@ -196,19 +166,24 @@ elif [ "$RC_OP" = merge ]; then
   # checks both directions.
   git diff "$RC_MB" "$RC_ONTO" > "$RC_RUN_DIR/theirs-before.diff"
 else
-  # rebase and cherry-pick: ONE BASELINE PER REPLAYED COMMIT, all captured at
-  # the first stop. Later commits may apply cleanly and never re-enter this
-  # step, and Step 6's supersession proof needs their baselines too. For a
-  # cherry-pick the set is the current commit plus every pick still in the
-  # sequencer (picks completed before the first stop landed before RC_ONTO
-  # and are outside the integrity check's scope).
+  # rebase and cherry-pick: ONE BASELINE PER REPLAYED COMMIT, re-derived
+  # from live operation state at every stop. Later commits may apply cleanly
+  # and never conflict, and Step 6's supersession proof needs their
+  # baselines too. For a cherry-pick the set is the current commit, every
+  # pick still in the sequencer, and every commit the sequence already
+  # landed — so the whole after-diff scope is checkable.
   if [ "$RC_OP" = cherry-pick ]; then
     # One revision PER LINE: the todo still lists the currently conflicting
     # pick, and joining with a space would weld two SHAs into one while-read
     # record, failing rev-parse into an empty baseline. Duplicates are
-    # harmless — the per-commit filename makes the write idempotent.
+    # harmless — the per-commit filename makes the write idempotent. The
+    # rev-list adds the commits the sequence ALREADY LANDED (from the
+    # sequencer's own start), so a pick that applied cleanly before this
+    # skill's first involvement still gets a baseline — from its landed
+    # commit — and nothing inside the after-diff's scope is uncheckable.
     RC_PICKS=$( { printf '%s\n' "$RC_ORIG_HEAD"; \
-      awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null; } )
+      awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null; \
+      git rev-list "$RC_ONTO"..HEAD 2>/dev/null; } )
   fi
   # `--onto` can target history UNRELATED to the original tip; merge-base
   # then fails and an unguarded substitution would leave EMPTY baseline
@@ -335,12 +310,13 @@ fi
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
-the skill's own authority — which operation, onto what, is the caller's decision. One
-known shape reaches here with real conflicts in the tree: **`git cherry-pick -n`**
-(no-commit) leaves neither `CHERRY_PICK_HEAD` nor a sequencer on conflict, so there is no
-operation state to baseline and no `--continue` to run. Say so — the unmerged paths are
-resolved as ordinary edits and committed by the caller; this skill's baseline/integrity
-machinery does not apply to them.
+the skill's own authority — which operation, onto what, is the caller's decision. Two
+known shapes reach here with real conflicts in the tree: **`git cherry-pick -n`**
+(no-commit, leaves neither `CHERRY_PICK_HEAD` nor a sequencer) and
+**`git merge --squash`** (unmerged paths with no `MERGE_HEAD`). Neither has operation
+state to baseline or a `--continue` to run. Say so — the unmerged paths are resolved as
+ordinary edits and committed by the caller; this skill's baseline/integrity machinery
+does not apply to them.
 
 A `MAINLINE_NEEDED` line means a replayed **merge commit**'s baseline could not be derived
 mechanically: recover the `-m <n>` parent number from the command the caller actually ran
