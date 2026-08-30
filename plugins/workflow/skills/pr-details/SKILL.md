@@ -364,8 +364,13 @@ One question, at most four options:
    registration window in which `gh pr checks <n> --watch` reports *no checks* and exits:
    poll until the new head's checks exist, then watch them to completion, before
    evaluating anything. Between steps, re-run
-   `pr-details <n> --no-plan-check --no-page --no-gate` and continue only while the fresh
-   headline matches the projection — a red CI landing counts as divergence and stops the
+   `pr-details <n> --no-plan-check --no-page --no-gate`, **carrying the original run's
+   plan verdict into the recheck's table** (read `PLAN_COMBINED`/`PLAN_SPLIT` from the
+   prior `facts.json` — Phase 4 is skipped for cost, not because the verdict expired, and
+   without the carry a plan-keyed row can never reproduce). The carry is valid only while
+   the diff is materially unchanged (a rebase); once a dispatched fixer changed the diff,
+   a plan-keyed projection is stale — that is divergence. Continue only while the fresh
+   headline matches the projection; a red CI landing or a stale plan projection stops the
    run with a report.
 3. **Handle it locally** — print step 1's `local:` recipe and stop.
 4. **Stop** — the report stands as-is.

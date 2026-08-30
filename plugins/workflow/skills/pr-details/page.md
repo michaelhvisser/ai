@@ -24,16 +24,21 @@ Newest deployment for the head SHA, then its latest successful status. Verified 
 reference repo — returns the Vercel preview URL:
 
 ```bash
+# Filter to the PREVIEW environment: one SHA can also carry staging or
+# production deployments, and .[0] across all of them can hand back — and
+# screenshot — the wrong application while the report labels it preview.
 DEP_ID=$(pr_facts_gh api --hostname "$HOST" \
-  "repos/$SLUG/deployments?sha=${HEAD_SHA}&per_page=1" --jq '.[0].id')
+  "repos/$SLUG/deployments?sha=${HEAD_SHA}&per_page=20" \
+  --jq '[.[] | select(.environment | test("preview"; "i"))][0].id')
 [ -n "$DEP_ID" ] && PREVIEW_URL=$(pr_facts_gh api --hostname "$HOST" \
   "repos/$SLUG/deployments/${DEP_ID}/statuses?per_page=5" \
   --jq '[.[] | select(.state=="success")][0].environment_url')
 ```
 
-Empty `DEP_ID` or empty `PREVIEW_URL` → `shots_status: no-preview`, one stderr warning,
-continue. Record `ui.preview_url` either way (null when absent) — the local recipe for
-`ui-review` reuses it.
+No deployment whose environment matches preview, or empty `PREVIEW_URL` →
+`shots_status: no-preview`, one stderr warning, continue — never fall back to a
+production or staging deployment. Record `ui.preview_url` either way (null when absent) —
+the local recipe for `ui-review` reuses it.
 
 ### §1b Capability binding
 
