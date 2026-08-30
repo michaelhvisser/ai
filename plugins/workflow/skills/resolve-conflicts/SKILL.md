@@ -130,7 +130,9 @@ fi
 # cherry-pick, re-runs this step — keep the run dir only for the SAME
 # operation (kind and identity), so baselines accumulate in one place and an
 # abandoned operation's baselines are never compared against this one.
-if [ "$RC_PREV_OP" = "$RC_OP" ] && [ "$RC_PREV_ID" = "$RC_ID" ] \
+if [ "$RC_OP" = none ]; then
+  RC_RUN_DIR=""   # nothing to capture — do not leak an empty directory
+elif [ "$RC_PREV_OP" = "$RC_OP" ] && [ "$RC_PREV_ID" = "$RC_ID" ] \
   && [ -n "$RC_PREV_RUN_DIR" ] && [ -d "$RC_PREV_RUN_DIR" ]; then
   RC_RUN_DIR="$RC_PREV_RUN_DIR"
 else
@@ -259,36 +261,27 @@ if [ "$RC_OP" = rebase ] && grep -q '^refs/heads/' "$RC_STATE_DIR/head-name" 2>/
   RC_EXPECT="$RC_ORIG_HEAD"
   # The branch's CONFIGURED push destination, not a hardcoded origin/<name> —
   # pushRemote / remote.pushDefault / a push refspec can all redirect it.
-  # The effective push remote, resolved from config — never split out of the
-  # abbreviated @{push} form, because git permits remote NAMES containing
-  # slashes (`team/prod`), which a first-slash split mis-parses into the
-  # wrong repository and ref.
+  # The push destination is ONLY what git itself resolves for @{push} — no
+  # synthesized fallback of any kind. Every guess this block has ever made
+  # bypassed one of git's own refusals (refs/for/* refspecs, push.default
+  # nothing, push.default simple with no upstream) and could rewrite a
+  # same-named branch git would never have touched. No resolution → no
+  # lease → Step 7 skips, and the caller pushes per their own config. The
+  # remote name comes from config for the prefix strip, because remote
+  # NAMES may contain slashes (`team/prod`) and a first-slash split
+  # mis-parses them.
   RC_PR=$(git config "branch.${RC_BRANCH}.pushRemote" 2>/dev/null \
     || git config remote.pushDefault 2>/dev/null \
     || git config "branch.${RC_BRANCH}.remote" 2>/dev/null || echo origin)
   RC_PUSH=$(git rev-parse --abbrev-ref "${RC_BRANCH}@{push}" 2>/dev/null) || RC_PUSH=""
-  if [ -n "$RC_PUSH" ]; then
-    case "$RC_PUSH" in
-      "${RC_PR}/"*)
-        RC_REMOTE="$RC_PR"; RC_DEST=${RC_PUSH#"${RC_PR}/"} ;;
-      *)
-        # @{push} resolved to something not under the effective remote
-        # (triangular config) — do not guess a rewrite target.
-        echo "PUSH_UNRESOLVED: ${RC_PUSH} does not sit under remote ${RC_PR} — Step 7 will skip the push"
-        RC_REMOTE=""; RC_DEST=""; RC_EXPECT="" ;;
-    esac
-  elif [ -n "$(git config --get-all "remote.${RC_PR}.push" 2>/dev/null)" ] \
-    || [ "$(git config push.default 2>/dev/null)" = nothing ]; then
-    # @{push} can fail while a destination IS configured (a refs/for/* push
-    # refspec has no local tracking ref) — guessing origin/<branch> there
-    # would rewrite the wrong remote. And push.default=nothing is an explicit
-    # no-default-push policy this skill must not synthesize a destination
-    # around. Record no lease; the caller pushes per their own config.
-    echo "PUSH_UNRESOLVED: ${RC_BRANCH} has push config Step 7 cannot resolve — it will skip the push"
-    RC_REMOTE=""; RC_DEST=""; RC_EXPECT=""
-  else
-    RC_REMOTE="$RC_PR"; RC_DEST="$RC_BRANCH"
-  fi
+  case "$RC_PUSH" in
+    "${RC_PR}/"*)
+      RC_REMOTE="$RC_PR"; RC_DEST=${RC_PUSH#"${RC_PR}/"} ;;
+    *)
+      [ -n "$RC_PUSH" ] || RC_PUSH="(unresolved)"
+      echo "PUSH_UNRESOLVED: ${RC_BRANCH} → ${RC_PUSH} — Step 7 will skip the push"
+      RC_REMOTE=""; RC_DEST=""; RC_EXPECT="" ;;
+  esac
 else
   RC_BRANCH=$(git symbolic-ref --quiet --short HEAD) || RC_BRANCH=""
   RC_EXPECT=""; RC_REMOTE=""; RC_DEST=""  # no rewrite → no force-push at all
@@ -396,7 +389,7 @@ tie-break rule keys on. Do not resolve a hunk whose two intents you cannot yet s
   at the new location. Otherwise the modification wins and the report says why.
 - **Never `--abort` because resolution is hard.** Abort only when the driver cancels the
   operation itself — and then also remove
-  `$(git rev-parse --git-dir)/resolve-conflicts.state`, so the abandoned run's facts
+  `$(git rev-parse --git-dir)/resolve-conflicts.state` and the run directory it names, so the abandoned run's diffs and facts
   cannot leak into a later operation (Step 0 additionally refuses mismatched state on
   load).
 
@@ -469,10 +462,12 @@ after must be one of:
 incoming side's changes, and a resolution that kept the replayed version can overwrite
 them while every ours-hunk still survives. Every theirs-before hunk the final tree no
 longer contains needs the same justification with the sides swapped: an identical change
-already on our side, or a deliberate drop recorded in Step 3. For a cherry-pick the
-incoming side is the branch itself — for each conflicted file, compare
-`git show "$RC_ONTO:<file>"` against the final tree the same way. A one-sided check
-proves only that our intent survived; the skill's claim is that **both** did.
+already on our side, a deliberate drop recorded in Step 3, or — category 3 again — a
+later replayed commit that cleanly modified or removed it, proven from that commit's
+`ours-before-<sha>.diff`. For a cherry-pick the incoming side is the branch itself — for
+each conflicted file, compare `git show "$RC_ONTO:<file>"` against the final tree the
+same way. A one-sided check proves only that our intent survived; the skill's claim is
+that **both** did.
 
 Anything else is a lost reviewed change: reopen the resolution and restore it before
 declaring done. This check is the completion criterion for the whole skill — "the rebase
@@ -515,5 +510,14 @@ stop and surface it to the driver; retrying with a refreshed lease on the skill'
 authority is exactly the overwrite the lease exists to prevent. This skill does not
 merge, open PRs, or move board items; hand those to the calling workflow.
 
-Finally, remove the state file so a future run cannot inherit a finished operation's
-facts: `rm -f "$(git rev-parse --git-dir)/resolve-conflicts.state"`.
+Finally, remove both the run directory and the state file — the run dir holds full
+source diffs that must not sit in `/tmp` indefinitely, and a future run must not inherit
+a finished operation's facts:
+
+```bash
+RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
+rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
+RC_RUN_DIR=$(rc_get RC_RUN_DIR)
+[ -n "$RC_RUN_DIR" ] && rm -rf "$RC_RUN_DIR"
+rm -f "$RC_STATE_FILE"
+```
