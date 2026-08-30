@@ -1,6 +1,6 @@
 ---
 name: complete-issue
-description: "Take a GitHub issue from implementation to merged PR. Use for 'complete issue #N', 'finish this issue end-to-end', or fully autonomous issue-to-merge requests. SKIP issue startup without merge intent; use start-issue."
+description: "Take a GitHub issue from implementation to merged PR."
 argument-hint: "<issue-number> [--skip-coverage] [--coverage-threshold <n>] [--no-agents]"
 disable-model-invocation: true
 ---

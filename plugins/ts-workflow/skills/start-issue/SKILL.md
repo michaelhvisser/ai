@@ -1,6 +1,6 @@
 ---
 name: start-issue
-description: "Start implementation of a GitHub issue: fetch context, prepare worktree flow, implement with TDD, verify, and submit PR. Use for 'start issue #N', issue URLs, or requests to begin issue work. SKIP fully autonomous issue-to-merge requests; use complete-issue."
+description: "Start implementation of a GitHub issue: fetch context, prepare worktree flow, implement with TDD, verify, and submit PR."
 argument-hint: "<issue-number> [--skip-coverage] [--coverage-threshold <n>] [--no-agents]"
 disable-model-invocation: true
 ---

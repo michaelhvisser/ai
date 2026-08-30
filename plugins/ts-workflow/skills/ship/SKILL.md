@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "Ship a PR end-to-end: verify locally, push, create/update the PR, watch CI, handle review feedback, and merge without admin override. Use for 'ship', 'ship it', or 'push and merge'. SKIP if the user only wants a PR opened; use `create-pr`."
+description: "Ship a PR end-to-end: verify locally, push, create/update the PR, watch CI, handle review feedback, and merge without admin override."
 argument-hint: "[--llm codex|gemini|ollama|fable] [--passes <n>] [--no-merge] [--skip-coverage] [--coverage-threshold <n>] [--tier flex|standard|priority]"
 disable-model-invocation: true
 ---

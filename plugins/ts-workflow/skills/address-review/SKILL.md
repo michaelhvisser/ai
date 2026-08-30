@@ -1,6 +1,6 @@
 ---
 name: address-review
-description: "Address pull request review feedback from humans or bots. Use when existing comments, requested changes, unresolved review threads, or CodeRabbit/codex review findings need code fixes, verification, push updates, and thread resolution. SKIP fresh code-review requests with no existing feedback; use review-deep."
+description: "Address pull request review feedback from humans or bots."
 argument-hint: "[PR-number] [--no-watch]"
 disable-model-invocation: true
 ---

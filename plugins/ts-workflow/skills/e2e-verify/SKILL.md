@@ -1,6 +1,6 @@
 ---
 name: e2e-verify
-description: "Run end-to-end PR verification with browser testing. Use before merge or in fix-and-ship mode when the user asks to verify a PR, run E2E, browser-test, or visually check UI changes. SKIP backend-only checks with no browser/UI path; use review-deep or ship as appropriate."
+description: "Run end-to-end PR verification with browser testing."
 argument-hint: "[PR-number] [verify|fix-and-verify|investigate|ship-prep|ship|fix-and-ship]"
 disable-model-invocation: true
 ---
