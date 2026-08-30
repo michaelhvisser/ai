@@ -163,18 +163,22 @@ else
     RC_PICKS=$( { printf '%s\n' "$RC_ORIG_HEAD"; \
       awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null; } )
   fi
+  # `--onto` can target history UNRELATED to the original tip; merge-base
+  # then fails and an unguarded substitution would leave EMPTY baseline
+  # files that Step 6 vacuously passes. The empty tree is the correct base
+  # for unrelated history — everything on each side is its own change.
+  RC_MB=$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD" 2>/dev/null) \
+    || RC_MB=$(git hash-object -t tree /dev/null)
   if [ -z "$RC_PICKS" ]; then
-    # No readable pick state — last resort for a rebase: the merge-base range.
-    git diff "$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")" "$RC_ORIG_HEAD" \
-      > "$RC_RUN_DIR/ours-before.diff"
+    # No readable pick state — last resort for a rebase: the base range.
+    git diff "$RC_MB" "$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
   fi
   if [ "$RC_OP" = rebase ]; then
     # The incoming side for a rebase: what the new base changed since the
-    # merge base. A conflict resolved to the replayed version can overwrite
-    # these hunks in the final tree even though every onto commit stays an
-    # ancestor; Step 6 checks this direction too.
-    git diff "$(git merge-base "$RC_ONTO" "$RC_ORIG_HEAD")" "$RC_ONTO" \
-      > "$RC_RUN_DIR/theirs-before.diff"
+    # (possibly empty-tree) base. A conflict resolved to the replayed version
+    # can overwrite these hunks in the final tree even though every onto
+    # commit stays an ancestor; Step 6 checks this direction too.
+    git diff "$RC_MB" "$RC_ONTO" > "$RC_RUN_DIR/theirs-before.diff"
   fi
   # while-read, not `for x in $VAR`: zsh does not word-split an unquoted
   # variable, and these blocks run under the user's shell.
@@ -241,19 +245,26 @@ done
 # refreshes it) — but RC_ORIG_HEAD itself: the tip this rewrite replaces. If
 # the remote holds anything else, the push MUST fail, because either someone
 # pushed meanwhile or the rewrite was against a stale branch.
-if [ "$RC_OP" = rebase ] && [ -f "$RC_STATE_DIR/head-name" ]; then
+if [ "$RC_OP" = rebase ] && grep -q '^refs/heads/' "$RC_STATE_DIR/head-name" 2>/dev/null; then
+  # grep, not a bare -f test: a rebase started from detached HEAD writes the
+  # literal "detached HEAD" into head-name, which must record no lease.
   RC_BRANCH=$(sed 's#^refs/heads/##' "$RC_STATE_DIR/head-name")
   RC_EXPECT="$RC_ORIG_HEAD"
+  # The branch's CONFIGURED push destination, not a hardcoded origin/<name> —
+  # pushRemote / remote.pushDefault / a push refspec can all redirect it.
+  RC_PUSH=$(git rev-parse --abbrev-ref "${RC_BRANCH}@{push}" 2>/dev/null) \
+    || RC_PUSH="origin/${RC_BRANCH}"
+  RC_REMOTE=${RC_PUSH%%/*}; RC_DEST=${RC_PUSH#*/}
 else
   RC_BRANCH=$(git symbolic-ref --quiet --short HEAD) || RC_BRANCH=""
-  RC_EXPECT=""   # merge and cherry-pick do not rewrite; no force-push at all
+  RC_EXPECT=""; RC_REMOTE=""; RC_DEST=""  # no rewrite → no force-push at all
 fi
 
 # Fenced blocks may execute as separate shell calls and inherit nothing, and
 # by Step 6 the operation state dirs are gone — persist what later steps need.
 # Written as key=value DATA; loaders parse with rc_get, never source.
-[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\n' \
-  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" > "$RC_STATE_FILE"
+[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\nRC_REMOTE=%s\nRC_DEST=%s\n' \
+  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" "$RC_REMOTE" "$RC_DEST" > "$RC_STATE_FILE"
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
@@ -438,14 +449,18 @@ history:
 RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
 rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }  # data — never source it
 RC_BRANCH=$(rc_get RC_BRANCH); RC_EXPECT=$(rc_get RC_EXPECT)
-if [ -z "$RC_BRANCH" ] || [ -z "$RC_EXPECT" ]; then
+RC_REMOTE=$(rc_get RC_REMOTE); RC_DEST=$(rc_get RC_DEST)
+if [ -z "$RC_BRANCH" ] || [ -z "$RC_EXPECT" ] || [ -z "$RC_REMOTE" ] || [ -z "$RC_DEST" ]; then
   # No recorded rewrite: merge and cherry-pick land by plain push, which
-  # belongs to the caller. Pushing here anyway would be worse than a no-op —
-  # an EMPTY expect ("branch:") means "require the ref to be absent" and can
-  # CREATE the remote branch.
+  # belongs to the caller — and a detached-HEAD rebase records no lease.
+  # Pushing here anyway would be worse than a no-op: an EMPTY expect
+  # ("branch:") means "require the ref to be absent" and can CREATE the
+  # remote branch.
   echo "no rewrite lease recorded — skipping the push entirely"
 else
-  git push --force-with-lease="${RC_BRANCH}:${RC_EXPECT}" origin "$RC_BRANCH"
+  # The configured push destination captured at Step 0 — not a hardcoded
+  # origin/<name>, which pushRemote or a push refspec could silently bypass.
+  git push --force-with-lease="${RC_DEST}:${RC_EXPECT}" "$RC_REMOTE" "${RC_BRANCH}:${RC_DEST}"
 fi
 ```
 
