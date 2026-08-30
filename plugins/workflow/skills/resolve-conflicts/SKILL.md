@@ -143,7 +143,12 @@ else
   # sequencer (picks completed before the first stop landed before RC_ONTO
   # and are outside the integrity check's scope).
   if [ "$RC_OP" = cherry-pick ]; then
-    RC_PICKS="$RC_ORIG_HEAD $(awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null)"
+    # One revision PER LINE: the todo still lists the currently conflicting
+    # pick, and joining with a space would weld two SHAs into one while-read
+    # record, failing rev-parse into an empty baseline. Duplicates are
+    # harmless — the per-commit filename makes the write idempotent.
+    RC_PICKS=$( { printf '%s\n' "$RC_ORIG_HEAD"; \
+      awk '/^pick /{print $2}' "$RC_GIT_DIR/sequencer/todo" 2>/dev/null; } )
   fi
   if [ -z "$RC_PICKS" ]; then
     # No readable pick state — last resort for a rebase: the merge-base range.
@@ -266,9 +271,14 @@ RC_OP=$(rc_get RC_OP); RC_ONTO=$(rc_get RC_ONTO); RC_ORIG_HEAD=$(rc_get RC_ORIG_
 # --merge needs MERGE_HEAD: it fails during a rebase or cherry-pick, where the
 # two --not commands below cover both sides on their own.
 [ "$RC_OP" = merge ] && git log --merge --oneline -- <file>  # both sides, merge only
-git log --oneline "$RC_ONTO" --not "$RC_ORIG_HEAD" -- <file> # incoming side only
-git log --oneline "$RC_ORIG_HEAD" --not "$RC_ONTO" -- <file> # our side only
+git log --oneline "$RC_ONTO" --not "$RC_ORIG_HEAD" -- <file> # commits only on the RC_ONTO side
+git log --oneline "$RC_ORIG_HEAD" --not "$RC_ONTO" -- <file> # commits only on the RC_ORIG_HEAD side
 ```
+
+Which of those two is "ours" and which is "incoming" depends on the operation — map them
+through the sides table in Step 0. For a cherry-pick in particular, `RC_ONTO` is **your
+checked-out branch** and `RC_ORIG_HEAD` is the **picked commit**, the reverse of what the
+same variables mean during a merge.
 
 Read the commit messages. When a commit references a pull request or issue and `gh` is
 available for this repo, read that too — the stated goal of each side is what Step 3's
