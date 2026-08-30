@@ -61,11 +61,22 @@ if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   # first-pick-parent arithmetic, and merged side-branch history breaks
   # patch counting.
   if [ -f "$RC_STATE_DIR/git-rebase-todo" ] || [ -f "$RC_STATE_DIR/done" ]; then
-    # `merge -C <sha> <label>` lines appear under --rebase-merges: the
-    # original merge commit's own content (an evil merge, an embedded
-    # resolution) needs a baseline like any pick.
+    # Todo grammar: commands have one-letter aliases (`p`, `f`, …), fixup
+    # takes an optional -C/-c before its commit, and `merge -C <sha> <label>`
+    # appears under --rebase-merges (that original merge's own content — an
+    # evil merge, an embedded resolution — needs a baseline like any pick).
+    # `drop`/`d` is deliberately absent: a dropped commit is an intent, not a
+    # loss. Skip a leading option, then keep only hex.
     RC_PICKS=$(cat "$RC_STATE_DIR/done" "$RC_STATE_DIR/git-rebase-todo" 2>/dev/null \
-      | awk '/^(pick|edit|reword|fixup|squash) /{print $2} /^merge -[Cc] /{print $3}')
+      | awk '{
+          cmd=$1; sha=""
+          if (cmd ~ /^(pick|p|edit|e|reword|r|fixup|f|squash|s)$/) {
+            sha=$2; if (sha ~ /^-/) sha=$3
+          } else if (cmd ~ /^(merge|m)$/ && $2 ~ /^-[Cc]$/) {
+            sha=$3
+          }
+          if (sha ~ /^[0-9a-f]+$/) print sha
+        }')
   else
     RC_PICKS=$(awk '/^From [0-9a-f]{40}/{print $2}' "$RC_STATE_DIR"/[0-9]* 2>/dev/null)
   fi
@@ -87,7 +98,11 @@ fi
 # rebase followed by a new rebase must not share baselines. The identity is
 # derived from state git itself keeps per operation.
 case "$RC_OP" in
-  rebase)      RC_ID="${RC_ORIG_HEAD}:${RC_ONTO}" ;;
+  # The state dir's inode is the per-instance marker: a rebase aborted and
+  # restarted from the same tip onto the same target (with, say, a commit
+  # dropped from the todo) recreates rebase-merge/, so its stale baselines
+  # never join this run's glob.
+  rebase)      RC_ID="${RC_ORIG_HEAD}:${RC_ONTO}:$(ls -di "$RC_STATE_DIR" | awk '{print $1}')" ;;
   merge)       RC_ID="$RC_ONTO" ;;
   cherry-pick)
     # sequencer/head alone collides when a second, different sequence starts
