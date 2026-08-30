@@ -40,11 +40,10 @@ rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }
 # KIND and the operation IDENTITY match what is detected now — an --abort
 # leaves this file behind, and a later operation (even of the same kind) must
 # not inherit it.
-RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""; RC_PREV_SEQ=""
+RC_PREV_OP=""; RC_PREV_ID=""; RC_PREV_ONTO=""; RC_PREV_RUN_DIR=""
 if [ -f "$RC_STATE_FILE" ]; then
   RC_PREV_OP=$(rc_get RC_OP); RC_PREV_ID=$(rc_get RC_ID)
   RC_PREV_ONTO=$(rc_get RC_ONTO); RC_PREV_RUN_DIR=$(rc_get RC_RUN_DIR)
-  RC_PREV_SEQ=$(rc_get RC_SEQ)
 fi
 
 RC_PICKS=""
@@ -206,27 +205,28 @@ else
   done
 fi
 
-# Sequence memory: the set of commits this operation replays, first-stop
-# value preserved across re-entry (a cherry-pick's outstanding set shrinks as
-# picks land, but the earlier picks' baselines remain Step 6 evidence).
-if [ "$RC_PREV_OP" = "$RC_OP" ] && [ "$RC_PREV_ID" = "$RC_ID" ] && [ -n "$RC_PREV_SEQ" ]; then
-  RC_SEQ="$RC_PREV_SEQ"
-else
-  RC_SEQ=$(printf '%s\n' "$RC_PICKS" | tr '\n' ' ')
-fi
-
 # PRUNE stale baselines. Identity can falsely match a restarted operation
 # with the same endpoints but an edited pick list (Codex reproduced inode
-# recycling on APFS, so no directory fingerprint is trusted): any
-# ours-before file for a commit outside this operation's replay set is
-# deleted, so Step 6 can never demand a deliberately dropped commit back.
-{ printf '%s\n' "$RC_PICKS"; printf '%s\n' "$RC_SEQ" | tr ' ' '\n'; } \
+# recycling on APFS, so no directory fingerprint is trusted). The keep-set is
+# derived only from LIVE facts — never from remembered state, which a false
+# match would poison: a baseline survives when its commit is still in the
+# current replay set, or when its change has verifiably LANDED on this branch
+# since the operation began (patch-id equivalence — a cherry-pick's earlier
+# stops land under new SHAs but keep their patch content).
+printf '%s\n' "$RC_PICKS" \
   | while IFS= read -r RC_P; do
       [ -n "$RC_P" ] && git rev-parse --short "$RC_P" 2>/dev/null
     done | sort -u > "$RC_RUN_DIR/.keep"
+git rev-list "$RC_ONTO"..HEAD 2>/dev/null \
+  | while IFS= read -r RC_C; do
+      git show --format= "$RC_C" | git patch-id --stable
+    done | awk '{print $1}' | sort -u > "$RC_RUN_DIR/.landed"
 for RC_F in $(ls "$RC_RUN_DIR"/ours-before-*.diff 2>/dev/null); do
   RC_S=${RC_F##*ours-before-}; RC_S=${RC_S%.diff}
-  grep -qx "$RC_S" "$RC_RUN_DIR/.keep" || rm -f "$RC_F"
+  grep -qx "$RC_S" "$RC_RUN_DIR/.keep" && continue
+  RC_PID=$(git show --format= "$RC_S" 2>/dev/null | git patch-id --stable | awk '{print $1}')
+  [ -n "$RC_PID" ] && grep -qx "$RC_PID" "$RC_RUN_DIR/.landed" && continue
+  rm -f "$RC_F"
 done
 
 # Push lease for Step 7. Only a rebase rewrites published history, and for a
@@ -246,8 +246,8 @@ fi
 # Fenced blocks may execute as separate shell calls and inherit nothing, and
 # by Step 6 the operation state dirs are gone — persist what later steps need.
 # Written as key=value DATA; loaders parse with rc_get, never source.
-[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\nRC_SEQ=%s\n' \
-  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" "$RC_SEQ" > "$RC_STATE_FILE"
+[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ID=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\nRC_BRANCH=%s\nRC_EXPECT=%s\n' \
+  "$RC_OP" "$RC_ID" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" "$RC_BRANCH" "$RC_EXPECT" > "$RC_STATE_FILE"
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
@@ -432,8 +432,15 @@ history:
 RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
 rc_get() { sed -n "s/^${1}=//p" "$RC_STATE_FILE" 2>/dev/null | head -1; }  # data — never source it
 RC_BRANCH=$(rc_get RC_BRANCH); RC_EXPECT=$(rc_get RC_EXPECT)
-[ -n "$RC_EXPECT" ] || { echo "no rewrite lease recorded — nothing to force-push"; }
-git push --force-with-lease="${RC_BRANCH}:${RC_EXPECT}" origin "$RC_BRANCH"
+if [ -z "$RC_BRANCH" ] || [ -z "$RC_EXPECT" ]; then
+  # No recorded rewrite: merge and cherry-pick land by plain push, which
+  # belongs to the caller. Pushing here anyway would be worse than a no-op —
+  # an EMPTY expect ("branch:") means "require the ref to be absent" and can
+  # CREATE the remote branch.
+  echo "no rewrite lease recorded — skipping the push entirely"
+else
+  git push --force-with-lease="${RC_BRANCH}:${RC_EXPECT}" origin "$RC_BRANCH"
+fi
 ```
 
 Never plain `--force`, and never any fetch-then-lease dance. The expectation is
