@@ -85,10 +85,12 @@ The skill never runs `git stash`, `git checkout`, `git reset`, `git fetch --prun
 anything else that changes the working tree or branch state. Its only `git` writes are
 object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`facts.md` §0c).
 
-**The screenshot phase browses, it never acts.** Phase 5b navigates the PR's preview
-deployment with GET requests and takes screenshots — no clicks, no form input, no page script
-that mutates state, no logging in (`page.md` §1c). A route behind an auth wall is recorded as
-`auth-blocked`, not worked around.
+**The screenshot phase browses, it never acts — and the browser enforces that.** Phase 5b
+captures the PR's preview deployment only in a context where read-only is enforceable
+(JavaScript disabled, or every non-GET request intercepted), because a real app mutates
+state on mere load; no clicks, no form input, no logging in (`page.md` §1c). A route behind
+an auth wall is recorded as `auth-blocked`, and a browser that cannot enforce the controls
+means no navigation at all.
 
 ## Usage
 

@@ -10,8 +10,8 @@ page, never a degraded verdict.
 ## §1 Phase 5b — screenshots from the preview deployment
 
 Runs when Phase 5 set `ui.warranted` and `--no-shots` was not passed. Output →
-`ui.shots_status` (`captured | partial | no-preview | no-browser | auth-blocked | skipped |
-not-warranted`) plus `ui.screenshots[]`.
+`ui.shots_status` (`captured | partial | no-preview | no-browser | no-safe-browser |
+auth-blocked | skipped | not-warranted`) plus `ui.screenshots[]`.
 
 **Never a local server.** The screenshot source is the PR's own preview deployment — a
 deployed artifact of the head SHA, reachable read-only. The whole point is that the user does
@@ -44,10 +44,18 @@ part of the surface.
 
 ### §1c Capture rules
 
-- **GET-only, hard rule.** Navigate and screenshot. Never click, type, submit, scroll-to-load
-  more than the viewport needs, dismiss dialogs by acting on them, or run page script that
-  mutates state. The preview runs against real backends; this phase stays as read-only as the
-  rest of the skill.
+- **Read-only must be enforced by the browser, not promised by the agent.** Not clicking is
+  not enough: a modern app executes its own code on load — analytics beacons, session
+  initialization, mount-time mutations — against real backends. Capture only in a context
+  where the binding can actually enforce read-only: JavaScript disabled, or network
+  interception rejecting every non-GET request (`chrome-devtools` offers these controls;
+  a profile extension does not). With JS disabled, server-rendered content still captures;
+  a page that needs client JS comes out skeletal — say so in the visual summary rather
+  than trade a mutation for a prettier screenshot. When the bound browser can enforce
+  neither control, do not navigate the preview at all: record
+  `shots_status: no-safe-browser` and degrade.
+- Never click, type, submit, scroll-to-load beyond the viewport, or dismiss dialogs by
+  acting on them.
 - Routes come from Phase 5's route mapping, same cap of 5, captured at desktop width
   (~1280px). One shot per route; a route that needs a second viewport is a job for the real
   `ui-review` step, not this glance.
