@@ -31,7 +31,12 @@ No arguments: the in-progress operation in the current repository is the target.
 
 ```bash
 RC_GIT_DIR=$(git rev-parse --git-dir)
-RC_RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/resolve-conflicts.XXXXXX")
+RC_STATE_FILE="$RC_GIT_DIR/resolve-conflicts.state"
+# Re-entrant: a rebase stopping on a later commit, or a multi-commit
+# cherry-pick, re-runs this step — keep the existing run dir so the captured
+# baselines accumulate in one place.
+[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+RC_RUN_DIR="${RC_RUN_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/resolve-conflicts.XXXXXX")}"
 
 if [ -d "$RC_GIT_DIR/rebase-merge" ] || [ -d "$RC_GIT_DIR/rebase-apply" ]; then
   RC_OP=rebase
@@ -45,7 +50,10 @@ elif [ -f "$RC_GIT_DIR/MERGE_HEAD" ]; then
   RC_ORIG_HEAD=$(git rev-parse HEAD)             # our tip
 elif [ -f "$RC_GIT_DIR/CHERRY_PICK_HEAD" ]; then
   RC_OP=cherry-pick
-  RC_ONTO=$(git rev-parse HEAD)
+  # HEAD at the FIRST stop of the sequence: the loader above restores it on
+  # later stops, so Step 6's after-diff spans every picked commit, not just
+  # the last one.
+  RC_ONTO=${RC_ONTO:-$(git rev-parse HEAD)}
   RC_ORIG_HEAD=$(git rev-parse CHERRY_PICK_HEAD) # the commit being replayed
 else
   RC_OP=none
@@ -54,15 +62,35 @@ fi
 if [ "$RC_OP" = none ]; then
   echo "WORKFLOW_RESULT=INCOMPLETE"
   echo "WORKFLOW_REASON=no-operation-in-progress"
+elif [ "$RC_OP" = cherry-pick ]; then
+  # Only the picked commit's own change. A three-dot diff would reach back to
+  # the merge base and drag every unselected branch-only ancestor into the
+  # baseline, which Step 6 would then report as "lost". Per-commit filename so
+  # a multi-commit pick accumulates one baseline per stop, idempotently.
+  git diff "${RC_ORIG_HEAD}~1" "$RC_ORIG_HEAD" \
+    > "$RC_RUN_DIR/ours-before-$(git rev-parse --short "$RC_ORIG_HEAD").diff"
 else
-  # Everything the branch (or replayed commit) changed relative to the incoming
-  # side. This is the reviewed work that must survive resolution.
+  # Everything the branch changed relative to the incoming side. This is the
+  # reviewed work that must survive resolution.
   git diff "$RC_ONTO...$RC_ORIG_HEAD" > "$RC_RUN_DIR/ours-before.diff"
 fi
+
+# Fenced blocks may execute as separate shell calls and inherit nothing, and
+# by Step 6 the operation state dirs are gone — persist what later steps need.
+[ "$RC_OP" = none ] || printf 'RC_OP=%s\nRC_ONTO=%s\nRC_ORIG_HEAD=%s\nRC_RUN_DIR=%s\n' \
+  "$RC_OP" "$RC_ONTO" "$RC_ORIG_HEAD" "$RC_RUN_DIR" > "$RC_STATE_FILE"
 ```
 
 When `RC_OP=none`, stop: there is nothing to resolve. Do not start a merge or rebase on
 the skill's own authority — which operation, onto what, is the caller's decision.
+
+**Every later block that uses an `RC_*` variable begins with this loader** — repeat it
+rather than assuming shell state survived from Step 0:
+
+```bash
+RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
+[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+```
 
 **Sides invert between merge and rebase.** Misreading this table is the most common cause
 of silently-wrong resolutions, because during a rebase "ours" is *not* your branch:
@@ -95,7 +123,12 @@ Classify each file before resolving any:
 For each conflicted file, learn why *each side* changed before touching a hunk:
 
 ```bash
-git log --merge --oneline -- <file>                          # both sides' commits, one list
+RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
+[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+
+# --merge needs MERGE_HEAD: it fails during a rebase or cherry-pick, where the
+# two --not commands below cover both sides on their own.
+[ "$RC_OP" = merge ] && git log --merge --oneline -- <file>  # both sides, merge only
 git log --oneline "$RC_ONTO" --not "$RC_ORIG_HEAD" -- <file> # incoming side only
 git log --oneline "$RC_ORIG_HEAD" --not "$RC_ONTO" -- <file> # our side only
 ```
@@ -155,18 +188,24 @@ GIT_EDITOR=true git cherry-pick --continue # cherry-pick
 
 A rebase replays commits one at a time, so a later commit may stop on new conflicts:
 loop back to Step 1 for each stop (the Step 0 baseline stays valid — `RC_ONTO` and
-`RC_ORIG_HEAD` do not change mid-rebase). During a rebase always use `--continue`, never a
-plain `git commit`.
+`RC_ORIG_HEAD` do not change mid-rebase). A multi-commit cherry-pick also stops per
+commit, but there `CHERRY_PICK_HEAD` moves: loop back to **Step 0** at each stop, so the
+per-commit baseline tracks the commit actually being replayed (the shared run dir
+accumulates them). During a rebase always use `--continue`, never a plain `git commit`.
 
 ## Step 6 — Integrity check
 
 Only after the operation fully completes:
 
 ```bash
+RC_STATE_FILE="$(git rev-parse --git-dir)/resolve-conflicts.state"
+[ -f "$RC_STATE_FILE" ] && . "$RC_STATE_FILE"
+
 git diff "$RC_ONTO"..HEAD > "$RC_RUN_DIR/ours-after.diff"
 ```
 
-Compare `ours-before.diff` against `ours-after.diff`. Every hunk present before and absent
+Compare every `ours-before*.diff` (one file for a merge or rebase; one per picked commit
+for a cherry-pick) against `ours-after.diff`. Every hunk present before and absent
 after must be one of:
 
 1. **An identical change already on the incoming side** — confirm with
@@ -192,3 +231,6 @@ git push --force-with-lease origin <branch>
 Never plain `--force` — `--force-with-lease` after a fetch is what refuses to overwrite a
 reviewer's push. This skill does not merge, open PRs, or move board items; hand those to
 the calling workflow.
+
+Finally, remove the state file so a future run cannot inherit a finished operation's
+facts: `rm -f "$(git rev-parse --git-dir)/resolve-conflicts.state"`.
