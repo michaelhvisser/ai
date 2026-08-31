@@ -41,10 +41,12 @@ round, as long as Codex keeps surfacing *new, real, fixable* defects. Stop when 
 prior round already dismissed** (a "repeat" — you're going in circles). Two further exits keep
 the loop honest against a reviewer that rations findings over an unbounded input space:
 
-- **Relevance exit.** Two consecutive rounds in which every finding is dismissed under the
-  target repo's declared context (`finding-bar.md` §"declared context") or is example-text
-  consistency ⇒ declare clear and proceed. "Found nothing that matters here" is the
-  reachable exit; "found nothing" is not.
+- **Relevance is a bar, not a counter.** Findings outside the target repo's declared
+  context (`finding-bar.md` §"declared context") and example-text consistency nits are
+  **dismissed**, which means a round of only those hits the standard clear exit above —
+  no separate streak to track. The failure this prevents is the operator confirming
+  out-of-context findings as real, which is how loops run to the cap. "Found nothing
+  that matters here" is the reachable exit; "found nothing" is not.
 - **Class-jump rule.** When a round's findings attack the fix the previous round shipped,
   stop patching that mechanism — redesign it (preferably by deleting the state or fallback
   under attack) or dismiss the class, and say which in the ledger. Instance-patching a

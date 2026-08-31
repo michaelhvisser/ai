@@ -63,9 +63,11 @@ does not terminate against that combination.
    patching that mechanism. Redesign it — preferably by deleting the state or fallback
    under attack — or dismiss the class under the boundary above. The fixes that stick are
    the ones that remove moving parts.
-3. **Relevance exit.** After two consecutive rounds in which every finding is dismissed
-   under the boundary or is example-text consistency, declare the loop clear and merge.
-   "Found nothing that matters here" is the reachable exit; "found nothing" is not.
+3. **Relevance is a bar, not a counter.** Out-of-context findings and example-text
+   consistency nits are *dismissed*, so a round containing only those is a clear round
+   under the loop's standard exit — merge. The failure this prevents is confirming
+   out-of-context findings as real, which is how loops run to the cap. "Found nothing
+   that matters here" is the reachable exit; "found nothing" is not.
 
 ## Decision records
 
