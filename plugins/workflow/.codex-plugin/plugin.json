@@ -1,6 +1,6 @@
 {
   "name": "workflow",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Language-agnostic PR and review workflow skills — read-only PR situation reports, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
   "author": {
     "name": "Michael Visser",
