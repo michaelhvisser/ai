@@ -8,6 +8,9 @@
 # "bash" (e.g. ```bash notest).
 set -euo pipefail
 PLUGIN_DIR=$(cd "$(dirname "$0")/.." && pwd)
+# zsh is half the invariant — silently skipping it would let the gate report
+# clean without ever enforcing the documented bash-AND-zsh rule.
+command -v zsh >/dev/null 2>&1 || { echo "skill-blocks-syntax: zsh is required (bash-and-zsh is the invariant)"; exit 1; }
 FAILS=0
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -28,7 +31,7 @@ while IFS= read -r MD; do
     if ! bash -n "$BLOCK" 2>"$TMP/err"; then
       echo "FAIL bash -n: $MD ($(basename "$BLOCK"))"; sed 's/^/    /' "$TMP/err"; FAILS=$((FAILS+1))
     fi
-    if command -v zsh >/dev/null 2>&1 && ! zsh -n "$BLOCK" 2>"$TMP/err"; then
+    if ! zsh -n "$BLOCK" 2>"$TMP/err"; then
       echo "FAIL zsh -n: $MD ($(basename "$BLOCK"))"; sed 's/^/    /' "$TMP/err"; FAILS=$((FAILS+1))
     fi
   done

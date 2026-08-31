@@ -52,7 +52,7 @@ git rebase newbase >/dev/null 2>&1 || true
 run_step0
 [ "$(state s1 RC_OP)" = rebase ] || fail S1 "RC_OP=$(state s1 RC_OP)"
 D=$(rundir s1)
-N=$(find "$D" -name 'ours-before-*.diff' | wc -l | tr -d ' ')
+N=$(find "$D" -name 'ours-before-*.diff' -size +0c | wc -l | tr -d ' ')
 [ "$N" = 2 ] || fail S1 "expected 2 per-pick baselines, got $N"
 [ -s "$D/theirs-before.diff" ] || fail S1 "theirs-before.diff empty or missing"
 [ "$FAILS" = 0 ] && pass S1 "rebase: 2 baselines + theirs-before"
@@ -101,7 +101,7 @@ git checkout -q feat
 git rebase --apply newbase >/dev/null 2>&1 || true
 run_step0
 D=$(rundir s4)
-N=$(find "$D" -name 'ours-before-*.diff' | wc -l | tr -d ' ')
+N=$(find "$D" -name 'ours-before-*.diff' -size +0c | wc -l | tr -d ' ')
 [ "$N" = 2 ] && pass S4 "apply backend: 2 baselines via From-lines" \
   || fail S4 "expected 2 baselines from patch From-lines, got $N"
 git rebase --abort 2>/dev/null || true
@@ -129,7 +129,7 @@ git cherry-pick "$C1" "$C2" >/dev/null 2>&1 || true
 run_step0
 [ "$(state s6 RC_ONTO)" = "$START" ] || fail S6 "RC_ONTO != sequencer start"
 D=$(rundir s6)
-N=$(find "$D" -name 'ours-before-*.diff' | wc -l | tr -d ' ')
+N=$(find "$D" -name 'ours-before-*.diff' -size +0c | wc -l | tr -d ' ')
 [ "$N" = 2 ] || fail S6 "expected 2 outstanding-pick baselines, got $N"
 [ "$FAILS" = 0 ] && pass S6 "cherry-pick: sequencer/head scope, 2 baselines"
 git cherry-pick --abort 2>/dev/null || true
