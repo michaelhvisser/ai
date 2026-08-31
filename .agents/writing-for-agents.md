@@ -107,6 +107,13 @@ The rules above are general; these are this repo's, and they are load-bearing:
   commands against a real or scratch repo; two of the first spec's `gh` commands did not
   run. A plausible-looking recipe that fails at runtime is worse than prose, because the
   agent trusts it over its own judgement.
+- **And make the verification cumulative.** Every fenced ```bash block is syntax-checked
+  under bash AND zsh by `plugins/workflow/tests/skill-blocks-syntax.test.sh` (blocks
+  containing `<placeholder>` tokens are skipped — keep placeholders in that angle-bracket
+  form). Load-bearing machinery gets scenario tests in `plugins/<p>/tests/*.test.sh` that
+  extract and execute the doc's own block against scripted repos — the one-off scratch
+  check that proved a recipe becomes a regression test, so a review round never has to
+  re-discover it.
 - **Decisions route through `lib/decision-gates.md` and `lib/driver-interaction.md`** —
   reference them near the top of any skill that can hit a decision, and classify each
   ask as driver-resolvable, missing-intent, or hard invariant rather than inventing an
