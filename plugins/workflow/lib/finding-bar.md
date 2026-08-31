@@ -36,6 +36,16 @@ out-of-scope observations that turn into backlog.
 - Code under an explicit lint-ignore/suppression comment
 - Anything the repo's own gate (linter, compiler, tests) will catch on its own
 
+## The target repo's declared context bounds the bar
+
+When the repository under review declares a supported operating context (a "Supported
+context" section in AGENTS.md/CLAUDE.md, or wherever its reviewer guidance lives), a
+finding about behavior outside that context is dismissed with reason `out-of-context` and
+a pointer — the same mechanism as a "Not a finding" entry. Two exceptions keep this
+honest: a finding that shows a boundary **guard failing to refuse** is in scope (the
+refusal is the supported behavior), and a diff that **moves the boundary** re-opens
+whatever it moved. Absent any declaration, this section changes nothing.
+
 ## Mechanically-checkable claims defer to the tools
 
 A finding in a class the toolchain decides (type errors, unused symbols, null flow, lint

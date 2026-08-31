@@ -38,7 +38,25 @@ source "${CLAUDE_PLUGIN_ROOT}/lib/github-rest.sh"
 **The loop's natural terminus is finding quality, not a round count.** Keep going, round after
 round, as long as Codex keeps surfacing *new, real, fixable* defects. Stop when it goes **clear**
 (all-clear or nothing confirmed-real — only slop remains), or when it **re-raises a finding a
-prior round already dismissed** (a "repeat" — you're going in circles). The round cap
+prior round already dismissed** (a "repeat" — you're going in circles). Two further exits keep
+the loop honest against a reviewer that rations findings over an unbounded input space:
+
+- **Relevance exit.** Two consecutive rounds in which every finding is dismissed under the
+  target repo's declared context (`finding-bar.md` §"declared context") or is example-text
+  consistency ⇒ declare clear and proceed. "Found nothing that matters here" is the
+  reachable exit; "found nothing" is not.
+- **Class-jump rule.** When a round's findings attack the fix the previous round shipped,
+  stop patching that mechanism — redesign it (preferably by deleting the state or fallback
+  under attack) or dismiss the class, and say which in the ledger. Instance-patching a
+  mechanism under repeated attack is how loops run to the cap.
+
+**Front-load the exhaustive pass.** When no strong local review ran at the current head
+(pr-details' QUALITY ladder answers this), run one — `antagonist-review` or the language
+plugin's deep review — and fix its batch *before* the first trigger below. The connector
+rations a handful of findings per round; spending its rounds on what one local pass would
+have enumerated is the expensive way to find them.
+
+The round cap
 (default **10**) is a high safety backstop against oscillation, not the intended exit — most PRs
 converge well before it.
 

@@ -29,6 +29,44 @@ Branch → PR → squash merge to `main`. Consumers then run
 `/plugin marketplace update michaelhvisser-ai` and `/reload-plugins`. Never commit to
 `main` directly.
 
+## Supported context — the boundary review findings are judged against
+
+These skills are built for one operating context, declared so authors and reviewers judge
+findings against it rather than against everything git permits:
+
+- **Same-repository PRs on github.com.** Fork-ambient checkouts, forks as push targets,
+  and GitHub Enterprise hosts are handled by loud refusal at the boundary
+  (`PUSH_UNRESOLVED`, non-dispatchable gate entries, cross-repo preflight stops) — never
+  by feature work.
+- **zsh and bash on macOS and Linux.** Every fenced block must run under both; no other
+  shell is considered.
+- **The workflows this marketplace serves:** single-operator repos with squash-merge
+  rulesets, optional CI, and the Detent/Claude/Codex agents as the acting parties.
+
+A review finding about behavior outside this boundary is dismissed with reason
+`out-of-context` and a pointer here — unless the diff under review moved the boundary
+itself, or the finding shows a boundary **guard failing to refuse**. A guard that refuses
+loudly is the supported behavior, not a gap.
+
+## Review-loop economics
+
+Rules for running reviewer loops against PRs here. They exist because a prose skill
+wrapping git has an unbounded hypothetical-input space, and the Codex connector rations a
+handful of findings per round — a loop whose only exit is "the reviewer found nothing"
+does not terminate against that combination.
+
+1. **Front-load the exhaustive pass.** Run the strong local review (antagonist-review's
+   finder, or review-deep) and fix its batch **before** the first `@codex review`. The
+   connector then spends its rounds on genuine second-family leftovers instead of
+   drip-feeding a pool one local pass would have enumerated.
+2. **Class-jump rule.** When round N's findings attack the fix round N−1 shipped, stop
+   patching that mechanism. Redesign it — preferably by deleting the state or fallback
+   under attack — or dismiss the class under the boundary above. The fixes that stick are
+   the ones that remove moving parts.
+3. **Relevance exit.** After two consecutive rounds in which every finding is dismissed
+   under the boundary or is example-text consistency, declare the loop clear and merge.
+   "Found nothing that matters here" is the reachable exit; "found nothing" is not.
+
 ## Decision records
 
 Agreed-but-deferred work lives in `.agents/deferred.md` with the trigger that would
