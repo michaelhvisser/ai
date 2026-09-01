@@ -9,8 +9,8 @@ carried inside the JSON as `warnings[]`.
 
 ## §1 Terminal report
 
-≤ 48 lines, fixed section order: header, `STATUS`, `PURPOSE` (one block per linked issue),
-`PLAN CHECK`, `UI REVIEW`, `QUALITY`, `NEXT STEPS`.
+≤ 56 lines, fixed section order: header, `STATUS`, `PURPOSE` (one block per linked issue),
+`PLAN CHECK`, `UI REVIEW`, `QUALITY`, `EXECUTION PLAN`.
 
 ```
 === PR #<n> · <title> ===
@@ -26,7 +26,7 @@ STATUS
 
 PURPOSE
   #<issue> <issue title>
-  Needed?   <NEEDED|ALREADY FIXED|DUPLICATE|UNCLEAR> (<confidence>) — <one-line evidence>
+  Needed?   <NEEDED|ALREADY FIXED|DUPLICATE|NO LONGER NEEDED|UNCLEAR> (<confidence>) — <one-line evidence>
 
 PLAN CHECK  (<model> @ <effort> · <elapsed>)
   PLAN_ADEQUATE: <yes|partial|no>
@@ -37,15 +37,15 @@ UI REVIEW   <warranted (severity) — routes … · shots: <shots_status>|not wa
 QUALITY     <codex-ship ✓ at head|✗|stale> · <antagonist …> · <deep review …> · <e2e …|n/a>
             still required before merge: <list, or "nothing — ladder satisfied at this head">
 
-NEXT STEPS
+EXECUTION PLAN
   1 → <command or action>                             [row <n>]  <verdict qualifier>
       why:   <rationale naming the facts that fired the row>
       local: <the §6 recipe, one line>
   2 → <command or action>                             [row <n> · projected]
       why:   <one line>
+      local: <the §6 recipe, one line>
   …
   then:  /workflow:pr-details <n>
-  page:  <run dir>/report.html
   files: <run dir>
 ```
 
@@ -53,30 +53,32 @@ Rules:
 
 - At most **5** unresolved threads inline, then `+n more`.
 - Gaps capped at **5**, each with its severity.
-- The queue prints every entry (cap 5, `next-step.md` §5); entry 1 carries the full `why:` and
-  `local:` lines, later entries one `why:` line each and the `projected` tag. The page carries
-  every entry's local recipe.
+- The plan prints every entry (cap 5, `next-step.md` §5); entry 1 carries the full `why:`
+  and `local:` lines, later entries a one-line `why:`, a one-line `local:`, and the
+  `projected` tag — the terminal is the only render, so the plan must be drivable by hand
+  from it alone.
 - `QUALITY` names each rung of the review ladder as **at head**, **stale** (evidence names an
   older SHA), or **not run**, then the second line derives "still required" from the same
   facts the table read — never from a separate judgment.
-- The final `files:` line names `$RUN_DIR`; the `page:` line names the report page unless
-  `--no-page`.
+- The final `files:` line names `$RUN_DIR`.
 - ASCII-safe except `✓` and `✗`.
 - Rows 25–29 append the verdict qualifier:
   `1 → hand to Detent (Merging)  [row 25]  ready pending: local gate (pnpm lint && pnpm test && pnpm build)`.
 - Warning lines (unavailable plan model, truncated file list, advisory ruleset, `h` is an upper
   bound, degraded screenshots) go to **stderr**, never into this block.
 
-## §2 `--json` schema, version 2
+## §2 `--json` schema, version 3
 
 Stdout carries this object and nothing else. The same object is written to
-`$RUN_DIR/facts.json` on every run, `--json` or not; no sibling skill consumes it yet.
-Version 2 adds `quality`, `queue[]`, `page`, and the `ui` screenshot fields; everything a
-version-1 consumer read is unchanged.
+`$RUN_DIR/facts.json` on every run, `--json` or not; the local-execution loop re-reads its
+`plan_check` verdicts (`execute.md` §4). Version 3 removes `page` (there is no report page),
+widens `duplicates[].kind` with the supersession sweep (`shipped-pr`, `closed-issue`,
+`backlog-issue` — `facts.md` §1e), and adds `no-longer-needed` to the still-needed verdict
+vocabulary; everything else a version-2 consumer read is unchanged.
 
 ```json
 {
-  "schema": 2,
+  "schema": 3,
   "generated_at": "2026-08-20T12:00:00Z",
   "host": "github.com",
   "repo": "threefold-solutions/client-portals",
@@ -117,7 +119,11 @@ version-1 consumer read is unchanged.
               "codex_ship":{},"address_review":{},"e2e":{},"review_deep":{},"detent_gate":{}}
   },
   "duplicates": [{"kind":"issue","number":143,"title":"…","signals":["shared-files"],
-                  "confidence":"possible","board_status":"Todo"}],
+                  "confidence":"possible","board_status":"Todo"},
+                 {"kind":"shipped-pr","number":151,"title":"…","signals":["shared-files","recent-merge"],
+                  "confidence":"possible","closed_issues":[144],"merged_at":"2026-08-19T09:00:00Z"},
+                 {"kind":"backlog-issue","number":150,"title":"…","signals":["direction"],
+                  "confidence":"possible","board_status":"Backlog"}],
   "still_needed": {"92":{"verdict":"needed","confidence":"high",
                          "evidence":["convex/http.ts:212 @ <base_tip> still matches on label"]}},
   "plan_check": {"per_issue":{"92":{"combined":"yes","split":false,
@@ -148,7 +154,6 @@ version-1 consumer read is unchanged.
      "command":"/workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/161","why":"no review evidence can survive the rebase; diff 979 ≥ 150",
      "local":"review gh pr diff 161 yourself, or run the language plugin's review-deep",
      "cost":"tokens: high · wall: 10–30 min"}],
-  "page": {"path":"…/run/161-…/report.html","opened":true},
   "ready": {"verifiable":false,
             "conjuncts":[{"id":"C1","grade":"verified","state":"true","text":"required checks pass"},
                          {"id":"C3","grade":"verified","state":"false","text":"behind_by == 0 under strict"},
@@ -195,6 +200,6 @@ loses nothing.
 ## §4 Scratch hygiene
 
 Scratch files live under the session scratchpad only; never commit or post them, and do not
-paste secrets into model prompts. The report page and the screenshots are scratch files like
-any other: `report.html` opens locally and is never published, uploaded, or served, and
-`shots/*.png` may show authenticated preview content, so neither leaves the run directory.
+paste secrets into model prompts. The screenshots are scratch files like any other:
+`shots/*.png` may show authenticated preview content, so they never leave the run directory —
+not committed, not posted, not uploaded, not served.

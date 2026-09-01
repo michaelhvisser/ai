@@ -1,7 +1,7 @@
 # Next step — Phase 6
 
 The decision table itself lives in `SKILL.md` §"Phase 6". This file defines the facts it reads,
-why the rows sit in that order, how the ready predicate is built, how the action queue is
+why the rows sit in that order, how the ready predicate is built, how the execution plan is
 projected from the table (§5), the local alternative each step carries (§6), and the
 regression the ordering has to keep passing.
 
@@ -137,10 +137,11 @@ are different questions, and the answer depends on `AUTO_PROMOTE`:
 - Active states → `move-to-human-review`, with the rationale naming the gate evidence that
   must be posted first.
 
-## §5 The action queue
+## §5 The execution plan (the queue)
 
-The table names exactly one **actual** next step; the queue shows the path behind it, so the
-user can green-light one step or several at once. Entries after the first are **projections**:
+The table names exactly one **actual** next step; the queue shows the path behind it — the
+execution plan the Phase 8 gate offers to run, locally or via Detent (`execute.md`). Entries
+after the first are **projections**:
 re-evaluations of the same table under the assumption that every previous entry succeeded.
 `queue[0]` is always identical to `next_step`, and nothing downstream may treat a later entry
 as a fact — the `then:` re-run re-derives everything from real state.
@@ -197,10 +198,11 @@ a churning pair of rows (rebase → wait-ci → review spend → …) from unrol
 ## §6 Local alternatives
 
 Every queue entry carries a `local:` recipe — what the user does by hand instead of
-green-lighting the skill. Recipes are generic; contract-derived strings (`gate.run`, the base
-branch, the preview URL, route lists, thread URLs) are substituted at render time. The recipe
-never replaces the skill's own safety rails — it is the manual route for a user who prefers to
-drive.
+green-lighting the skill, and what the orchestrator performs verbatim when local execution
+covers the id (`execute.md` §5). Recipes are generic; contract-derived strings (`gate.run`,
+the base branch, the preview URL, route lists, thread URLs) are substituted at render time.
+The recipe never replaces the skill's own safety rails — it is the manual route for a user
+who prefers to drive.
 
 | id | local recipe |
 |---|---|
@@ -208,11 +210,11 @@ drive.
 | `address-review` | open each unresolved thread (URLs in the report), fix in the editor, push, then reply and resolve on GitHub |
 | `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
 | `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
-| `fix-plan` | edit the issue's Plan section by hand; the proposed replacement text is in the report page and `$RUN_DIR/plan-*.md` |
+| `fix-plan` | edit the issue's Plan section by hand; the proposed replacement text is in `$RUN_DIR/plan-*.md` |
 | `wait-ci` | `gh pr checks <n> -R <host>/<slug> --watch` — repo-qualified, since a fork checkout's inferred repository may not be the resolved base |
 | `ui-review` | open `<preview_url><route>` for each listed route, or run the repo's dev server and visit them |
 | `complete-gate` | run the contract gate (`<gate.run>`) at the head commit, then post the evidence the contract names — workpad update, review comment, label |
-| `human-approval` | this **is** the local step: read the report page, then approve (`gh pr review <n> -R <host>/<slug> --approve` — repo-qualified: this is an outward-facing write and the ambient checkout may be a fork with a same-numbered PR), merge, or move the board item per the contract |
+| `human-approval` | this **is** the local step: read the report, then approve (`gh pr review <n> -R <host>/<slug> --approve` — repo-qualified: this is an outward-facing write and the ambient checkout may be a fork with a same-numbered PR), merge, or move the board item per the contract |
 | `move-to-human-review` | post the gate evidence, then move the issue's board item |
 | `hand-to-detent` | set the issue's board Status to the merge lane; the daemon takes it from there |
 | everything else | situation-specific — the `why:` line names what a human needs to settle |
@@ -239,5 +241,7 @@ table, the resolution map, or the render.
 | **F22** | the issue's board row reads `Human Review`; the PR's own board row reads `Backlog` | reading the PR row as the issue's state fires row 6 (`no-active-issue`) and abandons the promotion ladder | **per issue row** | `BOARD_STATUS` comes from the **issue's** project item; the PR's row is printed once as an ignored line (`facts.md` §2f). Verified live on this repo. |
 | **F23** | codex-ship clean at head, no antagonist evidence, deep-review comment predates a force-push, diff 354 lines, board `Human Review`, auto-promote on, opt-out label present | the single headline hid the path — the user green-lit `antagonist-review` without knowing two more steps stand between it and merge | **21**, queue | queue = `[antagonist-review, complete-gate (projected — C9 observably false at this head), human-approval (projected, ready pending: local gate)]`. Verified live on the reference repo's PR #261. |
 | **F24** | row 9 or 10 fires (`rebase`), with `CS_AT_HEAD = true` before the rebase | the projected queue kept crediting review evidence that the force-push invalidates, projecting straight to ready | queue | the `rebase` resolution resets every `*_AT_HEAD` and sets CI pending, so the queue shows `wait-ci` and the review spend again after the rebase. |
-| **F25** | `ui.warranted`, driver has no browser capability | the screenshot phase blocks the run, or fabricates a summary with no image | **18 unchanged** | `shots_status = no-browser`; the headline is still `ui-review`; the page renders the routes-to-check list with no images; no fact changes (`page.md` §1b). |
-| **F26** | `--json` | a gate prompt or a browser `open` corrupts machine-readable stdout | — | `--json` implies `--no-gate` and suppresses the page auto-open; the page file is still written and its path rides in `page.path`. Stdout carries the JSON object and nothing else. |
+| **F25** | `ui.warranted`, driver has no browser capability | the screenshot phase blocks the run, or fabricates a summary with no image | **18 unchanged** | `shots_status = no-browser`; the headline is still `ui-review`; the report lists the routes to check by hand, with no images; no fact changes (`screenshots.md` §1b). |
+| **F26** | `--json` | a gate prompt corrupts machine-readable stdout | — | `--json` implies `--no-gate`. Stdout carries the JSON object and nothing else. |
+| **F27** | linked issue's problem still reproduces on base, but a merged PR since the merge-base replaced the subsystem this PR patches (no file overlap with §3's probe) | "NEEDED — the code path still misbehaves" recommends finishing a PR whose target is already dead code | **7** (`close-superseded`) | the §1e shipped sweep hands the researcher the replacing PR; verdict `no-longer-needed because-of #N`, `confidence: high` (shipped), and row 7 accepts it alongside `already-fixed-by`. |
+| **F28** | a Backlog issue sketches a rework of the same area, nothing shipped | a bare idea closes a working fix | **not 7** | the §4 guard caps a planned-but-unscheduled obsoleter at `confidence: low`, so row 7 cannot fire; the report carries the direction candidate as an annotation instead. |
