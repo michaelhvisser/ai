@@ -55,7 +55,7 @@ trusted authors.
 | Role | Model | Job | Token posture |
 |------|-------|-----|---------------|
 | **Orchestrator** | session model | scope, dispatch, ledger, checkpoints. No code judgment. | cheap |
-| **Finder** | strongest available subagent tier (e.g. `model: "opus"`) | multi-lens review → scored findings | the big spend; runs once per review round |
+| **Finder** | strongest available subagent tier (e.g. `model: "opus"`); on a non-Claude driver, the headless `claude` CLI running `/code-review` — see "Finder binding by driver" | multi-lens review → scored findings | the big spend; runs once per review round |
 | **Antagonist** | local `codex exec` (read-only) | refute every finding; flag what the finder missed | one CLI call per round, effort `xhigh` |
 | **Tie-break juror** | a third strong tier, distinct from the Finder's default when available | 2-of-3 quorum vote on splits only | one batched call, splits only |
 | **Fixer** | local `codex exec` (write-capable) | apply the approved fix set | one call per fix batch |
@@ -65,6 +65,42 @@ Cost story: the finder does one thorough pass per round, Codex is subscription-s
 attacks everything, the juror only ever sees the (usually small) split set, and re-review
 rounds are scoped to changed files only. `--effort` tunes the Codex calls (default `xhigh` —
 maximum scrutiny; drop it explicitly for quick passes on small diffs).
+
+### Finder binding by driver
+
+The Finder must come from a **different model family than the Antagonist** — the
+cross-family fight is this skill's premise, and it silently degrades to intra-family
+review if both roles resolve to the same family.
+
+- **Claude-family driver (Claude Code):** dispatch the parallel finder subagents exactly
+  as Step A describes — native subagent delegation is the binding.
+- **Codex CLI driver (or any other OpenAI-family surface):** do NOT run the finder pass
+  in your own context — driver, finder, and antagonist would all be one family. Bind the
+  Finder role to the headless Claude Code CLI running its built-in `code-review` skill:
+
+  ```bash
+  command -v claude || { echo "claude CLI missing — the finder role runs on it"; exit 1; }
+  claude -p "/code-review ${PR_NUM:-} $CODEX_EFFORT $FOCUS" \
+    > "$SCRATCH_DIR/finder-r$ROUND.txt" 2> "$SCRATCH_DIR/finder-r$ROUND.err" < /dev/null
+  ```
+
+  (With no `PR_NUM`, `/code-review` reviews the current diff — same scope resolution as
+  this skill. The effort word maps 1:1: both accept `low|medium|high|xhigh`.) Grant the
+  call read capability only — never edit, commit, or push permissions — using whatever
+  permission mechanism the installed CLI offers. If the surface caps shell duration,
+  detach the call with the same nohup-plus-marker recipe Step B uses for `codex exec`.
+
+  `/code-review` applies its own criteria, not this skill's finding bar, so its findings
+  do not enter the ledger raw: the orchestrator ingests each one through `finding-bar.md`
+  first — bar-item-1 failures dismissed on sight as `pre-existing`, never-findings and
+  out-of-scope items dismissed with reasons, and anything arriving without a confidence
+  score gets one from the Step A rubric before Step B sees it. The Codex attack then runs
+  unchanged; the antagonism stays symmetric.
+
+  The **Fix verifier** is finder-tier, so it binds the same way on a non-Claude driver:
+  a headless `claude -p` call asking, per finding, whether the named fix sha resolves the
+  traced failure scenario. The juror needs no rebinding — on a Codex driver the session
+  model is already a distinct voice from the Claude-family finder.
 
 ---
 
@@ -104,7 +140,10 @@ done
 ## Phase 0 — Preflight & scope
 
 1. **Codex CLI available?** `command -v codex` — if missing, stop and tell the user this
-   skill needs the Codex CLI (the antagonist and fixer roles both run on it).
+   skill needs the Codex CLI (the antagonist and fixer roles both run on it). When the
+   driving surface is itself the Codex CLI, also require `command -v claude` — the finder
+   role runs on it there (see "Finder binding by driver"), and without it the review
+   collapses to a single model family; stop rather than run degraded.
 2. **Resolve the diff scope** (first match wins):
    - `PR_NUM` given → `gh pr diff "$PR_NUM" -R "$PR_REPO"` and
      `gh pr view "$PR_NUM" -R "$PR_REPO" --json title,body` for context.
@@ -167,7 +206,10 @@ Print: `=== SCOPE: <target> vs <base> | N files, M lines | checks: <cmds> ===`
 
 ### Step A — FIND (finder model, multi-lens, parallel)
 
-Launch **parallel finder subagents in a single message**, one per lens, each returning a raw
+On a non-Claude driver this whole step is the single `/code-review` CLI call from "Finder
+binding by driver" (plus the finding-bar ingestion described there); the lens structure
+below is the Claude-native binding. Launch **parallel finder subagents in a single
+message**, one per lens, each returning a raw
 findings list (file, line, severity, class, title, detail, and why it was flagged). **Scale
 the lens set to the diff:** under ~150 changed lines, dispatch only Bugs/correctness and
 Security & data safety (plus Guidelines when a guidelines file exists) — five parallel
@@ -568,6 +610,7 @@ Rules for the comment body:
 | Condition | Cap | On bail |
 |-----------|-----|---------|
 | Codex CLI missing/erroring | 1 retry | Stop — the skill needs both model families |
+| `claude` CLI missing/erroring on a Codex driver | 1 retry | Stop — same reason, mirrored: the finder role runs on it |
 | Codex pass killed at 600s (exit 143/144, no `-o`) | — | Not a codex failure: the launch was not detached. Relaunch with the `nohup` recipe in Step B — do NOT respond by lowering effort or slicing the diff |
 | Rebuttal exchanges per finding | 1 | → quorum juror |
 | Still split, but sponsor has no concrete trace | — | Dismiss with debate recorded — untraced claims never reach juror or human |
