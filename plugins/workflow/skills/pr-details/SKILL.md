@@ -1,7 +1,7 @@
 ---
 name: pr-details
-description: "Read-only situation report for one pull request: CI judged against the base branch's actual required checks, review decision, unresolved threads split by author class, mergeability, board state, whether the linked issue's problem still exists on base, whether its plan is the right plan, which review skill (codex-ship, antagonist-review, ui-review) is still needed at this head — and the ordered action queue to merge, each step green-lightable at a prompt or doable by hand from its local recipe. UI changes get a screenshot glance from the preview deploy; everything renders into one local report.html. It mutates nothing on GitHub itself; on your explicit go it launches the step it named. Use before spending tokens on review or fixes, when you pick up a PR cold, or as a check-in to approve what runs next. SKIP when you already know the next step and just want it done — run that skill directly."
-argument-hint: "[PR-number] [--plan-model fable|codex|both|none] [--effort low|medium|high|xhigh] [--no-plan-check] [--no-dup-search] [--no-shots] [--no-page] [--no-gate] [--json] [--refresh]"
+description: "Read-only situation report for one pull request: CI judged against the base branch's actual required checks, review decision, unresolved threads split by author class, mergeability, board state, whether the linked issue's problem still exists on base — checked against recently shipped PRs, recently closed issues, and the backlog, so a superseded or no-longer-needed PR is named for closing instead of polishing — whether its plan is the right plan, which review skill (codex-ship, antagonist-review, ui-review) is still needed at this head, and the ordered execution plan to merge-readiness. UI changes get a screenshot glance from the preview deploy. It mutates nothing until the closing approval, which asks once: execute the plan locally (this session drives the same process the Detent lane would), hand it to Detent's board lane, run just the first step, or stop. Use before spending tokens on review or fixes, when you pick up a PR cold, or as a check-in to approve what runs next. SKIP when you already know the next step and just want it done — run that skill directly."
+argument-hint: "[PR-number] [--plan-model fable|codex|both|none] [--effort low|medium|high|xhigh] [--no-plan-check] [--no-dup-search] [--no-shots] [--no-gate] [--json] [--refresh]"
 ---
 
 # PR Details — read-only situation report for one PR
@@ -33,7 +33,10 @@ call goes through it), `pr_facts_graphql_ok`, `pr_facts_rate_gate`, `pr_facts_ru
 
 1. **Where is it?** CI, review decision, threads, mergeability, behind-base, board state.
 2. **Why does it exist, and is that still true?** The linked issue's problem, re-checked
-   against the base branch, with duplicate issues and PRs surfaced.
+   against the base branch — including what shipped since the merge-base (merged PRs and the
+   issues they closed) and what the backlog plans for the same area — with duplicate,
+   superseding, and obsoleting issues and PRs surfaced. A PR that should be closed is named
+   for closing before anything recommends spending on it.
 3. **Is the plan right?** A strong model audits the issue's plan against the problem and the
    diff, and proposes corrections.
 4. **Is there UI to look at?** If so, a screenshot glance from the preview deployment shows
@@ -41,37 +44,42 @@ call goes through it), `pr_facts_graphql_ok`, `pr_facts_rate_gate`, `pr_facts_ru
 5. **Is the quality ladder satisfied?** Which of codex-ship, antagonist-review, deep review,
    and E2E already ran at this head, and which the decision table still requires.
 6. **What is the path?** One actual next step, then the projected steps behind it — an
-   ordered queue where each entry can be green-lit at the closing prompt or done by hand from
-   its `local:` recipe.
+   ordered **execution plan** to merge-readiness, each entry carrying its `local:` recipe.
+   The closing approval can set the whole plan in motion: locally in this session, or handed
+   to the Detent lane.
 
 It is the front door of the review family: every sibling either mutates the PR
 (`address-review`, `codex-ship`) or spends a lot of tokens (`antagonist-review`). This one
-spends little, mutates nothing on GitHub, and tells you which expensive tool to reach for.
-Think of it as the check-in with a project manager: current status, what needs your green
-light, and what you can do yourself instead. The report lands twice — a ≤48-line terminal
-summary, and `report.html` in the run dir with the queue, screenshots, and the change outline
-in one place.
+spends little, mutates nothing while reporting, and tells you which expensive tool to reach
+for. Think of it as the check-in with a project manager: current status, the plan that needs
+your green light, and who should drive it. The report is the ≤56-line terminal summary ending
+in that plan; there is no separate page.
 
-**Non-goals (hard).** It never pushes, commits, rebases, comments, resolves threads, edits
-issues, changes labels, or moves board items. It never triggers a bot review. The plan check
-*proposes* issue-body edits as text; applying them is a separate human action. It judges the
-**plan**, not the **diff quality** — that is `review-deep` / `antagonist-review`. The Phase 8
-gate launches a sibling skill only on the user's explicit selection; that launch is the user's
-decision, and everything the sibling then does runs under the sibling's own contract, not this
-one's.
+**Non-goals (hard).** The report phases (0–7) never push, commit, rebase, comment, resolve
+threads, edit issues, change labels, or move board items, and never trigger a bot review. The
+plan check *proposes* issue-body edits as text. It judges the **plan**, not the **diff
+quality** — that is `review-deep` / `antagonist-review`. Mutation exists only past the Phase 8
+gate, only on the user's explicit selection, and only as `execute.md` defines it: a launched
+sibling runs under its own contract, a locally executed step performs exactly its published
+recipe, and a Detent handoff is one board move. Nothing pre-authorizes the gate — there is no
+flag that makes this skill mutate unprompted.
 
 ## Read-only enforcement
 
-Read-only is enforced by construction, in two layers. There is no "breach detection": diffing
+Everything up to the Phase 8 selection is read-only, enforced by construction, in two layers.
+Past the selection, the only sanctioned writes are the closed set in `execute.md` §5 (local
+mode) or the single board move of `execute.md` §3 (Detent handoff) — each one a published
+recipe, none of them reachable without the user's answer. There is no "breach detection": diffing
 comment counts produces false alarms from concurrent humans, misses reviews, labels,
 reactions, edits, and pushes, and its usual recovery (`git stash push -u`) mutates the user's
 tree and captures unrelated work.
 
-1. **The skill issues only `gh` read verbs.** The complete allowed list: `gh pr view`,
+1. **The report phases issue only `gh` read verbs.** The complete allowed list: `gh pr view`,
    `gh pr list`, `gh pr checks`, `gh pr diff`, `gh issue view`, `gh issue list`,
-   `gh search issues`, `gh search prs`, `gh repo view`, `gh auth status`, `gh api` with no
+   `gh search issues`, `gh search prs`, `gh repo view`, `gh project list`,
+   `gh project field-list`, `gh auth status`, `gh api` with no
    `--method`/`-X` (or an explicit `-X GET`), and `gh api graphql` with a `query` operation
-   only. Any other verb is a bug.
+   only. Any other verb before the Phase 8 selection is a bug.
 2. **Codex runs sandboxed.** `-s read-only` plus `-c sandbox_mode="read-only"` plus
    `-c approval_policy="never"`. `approval_policy="never"` is what denies outward-facing tool
    calls; the sandbox flag fences only the filesystem.
@@ -89,7 +97,7 @@ object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`fact
 captures the PR's preview deployment only in a context where read-only is enforceable
 (JavaScript disabled, or every non-GET request **and all WebSocket traffic** intercepted —
 the upgrade handshake is a GET and its frames evade method filters), because a real app mutates
-state on mere load; no clicks, no form input, no logging in (`page.md` §1c). A route behind
+state on mere load; no clicks, no form input, no logging in (`screenshots.md` §1c). A route behind
 an auth wall is recorded as `auth-blocked`, and a browser that cannot enforce the controls
 means no navigation at all.
 
@@ -107,10 +115,9 @@ means no navigation at all.
 | `--plan-model fable\|codex\|both\|none` | `fable` if a strong subagent tier exists, else `codex` if `command -v codex`, else `none` | `both` runs a two-model quorum. Never silently downgrade — an unavailable model produces a warning line in the report. |
 | `--effort low\|medium\|high\|xhigh` | `xhigh` | Passed to `codex exec -c model_reasoning_effort=`; mapped to the subagent effort hint for Fable. |
 | `--no-plan-check` | off | Phase 4 is the only slow phase. Skipping it makes this a ~20-second status command. |
-| `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket. |
-| `--no-shots` | off | Skip Phase 5b screenshot capture. The UI verdict is unaffected — screenshots are evidence for the human, never a fact (`page.md` §1). |
-| `--no-page` | off | Skip writing and opening `report.html` (`page.md` §2). |
-| `--no-gate` | off | Report and stop — no green-light prompt. `--json` implies it, and also suppresses the page auto-open. |
+| `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket. Also skips the §1e supersession sweep (recently shipped + backlog) — same question, same budget decision. |
+| `--no-shots` | off | Skip Phase 5b screenshot capture. The UI verdict is unaffected — screenshots are evidence for the human, never a fact (`screenshots.md` §1). |
+| `--no-gate` | off | Report and stop — no approval prompt. `--json` implies it. |
 | `--json` | off | Machine schema on stdout (`output.md` §2). |
 | `--refresh` | off | Ignore the SHA-keyed immutable cache (`facts.md` §0e). |
 
@@ -123,7 +130,7 @@ Parse with the `for arg in $ARGUMENTS … case` loop and `SKIP_NEXT` for valued 
 `codex-ship`. A bare token that is not `^[0-9]+$` is a branch name or a URL.
 
 ```bash
-PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; DO_SHOTS=1; DO_PAGE=1; DO_GATE=1
+PLAN_MODEL=""; EFFORT="xhigh"; DO_PLAN=1; DO_DUP=1; DO_SHOTS=1; DO_GATE=1
 AS_JSON=0; REFRESH=0; PR_ARG=""
 SKIP_NEXT=""
 for arg in $ARGUMENTS; do
@@ -137,7 +144,6 @@ for arg in $ARGUMENTS; do
     --no-plan-check) DO_PLAN=0 ;;
     --no-dup-search) DO_DUP=0 ;;
     --no-shots)      DO_SHOTS=0 ;;
-    --no-page)       DO_PAGE=0 ;;
     --no-gate)       DO_GATE=0 ;;
     --json)          AS_JSON=1; DO_GATE=0 ;;
     --refresh)       REFRESH=1 ;;
@@ -183,7 +189,7 @@ this, never a model name.
 Cost: `--no-plan-check` is ~10 API calls plus one researcher call; the default `fable` adds one
 strong call; `both` adds a backgrounded Codex run whose cost is wall time, not tokens.
 Screenshots add one to two minutes of browser wall time only when UI is warranted and a
-preview deploy exists; the page render and the queue are free — they reuse facts already
+preview deploy exists; the plan render and the queue are free — they reuse facts already
 fetched.
 
 ## Phase outline
@@ -191,16 +197,15 @@ fetched.
 | Phase | What | Detail file |
 |---|---|---|
 | 0 | Preflight: **resolve identity first**, auth for that host, rate gate, git pins, contract + ruleset discovery, run dir and cache | `facts.md` §0 |
-| 1 | PR record, linked issues, duplicates, diff | `facts.md` §1 |
+| 1 | PR record, linked issues, duplicates + supersession sweep (shipped and backlog), diff | `facts.md` §1 |
 | 2 | Status snapshot: CI, reviews, threads, mergeability, local state, board, prior-skill evidence | `facts.md` §2 |
 | 3 | Still-needed validation, per linked issue | `still-needed.md` |
 | 4 | Plan check by a strong model (skippable) | `plan-check.md` |
 | 5 | UI-review detection (deterministic, no model) | below |
-| 5b | Screenshot glance from the preview deployment (capability-bound, skippable) | `page.md` §1 |
-| 6 | Next-step decision table + action-queue projection | below + `next-step.md` |
+| 5b | Screenshot glance from the preview deployment (capability-bound, skippable) | `screenshots.md` §1 |
+| 6 | Next-step decision table + execution-plan projection | below + `next-step.md` |
 | 7 | Render | `output.md` |
-| 7b | Report page, written and opened locally | `page.md` §2 |
-| 8 | Green-light gate: approve the next step(s), take the local recipe, or stop | below |
+| 8 | Approval gate: approve the plan and pick the executor — local, Detent, first step only, or stop | below + `execute.md` |
 
 **The rate gate runs twice**: once in Phase 0, and once immediately before Phase 4 dispatch.
 Phase 4 is the expensive phase, and a shared fleet's quota moves underneath a long run.
@@ -234,7 +239,8 @@ to the head SHA like every other source read (`still-needed.md` §1). Cap at 5 r
 `## E2E Verification Results` comment, an `e2e-verified` label.
 
 Output → `ui {warranted, severity, files[], routes[], evidence_present, reason}`. Phase 5b
-appends `preview_url`, `shots_status`, `screenshots[]`, and `visual_summary` (`page.md` §1);
+appends `preview_url`, `shots_status`, `screenshots[]`, and `visual_summary`
+(`screenshots.md` §1);
 none of them feed the decision table.
 
 ## Phase 6 — Next-step decision table
@@ -253,7 +259,7 @@ predicate's conjuncts in §3.
 | 4 | board | `BOARD_STATUS` ∈ terminal states (`Done`, `Cancelled`) while the PR is open | `board-terminal` |
 | 5 | board | `BOARD_STATUS == Blocked` | `blocked` |
 | 6 | board | `BOARD_STATUS == Backlog`, or no linked issue, or `BOARD_AMBIGUOUS` | `no-active-issue` |
-| 7 | supersede | **every** linked issue is `already-fixed-by` with `confidence: high` | `close-superseded` |
+| 7 | supersede | **every** linked issue is `already-fixed-by` or `no-longer-needed` with `confidence: high` | `close-superseded` |
 | 8 | supersede | **every** linked issue is `likely-duplicate-of #M` where #M is open and further along, and this PR is not the further-along one | `close-duplicate` |
 | 9 | mechanical | `mergeable == CONFLICTING` | `rebase` |
 | 10 | mechanical | `BEHIND && STRICT` | `rebase` |
@@ -296,100 +302,34 @@ stopping at any human-owned or terminal id (`next-step.md` §5). Entries after t
 marked `projected` and each carries the `local:` recipe from `next-step.md` §6. `queue[0]`
 is the headline restated; the projection changes no fact and no verdict.
 
-## Phase 8 — the green-light gate
+## Phase 8 — the approval gate
 
-The report names the next step; the gate turns it into motion without giving up the skill's
-read-only posture. Classify it per `decision-gates.md`: consent to spend tokens or mutate the
-PR is **missing intent** — a status request does not imply it — so the gate asks once, through
-the driver's structured-input capability, and never loops.
+The report ends in the execution plan; the gate turns it into motion. Classify it per
+`decision-gates.md`: consent to spend tokens or mutate the PR is **missing intent** — a
+status request does not imply it — so the gate asks once, through the driver's
+structured-input capability, and never loops. The full contract — the approval boundary, the
+executor modes, per-step execution, and the stop conditions — is `execute.md`; read it before
+presenting the question.
+
+One question, at most four options (`execute.md` §2):
+
+1. **Execute the plan locally** — this session completes every agent-executable step in
+   order, the same process the Detent lane would run, re-deriving reality between steps and
+   stopping at any human-owned step or fuse (`execute.md` §4–§6).
+2. **Hand to Detent** — one board move to the contract lane (`Rework` while work remains,
+   `Merging` when only promotion is left); the daemon drives from there (`execute.md` §3).
+3. **First step only** — run just step 1, then re-report. The classic one-step green light.
+4. **Stop** — the report and the plan stand; every step's `local:` recipe is already
+   printed for driving by hand.
 
 Skip the gate entirely when `--no-gate` or `--json`, or when `queue[0]` is a
 `QUEUE_TERMINAL` id — the report already says who owns the move. A driver **without**
 structured input does not skip it: per `driver-interaction.md`, ask the same one question
 as concise text in the final response and stop; the user's answer resumes the gate.
 
-**Dispatchability is checked, not assumed.** The id→skill mapping is explicit:
-`codex-ship` → `/workflow:codex-ship`; `antagonist-review` → `/workflow:antagonist-review`;
-`address-review` → the language plugin's `address-review`; `ui-review` → the language
-plugin's **E2E verification skill** (in `ts-workflow` that is `e2e-verify` — there is no
-skill literally named `ui-review`). An entry is dispatchable only when its mapped skill is
-actually invocable **by the orchestrator** in this session — installed AND model-invocable.
-A `disable-model-invocation: true` target (ts-workflow's `address-review` and `e2e-verify`
-today) cannot be launched from here: for those entries the gate presents the exact slash
-command for the user to type, never a Run option that would fail. `rebase` stays the one
-mechanical entry.
-Everything else (`wait-ci`, `fix-plan`, `finish-draft`, `complete-gate`,
-`move-to-human-review`, …) is an action the report describes, not a skill to launch: for
-those the gate offers only the local recipe and Stop. Never present a Run option that
-cannot actually run.
-
-**Every mutating dispatch binds to the PR's checkout, never the shell's.** The skill
-reports from any checkout — another branch, detached HEAD, a dirty tree — and every
-dispatchable skill can reach a fixer that commits and pushes from the ambient directory
-(`codex-ship` invokes `address-review`; `antagonist-review` dispatches its own fixer). So
-the Run options are offered **only when Phase 2e's local facts show a clean checkout at
-the PR head**; otherwise the gate names the gap — "checkout is not at the PR head; open
-its worktree (`/workflow:create-worktree <n>` review mode) and run `<command>` there" —
-and offers only the local recipe and Stop. For `rebase` specifically, the executed push
-sends the rebased commit itself, to the remote that actually hosts the head:
-
-```
-git push --force-with-lease=refs/heads/<headRefName>:<HEAD_SHA> \
-  <head-remote> HEAD:refs/heads/<headRefName>
-```
-
-The explicit lease pins the expectation to the head **this run observed** — the SHA every
-fact in the report describes. A bare `--force-with-lease` trusts the remote-tracking ref,
-which any background fetch refreshes into a rubber stamp; with the pin, a contributor's
-push after Phase 2 rejects the force-push instead of being overwritten, and the rejection
-is surfaced, never retried with a refreshed lease.
-
-`<head-remote>` is the configured remote whose URL matches the full `HEAD_SLUG`
-(owner/name, normalized — the owner login alone is ambiguous for renamed forks or several
-repos under one owner; `facts.md` §0a carries both it and `IS_FORK`): `origin` for a
-same-repo PR, the fork's remote otherwise. The
-`HEAD:` refspec pushes what was just rebased even when the local branch is not named
-`<headRefName>`. When no configured remote points at the head repository — the usual case
-for a fork checked out via `refs/pull/*` — the entry is **not dispatchable**: present the
-recipe instead of running it.
-
-One question, at most four options:
-
-1. **Run step 1** — offered only when step 1 is dispatchable; invokes the mapped skill (or
-   the rebase recipe) against this PR.
-2. **Run steps 1–k** — offered only when two or more dispatchable steps precede the first
-   non-dispatchable, human-owned, or terminal entry, **where interleaved `wait-ci` entries
-   are absorbed rather than batch-breaking**: every dispatchable resolution projects CI to
-   pending, so `wait-ci` sits between any two dispatches by construction, and the
-   orchestrator handles it itself as part of the batch — and a freshly pushed head has a
-   registration window in which the checks watch reports *no checks* and exits: poll until
-   the new head's checks exist, then watch them to completion, before evaluating anything.
-   **Every batch command stays repo-qualified** — the ambient checkout may be a fork whose
-   default remote is not the base repository, so the watch is
-   `gh pr checks <n> -R <host>/<slug>` and the recheck passes the full PR URL (which pins
-   host, owner, and repo per `facts.md` §0a). Between steps, re-run
-   `pr-details <PR-URL> --no-plan-check --no-page --no-gate`, **carrying the original run's
-   plan verdict into the recheck's table** (read `PLAN_COMBINED`/`PLAN_SPLIT` from the
-   prior `facts.json` — Phase 4 is skipped for cost, not because the verdict expired, and
-   without the carry a plan-keyed row can never reproduce). The carry is valid only while
-   the diff is materially unchanged (a rebase); once a dispatched fixer changed the diff,
-   a plan-keyed projection is stale — that is divergence. Continue only while the fresh
-   headline matches the projection; a red CI landing or a stale plan projection stops the
-   run with a report.
-3. **Handle it locally** — print step 1's `local:` recipe and stop.
-4. **Stop** — the report stands as-is.
-
-**Every sibling dispatch passes the full PR URL, never a bare number.** Siblings resolve
-their repository from the ambient checkout (`codex-ship` via `gh repo view`,
-`antagonist-review` via unqualified `gh pr` calls), and a fork checkout can carry a
-same-numbered PR — a bare `261` there addresses the wrong pull request. The URL pins host,
-owner, and repo. A sibling that cannot accept a URL is dispatchable only when the ambient
-checkout's repository **is** the resolved base repository.
-
-Dispatch means invoking the sibling skill exactly as the user would have; every gate, prompt,
-and confirmation inside that skill still applies. `pr-details` itself still mutates nothing —
-the mutation belongs to the skill the user selected, and the selection is recorded in the
-final response.
+The selection is recorded in the final response. Whatever runs, every dispatched sibling's
+own gates, prompts, and confirmations still apply — approval here authorizes the mode, not a
+bypass of anything inside it.
 
 ## Output template
 
@@ -420,7 +360,7 @@ UI REVIEW   not warranted — no UI paths changed
 QUALITY     codex-ship ✓ at head · antagonist ✗ not run · deep review stale (pre-force-push) · e2e n/a
             still required before merge: antagonist-review (row 21) · deep review at head (C9)
 
-NEXT STEPS
+EXECUTION PLAN
   1 → /workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/261   [row 21]
       why:   codex-ship clean at head but no second-family review, and the diff is 354 lines ≥ 150
       local: review gh pr diff 261 yourself, or run the language plugin's review-deep
@@ -428,20 +368,22 @@ NEXT STEPS
       why:   the contract's deep-review conjunct is observably false at this head
   3 → your approval                                   [row 28 · projected]  ready pending: local gate
   then:  /workflow:pr-details 261
-  page:  <run dir>/report.html
   files: <run dir>
 ```
 
 ## Supporting files
 
 - `facts.md` — Phases 0–2: identity, auth, rate gate, git pins, contract and ruleset
-  discovery, run dir and cache, retries, PR and issue records, duplicates, CI, reviews,
-  threads, mergeability, board, prior-skill evidence
+  discovery, run dir and cache, retries, PR and issue records, duplicates and the
+  supersession sweep (recently shipped, backlog), CI, reviews, threads, mergeability, board,
+  prior-skill evidence
 - `still-needed.md` — Phase 3: pinned-read rule, claim extraction, mechanical base probe,
   researcher brief, per-issue aggregation
 - `plan-check.md` — Phase 4: prompt template, Fable routing, the Codex `exec` invocation,
   quorum
 - `next-step.md` — Phase 6: fact definitions, ordering rationale, ready-predicate ledger,
-  action-queue projection and local recipes, fact-vector regression
-- `page.md` — Phases 5b and 7b: preview-deploy screenshots and the local report page
-- `output.md` — Phase 7: terminal grammar, `--json` schema v2, exit codes, scratch hygiene
+  execution-plan projection and local recipes, fact-vector regression
+- `screenshots.md` — Phase 5b: preview-deploy screenshots
+- `execute.md` — Phase 8: approval boundary, executor modes (local / Detent), per-step
+  execution, stop conditions
+- `output.md` — Phase 7: terminal grammar, `--json` schema v3, exit codes, scratch hygiene

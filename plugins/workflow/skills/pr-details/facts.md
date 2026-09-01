@@ -330,6 +330,54 @@ case this skill exists to catch.
 4000 lines → `HUGE_DIFF=true`, and Phase 4 receives a per-file stat plus full hunks for the top
 10 files with an explicit `DIFF TRUNCATED: n of m files shown` marker in the prompt.
 
+### §1e Supersession sweep — recently shipped and backlog
+
+Answers the half of "should this PR be closed instead of finished" that §1c's
+similarity scoring misses: what **shipped** since this PR's merge-base, and what the
+**backlog** plans for the same area. Skipped with `--no-dup-search` (same question, same
+budget decision). Both commands are list endpoints — they charge the GraphQL bucket but not
+the 30/min search bucket. Verified live, including the UTC normalization: `mergedAt` is
+Zulu-form ISO 8601, and a `git` date printed with a local offset breaks the lexical
+comparison, so the window boundary is forced to UTC.
+
+*Recently shipped PRs*, with the issues they closed and their file lists:
+
+```bash
+SINCE=$(TZ=UTC git show -s --format=%cd \
+  --date=format-local:%Y-%m-%dT%H:%M:%SZ "$MERGE_BASE")
+pr_facts_gh pr list -R "$SLUG" --base "$BASE" --state merged --limit 30 \
+  --json number,title,mergedAt,files,closingIssuesReferences \
+  | jq -c --arg since "$SINCE" '[.[] | select(.mergedAt >= $since)
+      | {number, title, mergedAt,
+         issues: [.closingIssuesReferences[].number],
+         files: [.files[].path]}]'
+```
+
+Score file overlap with the same rules as signal 2 (drop lockfiles, `**/_generated/**`,
+snapshots). A shipped PR overlapping this one's files, or closing an issue whose title
+matches signal 1's tokens, is an `already-fixed` candidate **even when §3's per-file log
+probe missed it** — a replacement can land in entirely new files. The closed issues ride
+along as the "recently shipped issues" the researcher weighs.
+
+*Recently closed issues* in the same window (catches issues closed as wontfix/superseded
+with no merged PR):
+
+```bash
+pr_facts_gh issue list -R "$SLUG" --state closed --limit 30 \
+  --json number,title,closedAt,labels \
+  | jq -c --arg since "$SINCE" '[.[] | select(.closedAt >= $since)]'
+```
+
+*Backlog direction.* The open-issue candidates from §1c signals 1 and 3 already carry board
+status; the question here is different — not "is this a duplicate" but "does **planned**
+work make this PR moot" (a rework, replacement, or removal of the area it patches). Label
+every open candidate whose board status is a planning state (`Backlog`, `Todo`) as a
+`direction` candidate rather than dropping it for being dissimilar.
+
+Everything lands in `duplicates[]` with `kind ∈ {issue, pr, shipped-pr, closed-issue,
+backlog-issue}` plus its signal list. The sweep only gathers — the Phase 3 researcher is the
+judge (`still-needed.md` §4), and no candidate is ever closed, commented on, or edited here.
+
 ---
 
 ## §2 Phase 2 — Status snapshot

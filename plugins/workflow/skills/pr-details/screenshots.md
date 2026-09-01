@@ -1,9 +1,13 @@
-# Screenshots and the report page — Phases 5b and 7b
+# Screenshots — Phase 5b
 
-Phase 5b captures what the PR looks like on its preview deployment; Phase 7b renders the whole
-report as one local HTML page. Both are additive: a skipped or failed phase here changes no
-fact, no queue entry, and no headline step — it produces a `warnings[]` line and a degraded
-page, never a degraded verdict.
+Phase 5b captures what the PR looks like on its preview deployment, so the user can judge a
+simple UI change without launching the app. It is additive: a skipped or failed capture
+changes no fact, no queue entry, and no headline step — it produces a `warnings[]` line and a
+degraded UI section, never a degraded verdict.
+
+Captures land in `$RUN_DIR/shots/`; the terminal report's `UI REVIEW` section lists each
+file path with its visual-summary sentences (§1e). There is no rendered page — the paths and
+the summary are the deliverable.
 
 ---
 
@@ -78,8 +82,8 @@ part of the surface.
   alone does not keep the capture unauthenticated. Prefer a fresh unauthenticated context
   when the binding offers one. When only the profile-bound browser exists and a route
   renders what is evidently authenticated content, ask once (missing intent,
-  `lib/decision-gates.md`): the screenshots would embed that content in the local report
-  page. Without an affirmative answer — or in any non-interactive run — record
+  `lib/decision-gates.md`): the screenshots would sit in the run directory as local files.
+  Without an affirmative answer — or in any non-interactive run — record
   `auth-blocked` for the route and move on. A route that renders a sign-in or access-check
   screen records `auth-blocked` directly. Never log in on the user's behalf.
 - Files → `$RUN_DIR/shots/<route-slug>.png`. Mixed results (some captured, some blocked) →
@@ -88,90 +92,17 @@ part of the surface.
 ### §1d Screenshots already on the PR
 
 When Phase 5 found screenshots in the PR body (`evidence_present`), list their URLs in the
-page's UI section as links labelled "from the PR body". Do not download or embed them — they
-are GitHub-hosted attachments behind the viewer's own session, and the page must stay
-self-contained without carrying copies of them.
+terminal report's UI section, labelled "from the PR body". Do not download them — they are
+GitHub-hosted attachments behind the viewer's own session; the link is enough.
 
 ### §1e Visual summary
 
 The orchestrator reads the captured images itself — no subagent — and writes 2–4 sentences per
 route: what visibly changed, tied to the files in the diff, and anything that looks broken
 (overflow, misalignment, an empty state, unreadable contrast). Store it as
-`ui.visual_summary`.
+`ui.visual_summary` and print it under `UI REVIEW`, one indented block per route, after that
+route's shot path.
 
 Scope guard: this is a glance that lets the user green-light without launching the app. It is
 **not** verification — it never sets `E2E_AT_HEAD`, never satisfies the contract's E2E
-conjunct, and the page labels it "screenshot glance, not E2E verification".
-
----
-
-## §2 Phase 7b — the report page
-
-Written on every run unless `--no-page`, to `$RUN_DIR/report.html`. The terminal report is the
-40-line summary; the page is the check-in a human actually reads — verdict, queue,
-screenshots, and what changed, in one place.
-
-**Local file, never published.** Scratch hygiene (`output.md` §4) applies with no exception:
-never commit it, post it, upload it, or serve it. Open it locally:
-
-```bash
-if [ "$AS_JSON" -eq 0 ]; then
-  case "$(uname -s)" in
-    Darwin) open "$RUN_DIR/report.html" ;;
-    Linux)  command -v xdg-open >/dev/null && xdg-open "$RUN_DIR/report.html" ;;
-  esac
-fi
-```
-
-No opener, or `--json` → skip opening; the path still prints on the `page:` line and lands in
-the JSON as `page.path`. (`open` verified present on the reference host.)
-
-### §2a Construction rules
-
-- One file, self-contained: inline CSS, zero external requests — no fonts, no CDN, no
-  favicons, no analytics. Respect `prefers-color-scheme` for a light and a dark palette.
-- **Everything repo- or contributor-derived is untrusted and gets contextually escaped**:
-  PR titles and bodies, issue text, branch names, file paths, commit subjects, thread
-  excerpts, and the plan check's proposed edits are HTML-escaped (`&`, `<`, `>`, `"`, `'`)
-  before landing in markup, attribute values are escaped for attribute context, and the
-  only URLs emitted are `https:` links to the PR's own GitHub host plus the screenshot
-  `data:` URIs. A PR title containing `<script>` must render as text — this page opens
-  automatically in the reviewer's browser.
-- **No script in the page, at all**, and a CSP backstop so an escaping miss stays inert:
-
-  ```html
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
-  ```
-
-  `script-src` is absent so it falls back to `default-src 'none'` — injected script does
-  not execute, and `connect-src 'none'` means nothing can exfiltrate. Command text in the
-  queue cards is selectable; there is no copy button to script.
-- Wide content (file tables, diff stats, the proposed issue edits) scrolls inside its own
-  container; the page body never scrolls horizontally.
-
-### §2b Sections, in order
-
-1. **Banner** — PR number, title, repo, head SHA short, and the headline step with its verdict
-   qualifier. The banner answers "what do you need from me" before any scrolling.
-2. **Action queue** — one card per entry: position, the exact command in a selectable
-   monospace block, the `why:` line, the cost posture, and the `local:` recipe inside a
-   collapsed `<details>` block. Entry 1 is marked **next**; later entries carry
-   "projected — assumes the steps above land cleanly" (`next-step.md` §5).
-3. **Quality** — the review ladder at this head: codex-ship, antagonist, deep review, E2E —
-   each marked ran-at-head, stale (evidence names an older SHA), or not run — and which of
-   them the decision table still requires before merge.
-4. **Status** — the STATUS grid, plus PURPOSE with the still-needed verdict and evidence.
-5. **Plan check** — verdict, gaps with severities, and the proposed issue edits verbatim in a
-   collapsed block, per model when a quorum ran.
-6. **What changed** — the commit list, files with +/− counts, and the plan judge's
-   `DIFF_VS_PLAN` paragraph when Phase 4 ran. This is the "basic outline of what was done";
-   it is a description of the diff, not a review of it.
-7. **UI** — per-route screenshot with its visual-summary sentences and the preview URL, or the
-   one-line not-warranted reason, or the degraded status (`no-preview`, `no-browser`,
-   `auth-blocked`) with the routes to check by hand; PR-body screenshot links per §1d.
-8. **Warnings**, then a footer: generated-at UTC, head SHA, run dir, and the staleness line —
-   "facts are a snapshot of `<time>`; re-run `pr-details` before acting if the PR may have
-   moved."
-
-JSON: `page {path, opened}`.
+conjunct, and the report labels it "screenshot glance, not E2E verification".
