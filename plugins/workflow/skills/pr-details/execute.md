@@ -16,9 +16,10 @@ authorization for everything that mode does. Two consequences:
 - **No selection, no mutation.** `--no-gate`, `--json`, a non-interactive run with no answer,
   or an answer of Stop all leave the world exactly as the report found it.
 - **A selection authorizes the mode, not everything.** Local execution still stops at every
-  human-owned step, still honors each dispatched sibling's own gates and prompts, and still
-  ends at the stop conditions in §6. Approval is "complete the plan's agent-executable
-  steps", never "do whatever it takes".
+  human-owned step, still honors each dispatched sibling's own gates and prompts, still
+  re-confirms a spec edit (`fix-plan`, §5) before touching the issue body, and still ends at
+  the stop conditions in §6. Approval is "complete the plan's agent-executable steps", never
+  "do whatever it takes".
 
 The question is skipped entirely when `queue[0]` is a `QUEUE_TERMINAL` id — the report
 already says who owns the move — and when the plan contains no agent-executable step.
@@ -144,7 +145,7 @@ the orchestrator:
 | `wait-ci` | watch checks to completion, registration window first |
 | `complete-gate` | run the contract gate (`gate.run`) at the head commit from the bound checkout; on green, post the evidence the contract names — workpad update, review comment, label. A red gate run routes to the fix step, not to a retry |
 | `finish-draft` | `gh pr ready <n> -R <host>/<slug>` |
-| `fix-plan` | apply the plan check's proposed issue edits — only when Phase 4 produced concrete replacement text this run; edit the issue body's Plan section to it and say so on the issue. No concrete text → stop and ask; the orchestrator never authors a plan itself |
+| `fix-plan` | **never blanket-authorized** — the §2 approval covers executing toward the spec, and this step rewrites the spec, which is a different decision. Show the issue's current Plan section beside Phase 4's proposed replacement (from `$RUN_DIR/plan-*.md`) and write it to the issue only on an explicit per-step yes (a second missing-intent gate, `lib/decision-gates.md`); note the edit on the issue when applied. No concrete proposed text this run, or no answer (any non-interactive continuation) → stop with the report; the orchestrator never authors a plan itself |
 | `move-to-human-review` | post the gate evidence, then the §3 board-move recipe with the `Human Review` option id |
 
 `human-approval`, `hand-to-detent`, and every other `QUEUE_TERMINAL` id are never executed

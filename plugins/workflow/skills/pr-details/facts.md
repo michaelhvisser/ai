@@ -347,11 +347,30 @@ SINCE=$(TZ=UTC git show -s --format=%cd \
   --date=format-local:%Y-%m-%dT%H:%M:%SZ "$MERGE_BASE")
 pr_facts_gh pr list -R "$SLUG" --base "$BASE" --state merged --limit 30 \
   --json number,title,mergedAt,files,closingIssuesReferences \
-  | jq -c --arg since "$SINCE" '[.[] | select(.mergedAt >= $since)
-      | {number, title, mergedAt,
-         issues: [.closingIssuesReferences[].number],
-         files: [.files[].path]}]'
+  > "$RUN_DIR/shipped-raw.json"
+jq -c --arg since "$SINCE" '[.[] | select(.mergedAt >= $since)
+    | {number, title, mergedAt,
+       issues: [.closingIssuesReferences[].number],
+       files: [.files[].path]}]' \
+  "$RUN_DIR/shipped-raw.json" > "$RUN_DIR/shipped.json"
+# 30 is a cap, newest-first. When the cap was hit AND no returned PR predates
+# the window, the cap — not the window — ended the sweep: older shipped PRs
+# may exist unseen. If the oldest returned PR predates SINCE, the window is
+# fully covered and the cap is irrelevant.
+SHIPPED_TRUNCATED=false
+if [ "$(jq length "$RUN_DIR/shipped-raw.json")" -eq 30 ] \
+   && [ "$(jq length "$RUN_DIR/shipped.json")" -eq 30 ]; then
+  SHIPPED_TRUNCATED=true
+fi
 ```
+
+`SHIPPED_TRUNCATED=true` mirrors signal 2's cap handling: it produces a `warnings[]` line
+("shipped sweep capped at 30 merged PRs inside the window — older shipped work
+unexamined"), and the researcher brief says so, so an `unclear`-leaning verdict is never
+laundered into confidence by a sweep that silently stopped early. This block is executed
+against scripted repos and fixtures by
+`plugins/workflow/tests/pr-details-supersession-sweep.test.sh` — the doc is the code under
+test; edit both together.
 
 Score file overlap with the same rules as signal 2 (drop lockfiles, `**/_generated/**`,
 snapshots). A shipped PR overlapping this one's files, or closing an issue whose title
