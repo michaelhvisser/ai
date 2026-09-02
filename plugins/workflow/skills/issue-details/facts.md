@@ -140,12 +140,16 @@ no issue carries it yet.
 SINCE_DAYS="${SINCE_ARG%d}"
 SINCE=$(date -u -v-"${SINCE_DAYS}"d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
   || date -u -d "${SINCE_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)
-pr_facts_gh issue list -R "$SLUG" --state open --limit 100 --json number,createdAt \
+pr_facts_gh issue list -R "$SLUG" --state open --limit 500 --json number,createdAt \
   | jq -r --arg since "$SINCE" '[.[] | select(.createdAt >= $since)] | sort_by(.number) | .[].number' \
   > "$RUN_DIR/selected.txt"
 ```
 
-Both `date` forms were verified (`-v` is BSD/macOS, `-d` is GNU). The selection is capped
+Both `date` forms were verified (`-v` is BSD/macOS, `-d` is GNU). The list limit is 500,
+not 100: `gh issue list` returns newest-created first, so a limit smaller than the number of
+open issues created inside the window would silently drop the oldest ones before the 50-cap
+warning ever fired (300 open issues, 137 created in the last 30 days at the time of writing).
+The selection is capped
 at **50 issues per run** — beyond that, the first 50 by number plus a warning. Each issue
 costs two search calls (§1e), and the 30/min search bucket makes 50 issues roughly four
 minutes of sleeping even when nothing else is running; the cap keeps one run inside one
