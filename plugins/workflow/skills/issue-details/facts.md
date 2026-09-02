@@ -174,9 +174,11 @@ fixture by `plugins/workflow/tests/issue-details-triage.test.sh`.
 
 ## §1 Phase 1 — Per-issue record
 
-Phase 1 runs in **two passes** over `selected.txt`: pass A fetches every issue record
-(§1a) so the merged-PR sweep (§1b) can start its window at the earliest filing date with
-one paginated query for the whole run; pass B does the rest per issue (§1c–§1i).
+Phase 1 runs in **two passes** over `selected.txt`: pass A gates and fetches every issue
+record (§1a, §1b) so the merged-PR sweep (§1c) can start its window at the earliest filing
+date with one paginated query for the whole run; pass B gates again, **reloads every
+per-issue value from `issue-<n>.json`** (§1b), and does the rest (§1d–§1i). Shell
+variables never carry an issue's facts across the pass boundary — the file does.
 
 Every per-issue `gh` call goes through `issue_gh`, which turns a failure into a per-issue
 result instead of a dead run, and turns a **terminal rate-limit 403** into a batch stop:
@@ -193,13 +195,19 @@ issue_gh() {
 }
 ```
 
-The per-issue driver, in both passes:
+The driver:
 
 ```
-for each ISSUE_NUM in selected.txt:
-    if STOP_BATCH == 1: record "<n>\tbatch stopped: <STOP_REASON>" in unevaluated.tsv; continue
-    ISSUE_FAILED=0; run the pass's blocks, each `issue_gh … || ISSUE_FAILED=1`
-    if ISSUE_FAILED == 1: record "<n>\t<ISSUE_ERROR>" in unevaluated.tsv; continue
+pass A — for each ISSUE_NUM in selected.txt:
+    if STOP_BATCH == 1: record "<n>\tbatch stopped: <STOP_REASON>"; continue
+    ISSUE_FAILED=0; §1a gate; §1b fetch (a failure appends <n> to failed.txt)
+    if ISSUE_FAILED == 1: record "<n>\t<ISSUE_ERROR>"; continue
+§1a gate (with ISSUE_NUM=sweep); §1c sweep — unless STOP_BATCH
+pass B — for each ISSUE_NUM in selected.txt:
+    if STOP_BATCH == 1: record; continue
+    if <n> is in failed.txt or unevaluated.tsv: continue        (already recorded)
+    ISSUE_FAILED=0; §1a gate; §1b load; §1d … §1i, each `issue_gh … || ISSUE_FAILED=1`
+    if ISSUE_FAILED == 1: record "<n>\t<ISSUE_ERROR>"; continue
 ```
 
 **`issue_gh` always writes to a file — never on the left of a pipe, never inside `$( )`.**
@@ -213,29 +221,90 @@ records that issue **and every issue after it** as unevaluated, and the gate is 
 what completed. Exit 4 applies only when the run selected explicit numbers and **none** of
 them was found.
 
-### §1a The issue (pass A)
+### §1a Per-issue gate (both passes, and once before the sweep)
+
+The full gate, before any fetch for the issue, in one `rate_limit` read written to a file.
+Core or GraphQL below reserve **stops the batch**; the search bucket below reserve is a
+sleep to its reset — it refills every minute, and a batch two issues in should not abort
+over it. A response that is not the expected shape (a `{}`, a null bucket, a non-numeric
+remaining) **fails closed** — every operand is checked before any comparison:
+
+```bash
+RL_FAIL=0
+issue_gh api --hostname "$HOST" rate_limit > "$RUN_DIR/rate-${ISSUE_NUM}.json" || RL_FAIL=1
+if [ "$RL_FAIL" = 1 ]; then
+  STOP_BATCH=1; STOP_REASON="rate_limit unreadable${ISSUE_ERROR:+: $ISSUE_ERROR}"
+else
+  RL_CORE=$(jq -r '.resources.core.remaining // empty' "$RUN_DIR/rate-${ISSUE_NUM}.json" 2>/dev/null || true)
+  RL_GQL=$(jq -r '.resources.graphql.remaining // empty' "$RUN_DIR/rate-${ISSUE_NUM}.json" 2>/dev/null || true)
+  RL_SEARCH=$(jq -r '.resources.search.remaining // empty' "$RUN_DIR/rate-${ISSUE_NUM}.json" 2>/dev/null || true)
+  RL_SEARCH_RESET=$(jq -r '.resources.search.reset // empty' "$RUN_DIR/rate-${ISSUE_NUM}.json" 2>/dev/null || true)
+  RL_SHAPE_OK=1
+  for RL_V in "$RL_CORE" "$RL_GQL" "$RL_SEARCH" "$RL_SEARCH_RESET"; do
+    case "$RL_V" in ''|*[!0-9]*) RL_SHAPE_OK=0 ;; esac
+  done
+  if [ "$RL_SHAPE_OK" = 0 ]; then
+    STOP_BATCH=1; STOP_REASON="rate_limit response malformed"
+  elif [ "$RL_CORE" -lt "$REST_RESERVE" ] || [ "$RL_GQL" -lt "$GRAPHQL_RESERVE" ]; then
+    STOP_BATCH=1; STOP_REASON="rate limit below reserve (core $RL_CORE, graphql $RL_GQL)"
+  elif [ "$RL_SEARCH" -lt "$SEARCH_RESERVE" ]; then
+    RL_NOW=$(date -u +%s)
+    if [ "$RL_SEARCH_RESET" -gt "$RL_NOW" ]; then sleep $(( RL_SEARCH_RESET - RL_NOW + 1 )); fi
+  fi
+fi
+if [ "$STOP_BATCH" = 1 ]; then ISSUE_FAILED=1; ISSUE_ERROR="$STOP_REASON"; fi
+```
+
+This block is executed against fixtures by
+`plugins/workflow/tests/issue-details-triage.test.sh` — the doc is the code under test;
+edit both together.
+
+### §1b The issue record — fetch (pass A) and load (both passes)
+
+Fetch, in pass A. A failure is **persisted** to `failed.txt`, which pass B consults, so a
+missing record is never mistaken for the previous issue's:
 
 ```bash
 issue_gh issue view "$ISSUE_NUM" -R "$SLUG" \
   --json number,title,body,author,createdAt,updatedAt,labels,state,url,milestone \
-  > "$RUN_DIR/issue-${ISSUE_NUM}.json" || ISSUE_FAILED=1
-if [ "$ISSUE_FAILED" = 0 ]; then
+  > "$RUN_DIR/issue-${ISSUE_NUM}.json" || { ISSUE_FAILED=1; echo "$ISSUE_NUM" >> "$RUN_DIR/failed.txt"; }
+```
+
+Load, from the file — pass A right after the fetch, pass B first thing. Every per-issue
+value the later sections read comes from here, including the body file and the existing
+effort block, so no value can leak from another issue:
+
+```bash
+PASS_SKIP=0
+if grep -qx "$ISSUE_NUM" "$RUN_DIR/failed.txt" 2>/dev/null; then PASS_SKIP=1; fi
+if [ "$PASS_SKIP" = 0 ] && jq -e '.number == ($n | tonumber)' --arg n "$ISSUE_NUM" "$RUN_DIR/issue-${ISSUE_NUM}.json" >/dev/null 2>&1; then
   ISSUE_TITLE=$(jq -r .title "$RUN_DIR/issue-${ISSUE_NUM}.json")
   ISSUE_AUTHOR=$(jq -r '.author.login // ""' "$RUN_DIR/issue-${ISSUE_NUM}.json")
   ISSUE_CREATED=$(jq -r .createdAt "$RUN_DIR/issue-${ISSUE_NUM}.json")
   ISSUE_UPDATED=$(jq -r .updatedAt "$RUN_DIR/issue-${ISSUE_NUM}.json")
   ISSUE_STATE=$(jq -r .state "$RUN_DIR/issue-${ISSUE_NUM}.json")
-  ISSUE_LABELS=$(jq -c '[.labels[].name]' "$RUN_DIR/issue-${ISSUE_NUM}.json")
-  jq -r .body "$RUN_DIR/issue-${ISSUE_NUM}.json" > "$RUN_DIR/body-${ISSUE_NUM}.md"
+  ISSUE_LABELS=$(jq -c '[.labels[].name] | sort' "$RUN_DIR/issue-${ISSUE_NUM}.json")
+  jq -r '.body // ""' "$RUN_DIR/issue-${ISSUE_NUM}.json" > "$RUN_DIR/body-${ISSUE_NUM}.md"
+  EXISTING_EFFORT=$(awk '
+    /^```detent-agent[[:space:]]*$/ {inb=1; next}
+    /^```/ {inb=0}
+    inb && $1 == "effort:" {print $2; exit}
+  ' "$RUN_DIR/body-${ISSUE_NUM}.md")
+else
+  PASS_SKIP=1; ISSUE_FAILED=1; ISSUE_ERROR="${ISSUE_ERROR:-record for #$ISSUE_NUM missing or not this issue}"
 fi
 ```
 
 `author` is null for deleted accounts; `ISSUE_AUTHOR` is then empty and the social rule
-treats the issue as **not** self-authored (the conservative side). `ISSUE_UPDATED` is the
-evaluation snapshot the gate re-checks before writing (`execute.md` §3). A closed issue is
-still evaluated — the report says `state: CLOSED` and the gate writes nothing to it.
+treats the issue as **not** self-authored (the conservative side). `ISSUE_UPDATED` and
+`ISSUE_LABELS` (sorted) are the evaluation snapshot the gate re-checks before writing
+(`execute.md` §3). `EXISTING_EFFORT` is the fenced `detent-agent` block's `effort:` —
+empty means no block; whatever value is there, including `max`, is reported as-is beside
+the proposal (`triage.md` §4) and the body is never edited. A closed issue is still
+evaluated — the report says `state: CLOSED` and the gate writes nothing to it. Both blocks
+are executed by the test file, two issues through both passes.
 
-### §1b Merged-PR sweep (once, after pass A)
+### §1c Merged-PR sweep (once, after pass A, gated)
 
 The "already fixed" candidates: every PR merged into the base branch since the **earliest**
 selected issue was filed, with the issues it closed. This is a GraphQL `search` with an
@@ -244,28 +313,37 @@ explicit `merged:>=` window, not `gh pr list --state merged` — that list is or
 outside any cap, and a cap in creation order says nothing about coverage in merge order.
 Verified live on the reference repo: the qualifier, `closingIssuesReferences` on the
 search node, `issueCount`, and `pageInfo` all come back; the query charges the **GraphQL**
-bucket only (the 30/min search bucket was untouched, checked before and after).
+bucket only (the 30/min search bucket was untouched, checked before and after). Each page
+goes through `issue_gh` to a file, so a 403 here stops the batch like any other.
 
 ```bash
 SWEEP_SINCE=$(jq -rs '[.[].createdAt] | min' "$RUN_DIR"/issue-*.json)
 SWEEP_Q="repo:${SLUG} is:pr is:merged base:${BASE} merged:>=${SWEEP_SINCE}"
 SWEEP_GQL='query($q:String!,$after:String){ search(query:$q, type:ISSUE, first:100, after:$after){
   issueCount pageInfo{hasNextPage endCursor}
-  nodes{ ... on PullRequest { number title mergedAt closingIssuesReferences(first:20){ nodes{ number } } } } } }'
+  nodes{ ... on PullRequest { number title mergedAt
+    closingIssuesReferences(first:100){ pageInfo{hasNextPage} nodes{ number } } } } } }'
 : > "$RUN_DIR/shipped-pages.jsonl"; SWEEP_CURSOR="null"; SWEEP_PAGE=0; SHIPPED_TRUNCATED=false
 while :; do
   SWEEP_PAGE=$(( SWEEP_PAGE + 1 ))
-  SWEEP_RESP=$(pr_facts_gh api --hostname "$HOST" graphql -f query="$SWEEP_GQL" -f q="$SWEEP_Q" -F after="$SWEEP_CURSOR") \
+  issue_gh api --hostname "$HOST" graphql -f query="$SWEEP_GQL" -f q="$SWEEP_Q" -F after="$SWEEP_CURSOR" \
+    > "$RUN_DIR/sweep-page.json" \
     || { echo "merged-PR sweep failed on page $SWEEP_PAGE — already-fixed detection incomplete" >> "$RUN_DIR/warnings.txt"; SHIPPED_TRUNCATED=true; break; }
-  pr_facts_graphql_ok "$SWEEP_RESP" \
-    || { echo "merged-PR sweep returned partial data on page $SWEEP_PAGE" >> "$RUN_DIR/warnings.txt"; SHIPPED_TRUNCATED=true; break; }
-  printf '%s\n' "$SWEEP_RESP" >> "$RUN_DIR/shipped-pages.jsonl"
-  if [ "$(jq -r '.data.search.pageInfo.hasNextPage' <<<"$SWEEP_RESP")" != "true" ]; then break; fi
+  if ! jq -e '(.errors // []) | length == 0' "$RUN_DIR/sweep-page.json" >/dev/null 2>&1 \
+     || ! jq -e '.data.search.nodes | type == "array"' "$RUN_DIR/sweep-page.json" >/dev/null 2>&1; then
+    echo "merged-PR sweep returned partial or malformed data on page $SWEEP_PAGE" >> "$RUN_DIR/warnings.txt"; SHIPPED_TRUNCATED=true; break
+  fi
+  jq -c . "$RUN_DIR/sweep-page.json" >> "$RUN_DIR/shipped-pages.jsonl"
+  if [ "$(jq -r '.data.search.pageInfo.hasNextPage' "$RUN_DIR/sweep-page.json")" != "true" ]; then break; fi
   if [ "$SWEEP_PAGE" -ge 5 ]; then SHIPPED_TRUNCATED=true; break; fi
-  SWEEP_CURSOR=$(jq -r '.data.search.pageInfo.endCursor' <<<"$SWEEP_RESP")
+  SWEEP_CURSOR=$(jq -r '.data.search.pageInfo.endCursor' "$RUN_DIR/sweep-page.json")
 done
-jq -sc '[.[].data.search.nodes[] | {number, title, mergedAt, issues: [.closingIssuesReferences.nodes[].number]}]' \
+jq -sc '[.[].data.search.nodes[] | {number, title, mergedAt,
+          issues: [.closingIssuesReferences.nodes[].number],
+          issues_truncated: (.closingIssuesReferences.pageInfo.hasNextPage == true)}]' \
   "$RUN_DIR/shipped-pages.jsonl" > "$RUN_DIR/shipped.json"
+jq -r '.[] | select(.issues_truncated) | "PR #\(.number) closes more than 100 issues — matches against it are unknown, not absent"' \
+  "$RUN_DIR/shipped.json" >> "$RUN_DIR/warnings.txt"
 if [ "$SHIPPED_TRUNCATED" = true ]; then
   echo "merged-PR sweep stopped after $SWEEP_PAGE page(s) — merged work since $SWEEP_SINCE may be unexamined" >> "$RUN_DIR/warnings.txt"
 fi
@@ -274,11 +352,13 @@ fi
 Cost: one GraphQL call per 100 merged PRs in the window, capped at five pages (500 PRs);
 the reference repo merges ~10–15 a day, so a 30-day window is four calls. Truncation comes
 from pagination — `hasNextPage` still true at the page cap, or a failed page — never from
-inspecting timestamps in a sample. `SHIPPED_TRUNCATED=true` produces a `warnings[]` line
-and blocks nothing; the verdict vocabulary has no confidence grade in this version, so the
-prose carries the caveat. This block is executed against scripted pages by the test file.
+inspecting timestamps in a sample. A PR closing more than 100 issues is carried with
+`issues_truncated: true`; §1h treats it as an **unknown** match for every issue it does not
+list, and the prose says so. Both truncations produce `warnings[]` lines and block nothing;
+the verdict vocabulary has no confidence grade in this version, so the prose carries the
+caveat. This block is executed against scripted pages by the test file.
 
-### §1c Comments and the marker (pass B)
+### §1d Comments and the marker (pass B)
 
 Comments come from REST, not `gh issue view --json comments`, because editing in place
 needs the **numeric** comment id and the view command returns node ids:
@@ -293,17 +373,19 @@ jq -c '[.[][] | {id, login: (.user.login // null), body, created_at, updated_at}
 
 Then find this skill's own comment. Two filters, both mandatory: the comment's author is
 `$ME` (another user's marker is theirs to edit, and a comment this token cannot edit must
-never be targeted), and the body's **first line** matches the exact v1 grammar — a quoted
-marker mid-body, or a future `v10`, does not match:
+never be targeted), and the body's **first line is exactly** the v1 marker — anchored at
+both ends, tested on the first line alone, so a quoted marker further down, trailing text
+after `-->`, or a future `v10` does not match:
 
 ```bash
-MARKER_RE='^<!-- issue-details:v1 dev=[0-9a-f]{40} -->'
+MARKER_RE='^<!-- issue-details:v1 dev=[0-9a-f]{40} -->$'
 MARKER_ID=$(jq -r --arg me "$ME" --arg re "$MARKER_RE" \
-  '[.[] | select(.login == $me) | select(.body | test($re))] | sort_by(.id) | .[0].id // empty' \
+  '[.[] | select(.login == $me) | select(.body | split("\n")[0] | test($re))] | sort_by(.id) | .[0].id // empty' \
   "$RUN_DIR/comments-${ISSUE_NUM}.json")
 MARKER_COUNT=$(jq --arg me "$ME" --arg re "$MARKER_RE" \
-  '[.[] | select(.login == $me) | select(.body | test($re))] | length' \
+  '[.[] | select(.login == $me) | select(.body | split("\n")[0] | test($re))] | length' \
   "$RUN_DIR/comments-${ISSUE_NUM}.json")
+COMMENT_IDS=$(jq -c '[.[].id] | sort' "$RUN_DIR/comments-${ISSUE_NUM}.json")
 MARKER_UPDATED=""
 if [ "$MARKER_COUNT" -gt 1 ]; then
   COMMENT_ACTION="refuse"
@@ -321,26 +403,17 @@ fi
 `MARKER_COUNT > 1` means an earlier run posted twice (a race, or a hand-pasted copy). This
 skill never deletes a comment, and editing one while leaving the other standing keeps two
 verdicts on the issue forever, so the action is `refuse`: the issue is evaluated and
-reported, nothing is written, and the warning names the cleanup. `MARKER_UPDATED` is the
-snapshot the gate re-checks before writing (`execute.md` §3). This block is executed
-against fixtures by the test file — the doc is the code under test; edit both together.
+reported, nothing is written, and the warning names the cleanup. `MARKER_UPDATED` and
+`COMMENT_IDS` (every comment id, sorted) are the snapshot the gate re-checks before writing
+(`execute.md` §3). This block is executed against fixtures by the test file.
 
-### §1d Existing effort block
+### §1e Existing effort block
 
-Detent reads effort from a fenced `detent-agent` block in the body. Read it; never write it:
+Read in §1b's load block (`EXISTING_EFFORT`), from the body file, never from anywhere
+else. Detent reads effort from the fenced `detent-agent` block; this skill reads it and
+never writes it.
 
-```bash
-EXISTING_EFFORT=$(awk '
-  /^```detent-agent[[:space:]]*$/ {inb=1; next}
-  /^```/ {inb=0}
-  inb && $1 == "effort:" {print $2; exit}
-' "$RUN_DIR/body-${ISSUE_NUM}.md")
-```
-
-Empty means no block. Whatever value is there — including `max`, which only the operator may
-set — is reported as-is beside the proposal (`triage.md` §4); the issue body is never edited.
-
-### §1e Mechanical noise signal
+### §1f Mechanical noise signal
 
 Runs **here, before any search**, so a noise issue never spends the two search calls
 (`triage.md` §1 row 1 is this block; the model does not get to override it). Two signals:
@@ -361,105 +434,83 @@ if [ -n "$NOISE_SIGNAL" ]; then CLASSIFICATION="noise"; fi
 Prose that merely mentions "the build" does not match — the signal needs a path segment.
 This block is executed against fixtures by the test file.
 
-### §1f Board state
+### §1g Board state
+
+The same Projects v2 query `lib/pr-facts.sh`'s `pr_facts_board` runs (verified live on
+the reference repo), issued through `issue_gh` to a file so a 403 here stops the batch:
 
 ```bash
-pr_facts_board "$HOST" "$OWNER" "$NAME" issue "$ISSUE_NUM" > "$RUN_DIR/board-${ISSUE_NUM}.json" || ISSUE_FAILED=1
-BOARD_STATUS=$(jq -r '[.items[] | select(.fields.Status != null)] | .[0].fields.Status // "none"' \
+BOARD_GQL='query($o:String!,$n:String!,$num:Int!){ repository(owner:$o,name:$n){ issue(number:$num){
+  projectItems(first:20){ nodes{ id project{ id title }
+    fieldValues(first:30){ nodes{ ... on ProjectV2ItemFieldSingleSelectValue { name field{ ... on ProjectV2FieldCommon { name } } } } } } } } } }'
+issue_gh api --hostname "$HOST" graphql -f query="$BOARD_GQL" -f o="$OWNER" -f n="$NAME" -F num="$ISSUE_NUM" \
+  > "$RUN_DIR/board-${ISSUE_NUM}.json" || ISSUE_FAILED=1
+BOARD_STATUS=$(jq -r '[.data.repository.issue.projectItems.nodes[]?.fieldValues.nodes[]? | select(.field.name == "Status") | .name] | .[0] // "none"' \
   "$RUN_DIR/board-${ISSUE_NUM}.json" 2>/dev/null || echo none)
-BOARD_PRIORITY=$(jq -r '[.items[] | select(.fields.Priority != null)] | .[0].fields.Priority // "none"' \
+BOARD_PRIORITY=$(jq -r '[.data.repository.issue.projectItems.nodes[]?.fieldValues.nodes[]? | select(.field.name == "Priority") | .name] | .[0] // "none"' \
   "$RUN_DIR/board-${ISSUE_NUM}.json" 2>/dev/null || echo none)
 ```
 
 Read for the report and for the priority-disagreement note only. Board `Status` and
-`Priority` are never written by this skill, in any mode. `pr_facts_board` carries its own
-retry wrapper; a failure marks this issue unevaluated, and a rate-limit condition behind
-it is caught by the next issue's gate (§1g). Select the item whose project id equals
-`detent.yaml`'s `tracker.project_slug` when several exist; verified on the reference repo
-the issue carries exactly one item.
-
-### §1g Per-issue gate
-
-The full gate, before the costly work, in one `rate_limit` read. Core or GraphQL below
-reserve **stops the batch** (this issue and every later one become unevaluated); the search
-bucket below reserve is a sleep to its reset — it refills every minute, and a batch two
-issues in should not abort over it:
-
-```bash
-RL_JSON=$(issue_gh api --hostname "$HOST" rate_limit) || RL_JSON=""
-if [ -z "$RL_JSON" ]; then
-  STOP_BATCH=1; STOP_REASON="rate_limit unreadable"
-else
-  RL_CORE=$(jq '.resources.core.remaining' <<<"$RL_JSON")
-  RL_GQL=$(jq '.resources.graphql.remaining' <<<"$RL_JSON")
-  RL_SEARCH=$(jq '.resources.search.remaining' <<<"$RL_JSON")
-  RL_SEARCH_RESET=$(jq '.resources.search.reset' <<<"$RL_JSON")
-  if [ "$RL_CORE" -lt "$REST_RESERVE" ] || [ "$RL_GQL" -lt "$GRAPHQL_RESERVE" ]; then
-    STOP_BATCH=1; STOP_REASON="rate limit below reserve (core $RL_CORE, graphql $RL_GQL)"
-  elif [ "$RL_SEARCH" -lt "$SEARCH_RESERVE" ]; then
-    RL_NOW=$(date -u +%s)
-    if [ "$RL_SEARCH_RESET" -gt "$RL_NOW" ]; then sleep $(( RL_SEARCH_RESET - RL_NOW + 1 )); fi
-  fi
-fi
-if [ "$STOP_BATCH" = 1 ]; then ISSUE_FAILED=1; ISSUE_ERROR="$STOP_REASON"; fi
-```
-
-This block is executed against fixtures by the test file.
+`Priority` are never written by this skill, in any mode. When several project items exist,
+prefer the one whose project id equals `detent.yaml`'s `tracker.project_slug`; verified on
+the reference repo the issue carries exactly one item.
 
 ### §1h Dedupe candidates
 
-Skipped when the issue is `noise` (§1e) or with `--no-dup-search`; the skip still
-initialises every result the verdict guard reads, so a skipped search is an empty set, not
-a missing file:
+Skipped when the issue is `noise` (§1f) or with `--no-dup-search`. The skip initialises
+every result the verdict guard reads — a skipped search is an empty set, not a missing
+file — and the term extraction and both searches sit inside the guard, so a literal
+executor issues **zero** search calls on a noise issue:
 
 ```bash
 if [ -n "${NOISE_SIGNAL:-}" ] || [ "${DO_DUP:-1}" = 0 ]; then
-  TERMS=""; printf '[]' > "$RUN_DIR/dup-issues-${ISSUE_NUM}.json"; printf '[]' > "$RUN_DIR/dup-prs-${ISSUE_NUM}.json"
   DEDUPE_SKIPPED=1
 else
   DEDUPE_SKIPPED=0
 fi
+TERMS=""; printf '[]' > "$RUN_DIR/dup-issues-${ISSUE_NUM}.json"; printf '[]' > "$RUN_DIR/dup-prs-${ISSUE_NUM}.json"
+if [ "$DEDUPE_SKIPPED" != 1 ]; then
+  # Title terms: lowercase tokens, stop-words and conventional-commit verbs dropped, tokens
+  # under four characters dropped, the three longest kept (length is the cheap proxy for
+  # distinctiveness; ties break alphabetically so the query is reproducible). The scope
+  # word of a `scope: title` prefix is KEPT — `engagement:` and `ledger:` are the strongest
+  # topical signal a title carries in the reference repo.
+  TERMS=$(printf '%s' "$ISSUE_TITLE" \
+    | tr -cs 'A-Za-z0-9_' '\n' | tr 'A-Z' 'a-z' \
+    | grep -vxE 'a|an|the|and|or|of|to|in|on|for|with|from|by|is|are|be|not|no|when|because|never|ever|any|all|into|via|as|at|it|its|this|that|we|our|per|vs|use|uses|using|add|adds|fix|fixes|feat|docs|test|chore|refactor|perf|make|makes|support|allow|allows|should|can|does|do|after|before|instead|still|only|new|without|across|between|under|over|each|every' \
+    | awk 'length($0) >= 4 && !seen[$0]++' \
+    | awk '{print length($0) "\t" $0}' | sort -k1,1rn -k2,2 | head -3 | cut -f2 \
+    | tr '\n' ' ' | sed 's/ $//')
+  if [ "$(printf '%s' "$TERMS" | wc -w | tr -d ' ')" -ge 2 ]; then
+    # GitHub ANDs the terms. `gh search issues` excludes PRs by default (verified);
+    # `gh pr list --search` charges the search bucket as well as GraphQL. The issue itself
+    # always matches its own terms and is dropped.
+    issue_gh search issues --repo "$SLUG" --state open --limit 10 "$TERMS" \
+      --json number,title,url,labels,updatedAt > "$RUN_DIR/dup-issues-${ISSUE_NUM}.raw" || ISSUE_FAILED=1
+    jq -c --argjson me "$ISSUE_NUM" '[.[] | select(.number != $me)]' \
+      "$RUN_DIR/dup-issues-${ISSUE_NUM}.raw" > "$RUN_DIR/dup-issues-${ISSUE_NUM}.json" || ISSUE_FAILED=1
+    issue_gh pr list -R "$SLUG" --state open --limit 10 --search "$TERMS" \
+      --json number,title,url,isDraft,closingIssuesReferences \
+      > "$RUN_DIR/dup-prs-${ISSUE_NUM}.json" || ISSUE_FAILED=1
+  else
+    DEDUPE_SKIPPED=1   # title too generic to search → verdict `unclear` with that reason
+  fi
+fi
 ```
 
-*Title terms.* Mechanical: lowercase tokens of the title, stop-words and conventional-commit
-verbs dropped, tokens shorter than four characters dropped, the three longest kept (length
-is the cheap proxy for distinctiveness; ties break alphabetically so the query is
-reproducible). The scope word of a `scope: title` prefix is **kept** — in the reference
-repo `engagement:` and `ledger:` are the strongest topical signal a title carries.
-
-```bash
-TERMS=$(printf '%s' "$ISSUE_TITLE" \
-  | tr -cs 'A-Za-z0-9_' '\n' | tr 'A-Z' 'a-z' \
-  | grep -vxE 'a|an|the|and|or|of|to|in|on|for|with|from|by|is|are|be|not|no|when|because|never|ever|any|all|into|via|as|at|it|its|this|that|we|our|per|vs|use|uses|using|add|adds|fix|fixes|feat|docs|test|chore|refactor|perf|make|makes|support|allow|allows|should|can|does|do|after|before|instead|still|only|new|without|across|between|under|over|each|every' \
-  | awk 'length($0) >= 4 && !seen[$0]++' \
-  | awk '{print length($0) "\t" $0}' | sort -k1,1rn -k2,2 | head -3 | cut -f2 \
-  | tr '\n' ' ' | sed 's/ $//')
-```
-
-Fewer than two terms → the searches are skipped and the verdict is `unclear` with reason
-`title too generic to search`.
-
-*The two searches.* GitHub ANDs the terms. `gh search issues` excludes PRs by default
-(verified), and `gh pr list --search` charges the search bucket as well as GraphQL. The
-issue itself always matches its own terms and is dropped:
-
-```bash
-issue_gh search issues --repo "$SLUG" --state open --limit 10 "$TERMS" \
-  --json number,title,url,labels,updatedAt > "$RUN_DIR/dup-issues-${ISSUE_NUM}.raw" || ISSUE_FAILED=1
-jq -c --argjson me "$ISSUE_NUM" '[.[] | select(.number != $me)]' \
-  "$RUN_DIR/dup-issues-${ISSUE_NUM}.raw" > "$RUN_DIR/dup-issues-${ISSUE_NUM}.json" || ISSUE_FAILED=1
-issue_gh pr list -R "$SLUG" --state open --limit 10 --search "$TERMS" \
-  --json number,title,url,isDraft,closingIssuesReferences \
-  > "$RUN_DIR/dup-prs-${ISSUE_NUM}.json" || ISSUE_FAILED=1
-```
-
-*Merged since filing, naming this issue* — from the run-wide sweep (§1b), no extra call.
-`mergedAt` and `createdAt` are both Zulu-form, so the lexical compare is sound:
+*Merged since filing, naming this issue* — from the run-wide sweep (§1c), no extra call.
+`mergedAt` and `createdAt` are both Zulu-form, so the lexical compare is sound. A PR whose
+closing list was truncated and does not name this issue is an **unknown** match, listed
+separately and named in the prose, never counted as absent:
 
 ```bash
 jq -c --arg since "$ISSUE_CREATED" --argjson me "$ISSUE_NUM" \
   '[.[] | select(.mergedAt >= $since) | select(.issues | index($me) != null)]' \
   "$RUN_DIR/shipped.json" > "$RUN_DIR/fixed-by-${ISSUE_NUM}.json"
+jq -c --arg since "$ISSUE_CREATED" --argjson me "$ISSUE_NUM" \
+  '[.[] | select(.mergedAt >= $since) | select(.issues_truncated) | select(.issues | index($me) == null) | .number]' \
+  "$RUN_DIR/shipped.json" > "$RUN_DIR/fixed-by-unknown-${ISSUE_NUM}.json"
 ```
 
 *Open PRs naming this issue* — from the run-wide list (§0e):

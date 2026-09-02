@@ -78,7 +78,7 @@ Everything before the Phase 6 answer is read-only, by construction:
    creation, and never touches the working tree.
 
 Past the answer, the write set is exactly three commands, reached only through the
-guarded dispatcher in `execute.md` §4: **one** of create-comment or edit-marker-in-place
+guarded dispatcher in `execute.md` §4 (the create is a bare, non-retrying `gh api -X POST`): **one** of create-comment or edit-marker-in-place
 per issue, then `triage:needs-decision` only when the comment landed and
 `needs_decision` is true — and none of them unless the pre-write refresh passed and the
 issue is still open. Board `Status` and
@@ -130,8 +130,8 @@ for arg in $ARGUMENTS; do
     --*)             echo "issue-details: unknown flag $arg" >&2; exit 2 ;;
     https://*)       # one full issue URL: host, owner/repo, and number all come from it
       URL_HOST=$(printf '%s' "$arg" | sed -nE 's#^https?://([^/]+)/.*#\1#p')
-      URL_SLUG=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/issues/[0-9]+.*#\1#p')
-      URL_NUM=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/[^/]+/[^/]+/issues/([0-9]+).*#\1#p')
+      URL_SLUG=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/issues/[0-9]+/?$#\1#p')
+      URL_NUM=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/[^/]+/[^/]+/issues/([0-9]+)/?$#\1#p')
       [ -n "$URL_SLUG" ] && [ -n "$URL_NUM" ] || { echo "issue-details: not an issue URL: $arg" >&2; exit 2; }
       ISSUE_ARGS="$ISSUE_ARGS $URL_NUM" ;;
     *)
@@ -186,15 +186,15 @@ bodies. The searches are the bound, at 30 per minute account-wide.
 | Phase | What | Detail file |
 |---|---|---|
 | 0 | Preflight: identity and the running user, auth, rate gate, base-tip pin, run dir, run-wide lists (merged PRs, open PRs, goal registry), `--since` selection | `facts.md` §0 |
-| 1 | Pass A per issue: the record; then the run-wide merged-PR sweep from the earliest filing date; pass B per issue: comments and the owned marker, existing effort block, the mechanical noise signal (before any search), board state, the per-issue rate gate, dedupe candidates, goal references | `facts.md` §1 |
-| 2 | Classification (noise already settled by `facts.md` §1e) | `triage.md` §1 |
+| 1 | Pass A per issue: the rate gate, then the record (failures persisted); the gated run-wide merged-PR sweep from the earliest filing date; pass B per issue: the gate, reload from `issue-<n>.json`, comments and the owned marker, the mechanical noise signal (before any search), board state, dedupe candidates, goal references | `facts.md` §1 |
+| 2 | Classification (noise already settled by `facts.md` §1f) | `triage.md` §1 |
 | 3 | Verdict from the candidates, then the vocabulary guard | `triage.md` §2–§3 |
 | 4 | Goal, priority, effort, the social rule, `needs_decision` | `triage.md` §4–§6 |
 | 5 | Draft the comment; render the report and `facts.json` | `output.md` |
 | 6 | Approval gate: post / print only / stop | `execute.md` |
 
 The rate gate runs in Phase 0 and in full again before each issue's costly work
-(`facts.md` §1g); a rate stop mid-batch leaves the remaining issues `unevaluated`.
+(`facts.md` §1a); a rate stop mid-batch leaves the remaining issues `unevaluated`.
 
 ## Output template
 
@@ -219,7 +219,7 @@ getparable/parable · by michaelhvisser, you · OPEN · board Todo/none · creat
 
 - `facts.md` — Phases 0–1: identity, auth, rate gate, base-tip pin, run dir, run-wide
   lists and the goal registry, `--since`; per issue: record, comments and marker, existing
-  effort, the noise signal, board, the per-issue gate, dedupe candidates, goal references
+  effort, the noise signal, board, dedupe candidates, goal references
 - `triage.md` — Phases 2–4: classification table and the noise check, the verdict
   vocabulary and its guard, goal resolution, priority and effort tables with the effort
   guard, the social rule, `needs_decision`, the still-needed hook

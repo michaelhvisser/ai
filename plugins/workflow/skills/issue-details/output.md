@@ -10,7 +10,7 @@ consumer are *also* carried inside the JSON as `warnings[]`.
 ## §1 The marker comment
 
 One per issue, drafted to `$RUN_DIR/comment-<n>.md` before the gate and written only past
-it (`execute.md`). The marker is the **first line**, so `facts.md` §1b can find it with
+it (`execute.md`). The marker is the **first line**, so `facts.md` §1d can find it with
 `startswith`; the YAML block is fenced so a script can lift it without parsing prose; the
 prose follows with one line per fact, each carrying its citation.
 
@@ -122,7 +122,7 @@ Stdout carries this object and nothing else. The same object is written to
 Closed vocabularies a consumer may branch on: `classification`, `verdict`, `priority`,
 `effort`, `effort_stance ∈ {propose, agree, disagree}`, `goal.source ∈ {own-label,
 reference, none}`, `comment.action ∈ {create, edit, refuse, none}` (`refuse` when more
-than one owned marker comment exists — `facts.md` §1c; `none` for a closed issue).
+than one owned marker comment exists — `facts.md` §1d; `none` for a closed issue).
 `unevaluated[]` is `[{number, reason}]` for every selected issue that did not complete
 (`facts.md` §1); an issue is either fully in `issues[]` or listed there, never half-done.
 

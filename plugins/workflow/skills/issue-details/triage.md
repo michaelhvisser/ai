@@ -22,7 +22,7 @@ wins.
 
 Judgement without a citation is not a `bug`. When the classifier cannot name where the
 expected behaviour is defined, the class is `question`, and `needs_decision` follows (§6).
-The mechanical noise check is `facts.md` §1h — it runs in Phase 1, **before** the searches,
+The mechanical noise check is `facts.md` §1f — it runs in Phase 1, **before** the searches,
 and it is the only rule a model does not get to override: when `NOISE_SIGNAL` is set,
 `CLASSIFICATION` is already `noise` by the time this table is read.
 
@@ -43,7 +43,7 @@ of the closed vocabulary:
 
 | Verdict | Meaning | Requires |
 |---|---|---|
-| `needed` | no duplicate and no fixing PR found; the issue stands | a problem statement exists (`facts.md` §1a body non-empty), and the searches ran |
+| `needed` | no duplicate and no fixing PR found; the issue stands | a problem statement exists (`facts.md` §1b body non-empty), and the searches ran |
 | `likely-duplicate-of #N` | #N is open and covers the same problem | #N appeared in `CANDIDATES_OPEN` |
 | `already-fixed-by #N` | #N merged into the base branch after filing and names this issue | #N appeared in `CANDIDATES_SHIPPED` |
 | `unclear` | searches skipped or degraded, no problem statement, several plausible canonicals, or a candidate the orchestrator cannot resolve from titles and bodies | the reason, in one line |
@@ -93,7 +93,7 @@ esac
 which:
 
 1. `own-label` — the issue already carries a `goal:*` label. Keep it; propose nothing.
-2. `reference` — a `facts.md` §1f reference names an issue in the goal registry. Propose
+2. `reference` — a `facts.md` §1i reference names an issue in the goal registry. Propose
    stamping that label on this issue (the proposal lives in the comment; this skill applies
    no label but `triage:needs-decision`). Two references resolving to **different** goal
    labels → `goal: null`, `DECISION_REQUIRED=1`, reason `two goal epics referenced: #A
@@ -135,7 +135,7 @@ conditions are each named in the prose when they fire.
 | `xhigh` | New subsystem or tricky state: Temporal workflows, concurrency/retry/recovery logic, migration-heavy or webhook-ordering work |
 
 `max` is reserved for the operator and is **never proposed**. The guard clamps any answer
-outside the three tiers, and reconciles it with the issue's own block (`facts.md` §1c),
+outside the three tiers, and reconciles it with the issue's own block (`facts.md` §1b),
 which is reported beside the proposal and never overwritten:
 
 ```bash
