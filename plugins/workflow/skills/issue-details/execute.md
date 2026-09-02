@@ -28,6 +28,13 @@ question as concise text in the final response and stop; the user's answer resum
 Skip the question entirely when nothing could be posted: every evaluated issue is closed
 or `refuse`, or the run evaluated nothing.
 
+**Every `finalize` is from scratch.** It deletes every `result-*.json`, `comment-*.md`,
+and `prose-*.json`, restarts its own ledger (`unevaluated-finalize.tsv`, merged with
+`collect`'s in the report and `facts.json`), and stamps `finalize_stamp` into `run.json`.
+`post` writes an issue only when `state-<n>.json` says `evaluated: true` **and** a
+`result-<n>.json` exists **and** its `evaluated_at` is not older than that stamp — so a
+judgement rejected on a second pass can never post the result of the first.
+
 ## §2 The write set
 
 Three commands, and only these, each repo-qualified, each reachable **only** from

@@ -158,9 +158,12 @@ issue `unevaluated` with the reason. Every prose value is rendered on one line (
 collapsed), `@mentions` are wrapped in backticks so nobody is pinged, and a `#N` is kept
 only when N appears in the fetched candidate set (the same rule as `canonical`) —
 otherwise it renders as `#N (unverified)`. On another author's issue, prose containing a
-close / park / wontfix verb makes the issue `unevaluated` with reason `social rule: prose
-proposes close on another author's issue`. Cite paths and fetched numbers; do not write
-instructions.
+close / park / wontfix verb — checked on a normalised form, so Markdown and Unicode
+tricks do not hide it — makes the issue `unevaluated` with reason `social rule: prose
+proposes close on another author's issue`. The prose renders inside a fenced `text`
+block, never as Markdown (`triage.md` §8). Cite paths and fetched numbers; do not write
+instructions. Re-running `finalize` after changing a judgement is safe: it starts from
+scratch and `post` refuses any result older than the latest pass.
 
 ## Model roles
 

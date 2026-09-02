@@ -167,6 +167,17 @@ in the prose refuses the whole issue (`social rule: prose proposes close on anot
 author's issue`), because the social rule in §5 is about what the author reads, not
 about which field it came from.
 
+Two mechanisms make that hold against Markdown and Unicode, not just plain text. The
+verb check runs on a **normalised** form of the raw judgement (`id_normalise`): NFKC-folded
+when `python3` is present, lower-cased, HTML comments removed, everything outside
+`[a-z0-9#]` dropped — so `cl**ose**`, `pa<!-- -->rk`, `won’t fix`, and `w o n t fix` all
+read as the verb they are; the byte-level fallback drops non-ASCII instead of folding it,
+which still defeats punctuation tricks. And the rendered prose is **never interpreted as
+Markdown**: every untrusted string sits inside one fenced `text` block (`output.md` §1),
+where emphasis, comments, links, and mentions are literal, with backticks replaced and a
+zero-width space after every `@`. A `[proof](url/#4242)` therefore shows its
+`#4242 (unverified)` marking in the open rather than swallowing it into a link title.
+
 ## §7 Still-needed hook — not in this version
 
 The design's Phase-1 still-needed check (pinned `git show`/`git grep` reads at `$DEV_SHA`,

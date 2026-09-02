@@ -49,9 +49,14 @@ id_state_get_json() { jq -c "$2" "$(id_state_path "$1")"; }
 
 id_warn() { printf '%s\n' "$1" | tee -a "$RUN_DIR/warnings.txt" >&2; }
 id_unevaluated() {  # <n> <reason>
-  printf '%s\t%s\n' "$1" "$2" >> "$RUN_DIR/unevaluated.tsv"
-  id_state_init "$1"; id_state_set "$1" error '$r' --arg r "$2"; id_state_set "$1" evaluated 'false'
+  printf '%s\t%s\n' "$1" "$2" >> "$RUN_DIR/${UNEV_FILE:-unevaluated.tsv}"
+  rm -f "$RUN_DIR/result-$1.json" "$RUN_DIR/comment-$1.md" "$RUN_DIR/prose-$1.json"
+  if [ "${UNEV_TOUCH_STATE:-1}" = 1 ]; then
+    id_state_init "$1"; id_state_set "$1" error '$r' --arg r "$2"; id_state_set "$1" evaluated 'false'
+  fi
 }
+# id_unev_all: collect's ledger plus the current finalize's, for the report and facts.json
+id_unev_all() { cat "$RUN_DIR/unevaluated.tsv" "$RUN_DIR/unevaluated-finalize.tsv" 2>/dev/null || true; }
 
 # ------------------------------------------------------------------ gh -----
 # id_gh <out-file> <gh-args...>: pr_facts_gh to a file. Never on the left of a
@@ -399,12 +404,24 @@ id_effort_guard() {
 }
 id_quarter() { local m; m=$(date -u +%m); m="${m#0}"; printf 'q%s-%s\n' "$(( (m - 1) / 3 + 1 ))" "$(date -u +%Y)"; }
 
+# id_normalise: stdin → NFKC-folded (python3 when available), lower-cased, HTML
+# comments removed, everything outside [a-z0-9#] dropped. The byte-level fallback
+# drops non-ASCII rather than folding it, which still defeats punctuation tricks.
+id_normalise() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,re,unicodedata; t=unicodedata.normalize("NFKC", sys.stdin.read()).lower(); t=re.sub(r"<!--.*?-->", "", t, flags=re.S); sys.stdout.write(re.sub(r"[^a-z0-9#]", "", t))'
+  else
+    tr 'A-Z' 'a-z' | sed -E 's/<!--([^-]|-[^-])*-->//g' | tr -cd 'a-z0-9#'
+  fi
+}
+
 # ------------------------------------------------------------- finalize ----
 # Reads state-<n>.json + judgement-<n>.json, applies the guards, writes
 # result-<n>.json, comment-<n>.md, report.txt, facts.json. Nothing is fetched.
 id_finalize_issue() {
   local n="$1" st jd
   st=$(id_state_path "$n"); jd="$RUN_DIR/judgement-$n.json"
+  rm -f "$RUN_DIR/result-$n.json" "$RUN_DIR/comment-$n.md" "$RUN_DIR/prose-$n.json"
   [ "$(jq -r .evaluated "$st")" = true ] || return 0
   if [ ! -f "$jd" ]; then id_unevaluated "$n" "no judgement-$n.json — the orchestrator has not judged this issue"; return 0; fi
   if ! jq -e '(.classification|type=="string") and (.verdict|type=="string") and (.priority|type=="string") and (.proposed_effort|type=="string")
@@ -425,13 +442,21 @@ id_finalize_issue() {
   # backticks, #N kept only when N is in the fetched candidate set, else marked.
   local allowed
   allowed=$(jq -c '[(.candidates_open // [])[], (.candidates_shipped // [])[], (.fixed_by_unknown // [])[], (.in_flight // [])[], (.goal_refs // [])[]] | unique' "$st")
+  # Rendered inside a fenced ```text block (id_render_comment), so nothing here is
+  # Markdown: emphasis, HTML comments, links, and mentions are inert. Backticks are
+  # replaced so a value cannot close the fence; a zero-width space follows every @ so
+  # the text cannot become a mention anywhere it is copied.
   jq -c --argjson allowed "$allowed" '
-    def clean: gsub("[\r\n]+"; " ") | gsub("[[:space:]]+"; " ") | gsub("(?<u>@[A-Za-z0-9][A-Za-z0-9-]*)"; "`\(.u)`")
+    def clean: gsub("[\r\n]+"; " ") | gsub("[[:space:]]+"; " ") | gsub("`"; "\u0027") | gsub("@"; "@\u200b")
                | gsub("#(?<n>[0-9]+)"; (.n | tonumber) as $k | if ($allowed | index($k)) != null then "#\($k)" else "#\($k) (unverified)" end);
     {evidence: ((.evidence // {}) | with_entries(.value |= clean)), decision_reason: ((.decision_reason // null) | if . == null then null else clean end)}' \
     "$jd" > "$RUN_DIR/prose-$n.json"
-  if [ "$self" != true ] && jq -r '[.evidence[], (.decision_reason // "")] | join(" ")' "$RUN_DIR/prose-$n.json" \
-       | grep -qiE "(^|[^a-z])(close|closes|closed|closing|park|parked|parking|wontfix|won't fix|not planned)([^a-z]|$)"; then
+  # The close/park check runs on a NORMALISED form of the raw judgement — NFKC-folded
+  # (python3 when present), lower-cased, HTML comments dropped, everything outside
+  # [a-z0-9#] removed — so cl**ose**, pa<!-- -->rk, won’t fix, and wont fix all read
+  # as the verb they are.
+  if [ "$self" != true ] && jq -r '[(.evidence // {})[], (.decision_reason // "")] | join(" ")' "$jd" | id_normalise \
+       | grep -qE 'close|closing|park|parking|wontfix|notplanned'; then
     id_unevaluated "$n" "social rule: prose proposes close on another author's issue"; return 0
   fi
   local vg canon vnote eg effort stance enote
@@ -496,30 +521,42 @@ id_render_comment() {
   local n="$1" r="$RUN_DIR/result-$n.json" out="$RUN_DIR/comment-$n.md"
   {
     printf '<!-- issue-details:v1 dev=%s -->\n## Issue details\n\n' "$(jq -r .dev_sha "$r")"
-    printf '**#%s** %s\n\n' "$n" "$(jq -r .title "$r")"
     printf '```yaml\nclassification: %s\nverdict: %s\ncanonical: %s\ngoal: %s\npriority: %s\neffort: %s\nneeds_decision: %s\ndev_sha: %s\nevaluated_at: %s\n```\n\n' \
       "$(jq -r .classification "$r")" "$(jq -r .verdict "$r")" "$(jq -r '.canonical // "null" | if . == "null" then "null" else "\"" + . + "\"" end' "$r")" \
       "$(jq -r '.goal.label // "null" | if . == "null" then "null" else "\"" + . + "\"" end' "$r")" "$(jq -r .priority "$r")" "$(jq -r .effort "$r")" \
       "$(jq -r .needs_decision "$r")" "$(jq -r .dev_sha "$r")" "$(jq -r .evaluated_at "$r")"
-    printf -- '- classification: %s — %s\n' "$(jq -r .classification "$r")" "$(jq -r '(.noise_signal // "") as $s | if $s != "" then $s else (.evidence.classification // "") end' "$r")"
-    printf -- '- dedupe: %s\n' "$(jq -r '.dedupe | (if .skipped then "not run" else "searched `\(.terms)` → \(.open_issues | length) open issues, \(.open_prs | length) open PRs" end)
+    # Everything below is a fenced text block: the title and every prose value are
+    # untrusted, and inside the fence GFM interprets nothing.
+    printf '```text\n'
+    printf '#%s — %s\n' "$n" "$(jq -r '.title | gsub("[\r\n]+"; " ") | gsub("`"; "\u0027") | gsub("@"; "@\u200b")' "$r")"
+    printf 'classification: %s — %s\n' "$(jq -r .classification "$r")" "$(jq -r '(.noise_signal // "") as $s | if $s != "" then $s else (.evidence.classification // "") end' "$r")"
+    printf 'dedupe: %s\n' "$(jq -r '.dedupe | (if .skipped then "not run" else "searched [\(.terms)] → \(.open_issues | length) open issues, \(.open_prs | length) open PRs" end)
       + "; merged into base since filing naming this issue: " + (if (.fixed_by | length) == 0 then "none" else (.fixed_by | map("#\(.)") | join(", ")) end)
       + (if (.fixed_by_unknown | length) > 0 then " (unknown: " + (.fixed_by_unknown | map("#\(.)") | join(", ")) + " — closing list truncated)" else "" end)
       + "; in flight: " + (if (.in_flight | length) == 0 then "none" else (.in_flight | map("#\(.)") | join(", ")) end)' "$r")"
     [ -z "$(jq -r .verdict_note "$r")" ] || printf '  %s\n' "$(jq -r .verdict_note "$r")"
-    printf -- '- goal: %s — %s\n' "$(jq -r '.goal.label // "none"' "$r")" "$(jq -r '.goal | if .source == "own-label" then "own label" elif .source == "reference" then "via #\(.via) (proposed: stamp the label)" else .reason end' "$r")"
-    printf -- '- priority: %s — %s; board: %s / %s\n' "$(jq -r .priority "$r")" "$(jq -r '.evidence.priority // ""' "$r")" "$(jq -r '.board.status' "$r")" "$(jq -r '.board.priority' "$r")"
-    [ -z "$(jq -r '.priority_note // ""' "$r")" ] || printf '  %s\n' "$(jq -r .priority_note "$r")"
-    printf -- '- effort: %s — %s\n' "$(jq -r .effort "$r")" "$(jq -r 'if .effort_stance == "propose" then "proposed (no detent-agent block on the issue)" elif .effort_stance == "agree" then "agrees with the issue'"'"'s block" else "the issue'"'"'s block says \(.existing_effort); left as is" end + (if (.evidence.effort // "") != "" then "; " + .evidence.effort else "" end)' "$r")"
+    printf 'goal: %s — %s\n' "$(jq -r '.goal.label // "none"' "$r")" "$(jq -r '.goal | if .source == "own-label" then "own label" elif .source == "reference" then "via #\(.via) (proposed: stamp the label)" else .reason end' "$r")"
+    printf 'priority: %s — %s; board: %s / %s\n' "$(jq -r .priority "$r")" "$(jq -r '.evidence.priority // ""' "$r")" "$(jq -r '.board.status' "$r")" "$(jq -r '.board.priority' "$r")"
+    [ -z "$(jq -r '.priority_note // ""' "$r")" ] || printf '  %s\n' "$(jq -r '.priority_note | gsub("@"; "@\u200b")' "$r")"
+    printf 'effort: %s — %s\n' "$(jq -r .effort "$r")" "$(jq -r 'if .effort_stance == "propose" then "proposed (no detent-agent block on the issue)" elif .effort_stance == "agree" then "agrees with the issue'"'"'s block" else "the issue'"'"'s block says \(.existing_effort); left as is" end + (if (.evidence.effort // "") != "" then "; " + .evidence.effort else "" end)' "$r")"
     [ -z "$(jq -r .effort_note "$r")" ] || printf '  %s\n' "$(jq -r .effort_note "$r")"
-    printf -- '- decision: %s\n' "$(jq -r 'if .needs_decision then (.decision_reason // "a decision is required (see verdict / class)") else "none needed" end' "$r")"
-    printf -- '- still-needed: not checked (v1)\n'
-    [ -z "$(jq -r '.recommendation // ""' "$r")" ] || printf '%s\n' "$(jq -r .recommendation "$r")"
+    printf 'decision: %s\n' "$(jq -r 'if .needs_decision then (.decision_reason // "a decision is required (see verdict / class)") else "none needed" end' "$r")"
+    printf 'still-needed: not checked (v1)\n'
+    [ -z "$(jq -r '.recommendation // ""' "$r")" ] || printf 'recommendation: %s\n' "$(jq -r '.recommendation | gsub("@"; "@\u200b")' "$r")"
+    printf '```\n'
   } > "$out"
 }
 
 id_finalize() {
-  local n
+  # Every finalize is from scratch: derived artifacts go, the finalize ledger restarts,
+  # and a stamp in run.json lets `post` refuse any result older than this pass.
+  local n stamp tmp
+  rm -f "$RUN_DIR"/result-*.json "$RUN_DIR"/comment-*.md "$RUN_DIR"/prose-*.json
+  : > "$RUN_DIR/unevaluated-finalize.tsv"
+  stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ); tmp="$RUN_DIR/run.json.tmp.$$"
+  jq --arg s "$stamp" '.finalize_stamp = $s' "$RUN_DIR/run.json" > "$tmp" && mv "$tmp" "$RUN_DIR/run.json"
+  UNEV_FILE=unevaluated-finalize.tsv UNEV_TOUCH_STATE=0
+  export UNEV_FILE UNEV_TOUCH_STATE
   while IFS= read -r n; do [ -n "$n" ] && id_finalize_issue "$n"; done < "$RUN_DIR/selected.txt"
   id_render_report
   id_render_facts
@@ -531,7 +568,7 @@ id_render_report() {
     while IFS= read -r n; do
       [ -n "$n" ] || continue
       r="$RUN_DIR/result-$n.json"
-      if [ ! -f "$r" ]; then printf '=== #%s === unevaluated: %s\n\n' "$n" "$(awk -F'\t' -v n="$n" '$1 == n {print $2; exit}' "$RUN_DIR/unevaluated.tsv")"; continue; fi
+      if [ ! -f "$r" ]; then printf '=== #%s === unevaluated: %s\n\n' "$n" "$(id_unev_all | awk -F'\t' -v n="$n" '$1 == n {print $2; exit}')"; continue; fi
       jq -r --arg slug "$SLUG" '
         "=== #\(.number) · \(.title) ===\n" +
         "\($slug) · by \(.author // "(deleted)")\(if .self_authored then ", you" else "" end) · \(.state) · board \(.board.status)/\(.board.priority) · created \(.created_at[0:10])\n" +
@@ -554,7 +591,7 @@ id_render_facts() {
   files=$(ls "$RUN_DIR"/result-*.json 2>/dev/null || true)
   jq -n --slurpfile run "$RUN_DIR/run.json" \
      --slurpfile results <(if [ -n "$files" ]; then cat $files; fi) \
-     --slurpfile unev <(awk -F'\t' '{printf "{\"number\":%s,\"reason\":%s}\n", $1, ($2 | @json)}' "$RUN_DIR/unevaluated.tsv" 2>/dev/null || jq -nR 'inputs | split("\t") | {number: (.[0]|tonumber), reason: .[1]}' "$RUN_DIR/unevaluated.tsv") \
+     --slurpfile unev <(id_unev_all | jq -R 'select(length > 0) | split("\t") | {number: (.[0]|tonumber), reason: .[1]}') \
      --slurpfile warns <(jq -R . "$RUN_DIR/warnings.txt") \
      --arg labels "$(tr '\n' ' ' < "$RUN_DIR/goal-labels.txt")" --arg reg "$(grep -c . "$RUN_DIR/goal-registry.tsv" || true)" --arg run_dir "$RUN_DIR" \
      '{schema: 1, generated_at: (now | todate), host: $run[0].host, repo: $run[0].repo, base: $run[0].base, dev_sha: $run[0].base_sha, me: $run[0].me,
@@ -637,6 +674,10 @@ id_post() {
   while IFS= read -r n; do
     [ -n "$n" ] || continue
     [ -f "$RUN_DIR/result-$n.json" ] || continue
+    [ "$(jq -r '.evaluated // false' "$(id_state_path "$n")" 2>/dev/null)" = true ] || { printf '#%s skipped — not evaluated\n' "$n"; continue; }
+    if [ "$(jq -r '.evaluated_at // ""' "$RUN_DIR/result-$n.json")" \< "$(jq -r '.finalize_stamp // "9"' "$RUN_DIR/run.json")" ]; then
+      printf '#%s skipped — result predates the current finalize; re-run finalize\n' "$n"; continue
+    fi
     if [ "$(jq -r .state "$RUN_DIR/result-$n.json")" != OPEN ]; then printf '#%s skipped — issue is %s\n' "$n" "$(jq -r .state "$RUN_DIR/result-$n.json")"; continue; fi
     case "$(jq -r .comment.action "$RUN_DIR/result-$n.json")" in create|edit) ;; *) printf '#%s skipped — %s\n' "$n" "$(jq -r .comment.action "$RUN_DIR/result-$n.json")"; continue ;; esac
     id_refresh "$n" || true

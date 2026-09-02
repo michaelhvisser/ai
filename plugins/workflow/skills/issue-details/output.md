@@ -19,8 +19,6 @@ prose; the prose follows with one line per fact, each carrying its citation.
 <!-- issue-details:v1 dev=<sha40> -->
 ## Issue details
 
-**#<n>** <issue title>
-
 ```yaml
 classification: <bug|goal|idea|question|noise>
 verdict: <needed|likely-duplicate-of #N|already-fixed-by #N|unclear>
@@ -33,30 +31,41 @@ dev_sha: <sha40>
 evaluated_at: <ISO-8601 Z>
 ```
 
-- classification: <class> — <one line; for bug: `expected-by: path or #N`; for noise: the signal>
-- dedupe: searched `<terms>` → <n> open issues, <n> open PRs; merged into base since filing naming this issue: <none|#N …> <(unknown: #N — closing list truncated)?>; in flight: <none|#N …>
+```text
+#<n> — <issue title>
+classification: <class> — <one line; for bug: expected-by: path or #N; for noise: the signal>
+dedupe: searched [<terms>] → <n> open issues, <n> open PRs; merged into base since filing naming this issue: <none|#N …> <(unknown: #N — closing list truncated)?>; in flight: <none|#N …>
   <verdict note, when the guard downgraded>
-- goal: <label> — <source: own label | via #N | none: reason>
-- priority: <P> — <rule that fired>; board: <Status> / <Priority>
+goal: <label> — <own label | via #N (proposed: stamp the label) | reason>
+priority: <P> — <rule that fired>; board: <Status> / <Priority>
   <priority note for the author, when it applies>
-- effort: <tier> — <proposed | agrees with the issue's block | the issue's block says X; left as is>
+effort: <tier> — <proposed | agrees with the issue's block | the issue's block says X; left as is>
   <effort note, when the guard clamped>
-- decision: <none needed | the question, one line>
-- still-needed: not checked (v1)
-<recommendation line, when there is one>
+decision: <none needed | the reason, one line>
+still-needed: not checked (v1)
+recommendation: <when there is one>
+```
 ```
 
 Rules:
 
 - The YAML keys are exactly these nine, in this order; a consumer may `awk` the block out
-  and parse it with any YAML reader. The bold `#<n>` title line above it names the issue
-  the comment belongs to, so a comment file can never be mistaken for another issue's.
+  and parse it with any YAML reader.
+- **Everything after the YAML block is one fenced `text` block**, and it holds every
+  untrusted string — the issue title and the judgement's prose. Inside the fence GFM
+  interprets nothing: emphasis, HTML comments, links, and `@mentions` are literal. Backticks
+  in a value are replaced (so a value cannot close the fence) and a zero-width space
+  follows every `@` (so the text is not a mention wherever it is copied). The first line
+  of the block, `#<n> — <title>`, names the issue the comment belongs to, so a comment
+  file can never be mistaken for another issue's.
 - `canonical` and `goal` are quoted strings or a bare `null`.
-- Prose is at most **12 lines**; a longer justification goes in the run dir, not the issue.
+- The text block is at most **14 lines**; a longer justification goes in the run dir, not
+  the issue.
 - Citations are `path:line` (for `expected-by` and the like) or `#N`. No prose claim
   without one of the two, except the `no reference` / `registry empty` reasons.
-- The author is addressed as `@login` only in the two social-rule lines (`triage.md` §5);
-  the comment never @-mentions anyone else.
+- The author is addressed as `@login` only in the two social-rule lines (`triage.md` §5),
+  and even there inside the text block with the zero-width space — the comment
+  notifies nobody; the decision view is how it reaches them.
 - The comment never contains the word "close" outside `RECOMMENDATION` (`triage.md` §5).
 
 ## §2 Terminal report

@@ -230,26 +230,26 @@ dispatch() {  # <state-json> <result-json> [extra env] → log
 }
 ST_OK=$(jq -c '.write_ok=1 | .write_note=""' <<<"$SNAP"); ST_NO=$(jq -c '.write_ok=0 | .write_note="x"' <<<"$SNAP")
 LOG=$(dispatch "$ST_NO" '{"needs_decision":true,"state":"OPEN"}');                     [ -z "$LOG" ] || fail V6 "WRITE_OK=0 must issue no gh call: $LOG"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":false,"state":"OPEN"}');                    [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X POST repos/o/r/issues/1/comments' <<<"$LOG" || fail V6 "create without decision must be one bare POST: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":false,"state":"OPEN"}');                    [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X POST repos/o/r/issues/1/comments' <<<"$LOG" || fail V6 "create without decision must be one bare POST and zero reads: $LOG"
 LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}');                     [ "$(grep -c . <<<"$LOG")" = 2 ] && [ "$(tail -1 <<<"$LOG" | grep -c 'add-label triage:needs-decision')" = 1 ] || fail V6 "create with decision must be POST then label: $LOG"
 grep -q PATCH <<<"$LOG" && fail V6 "create run issued a PATCH"
 LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}'); [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X PATCH repos/o/r/issues/comments/400' <<<"$LOG" || fail V6 "edit must be one PATCH on the marker: $LOG"
 printf '%s' "$C_MINE" > "$STUB_DIR/comments-after-1.json"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && grep -q 'add-label' <<<"$LOG" && grep -q 'posted (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous POST that landed: one POST, confirmed, labelled: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && [ "$(grep -c '/comments?per_page' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 3 ] && grep -q 'add-label' <<<"$LOG" && grep -q 'posted (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous POST that landed: one POST, exactly one confirming GET, labelled: $LOG"
 printf '%s' "$C_NONE" > "$STUB_DIR/comments-after-1.json"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'not retried' "$RUN/dispatch.out" || fail V6 "failed POST: never retried, no label: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 2 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'not retried' "$RUN/dispatch.out" || fail V6 "failed POST: one POST, one confirming GET, nothing else: $LOG"
 rm -f "$STUB_DIR/comments-after-1.json"
 # PATCH failure: one attempt, one confirming GET; confirmed when the body landed, else not retried
 printf '{"body":"draft"}' > "$STUB_DIR/comment-after-400.json"
-LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && grep -q 'edited #400 (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous PATCH that landed: one attempt, confirmed: $LOG / $(cat "$RUN/dispatch.out")"
+LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 2 ] && grep -q '^api --hostname github.com repos/o/r/issues/comments/400$' <<<"$LOG" && grep -q 'edited #400 (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous PATCH that landed: one attempt, confirmed: $LOG / $(cat "$RUN/dispatch.out")"
 printf '{"body":"old"}' > "$STUB_DIR/comment-after-400.json"
-LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":true,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'edit failed — not retried' "$RUN/dispatch.out" || fail V6 "failed PATCH: one attempt, no label, not retried: $LOG"
+LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":true,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 2 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'edit failed — not retried' "$RUN/dispatch.out" || fail V6 "failed PATCH: one attempt, no label, not retried: $LOG"
 rm -f "$STUB_DIR/comment-after-400.json"
 # label failure: one attempt, one confirming GET
 printf '[{"name":"triage:needs-decision"}]' > "$STUB_DIR/labels-after-1.json"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && grep -q 'label added (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous label that landed: one attempt, confirmed: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 3 ] && grep -q '^api --hostname github.com repos/o/r/issues/1/labels$' <<<"$LOG" && grep -q 'label added (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous label that landed: one attempt, confirmed: $LOG"
 printf '[]' > "$STUB_DIR/labels-after-1.json"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && grep -q 'label add failed — not retried' "$RUN/dispatch.out" || fail V6 "failed label: one attempt, not retried: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 3 ] && grep -q 'label add failed — not retried' "$RUN/dispatch.out" || fail V6 "failed label: one attempt, not retried: $LOG"
 rm -f "$STUB_DIR/labels-after-1.json"
 LOG=$(dispatch "$(jq -c '.write_ok=1 | .comment_action="refuse"' <<<"$SNAP_TWO")" '{"needs_decision":true,"state":"OPEN"}'); [ -z "$LOG" ] || fail V6 "refuse must issue no gh call"
 [ "$FAILS" = 0 ] && pass V6 "refresh fails closed on every drift; POST, PATCH, and label are one attempt each with one confirming GET; label only on decision"
@@ -349,7 +349,7 @@ e2e() {  # <label> <collect args...>
   [ "$(tr '\n' ' ' < "$d/selected.txt")" = "11 12 " ] || fail "V12/$label" "selected.txt: $(cat "$d/selected.txt")"
   judge "$d" "$label"
   with_script "id_main finalize --run-dir '$d'" > "$d.finalize.out" 2>&1 || fail "V12/$label" "finalize failed: $(tail -3 "$d.finalize.out")"
-  grep -q 'engagement: nightly lookback' "$d/comment-11.md" && grep -q 'TODO in apps/frontend' "$d/comment-12.md" || fail "V12/$label" "each comment must carry its own title"
+  grep -q '^#11 — engagement: nightly lookback' "$d/comment-11.md" && grep -q '^#12 — TODO in apps/frontend' "$d/comment-12.md" || fail "V12/$label" "each comment must carry its own title inside the text block"
   grep -q 'engagement: nightly' "$d/comment-12.md" && fail "V12/$label" "issue 11's title leaked into 12's comment"
   [ "$(jq -r .needs_decision "$d/result-11.json")" = false ] && [ "$(jq -r .needs_decision "$d/result-12.json")" = true ] || fail "V12/$label" "needs_decision: 11 false, 12 true"
   [ "$(jq -r .classification "$d/result-12.json")" = noise ] && [ "$(jq -r .verdict "$d/result-12.json")" = unclear ] || fail "V12/$label" "noise must override the judgement"
@@ -357,18 +357,24 @@ e2e() {  # <label> <collect args...>
   grep -q '^  goal      none' "$d/report.txt" && grep -q 'registry: 1 goal label(s), 0 issue(s)' "$d/report.txt" || fail "V12/$label" "report: $(cat "$d/report.txt")"
   jq -e '.schema == 1 and (.generated_at|type=="string") and .host == "github.com" and .repo == "o/r" and .base == "dev" and (.dev_sha|length == 40) and .me == "me"
          and (.goal_registry | .labels == ["goal:q3-2026"] and .issues == 0)
-         and (.issues | length == 2) and (.unevaluated == []) and (.warnings|type=="array") and (.files.run_dir|type=="string")
-         and all(.issues[]; (.number|type=="number") and (.title|type=="string") and (.url|type=="string") and (.state|type=="string")
-             and (.author|type=="string") and (.self_authored|type=="boolean") and (.created_at|type=="string") and (.labels|type=="array")
-             and (.board | (.status|type=="string") and (.priority|type=="string"))
-             and (.existing_effort|type=="string") and (.classification|type=="string") and (.verdict|type=="string")
+         and (.issues | length == 2) and (.unevaluated == []) and (.warnings|type=="array" and all(.[]; type=="string")) and (.files.run_dir|type=="string")
+         and all(.issues[]; (keys | sort) == (["author","board","canonical","classification","comment","created_at","current_quarter","decision_reason","dedupe","dev_sha","effort","effort_note","effort_stance","evaluated_at","evidence","existing_effort","goal","labels","needs_decision","noise_signal","number","priority","priority_note","recommendation","self_authored","state","title","url","verdict","verdict_note","warnings"] | sort)
+             and (.number|type=="number") and (.title|type=="string") and (.url|type=="string") and (.state|type=="string")
+             and (.author|type=="string") and (.self_authored|type=="boolean") and (.created_at|type=="string") and (.labels|type=="array" and all(.[]; type=="string"))
+             and (.board | (keys|sort) == ["priority","status"] and (.status|type=="string") and (.priority|type=="string"))
+             and (.existing_effort|type=="string") and (.noise_signal|type=="string")
+             and (.classification | IN("bug","goal","idea","question","noise")) and (.verdict|type=="string") and (.verdict_note|type=="string")
              and (.canonical == null or (.canonical|type=="string"))
-             and (.goal | (.source|type=="string") and (.reason|type=="string"))
-             and (.priority|type=="string") and (.effort|type=="string") and (.effort_stance|type=="string") and (.needs_decision|type=="boolean")
-             and (.dedupe | (.terms|type=="string") and (.skipped|type=="boolean") and (.open_issues|type=="array") and (.open_prs|type=="array")
-                  and (.fixed_by|type=="array") and (.fixed_by_unknown|type=="array") and (.in_flight|type=="array") and (.shipped_truncated|type=="boolean"))
-             and (.evidence|type=="object") and (.comment | (.action|type=="string") and (.body_path|type=="string") and (.add_label|type=="boolean"))
-             and (.warnings|type=="array") and (.dev_sha|length == 40) and (.evaluated_at|type=="string"))
+             and (.goal | (keys|sort) == ["label","reason","source","via"] and (.label == null or (.label|type=="string")) and (.source | IN("own-label","reference","none")) and (.via == null or (.via|type=="number")) and (.reason|type=="string"))
+             and (.priority | IN("Urgent","High","Medium","Low","none")) and (.effort | IN("medium","high","xhigh")) and (.effort_stance | IN("propose","agree","disagree")) and (.effort_note|type=="string")
+             and (.needs_decision|type=="boolean") and (.decision_reason == null or (.decision_reason|type=="string"))
+             and (.dedupe | (keys|sort) == ["fixed_by","fixed_by_unknown","in_flight","open_issues","open_prs","shipped_truncated","skipped","terms"]
+                  and (.terms|type=="string") and (.skipped|type=="boolean") and (.open_issues|type=="array" and all(.[]; (.number|type=="number") and (.title|type=="string")))
+                  and (.open_prs|type=="array" and all(.[]; (.number|type=="number") and (.title|type=="string"))) and (.fixed_by|type=="array" and all(.[]; type=="number"))
+                  and (.fixed_by_unknown|type=="array" and all(.[]; type=="number")) and (.in_flight|type=="array" and all(.[]; type=="number")) and (.shipped_truncated|type=="boolean"))
+             and (.evidence|type=="object" and all(.[]; type=="string")) and (.recommendation == null or (.recommendation|type=="string")) and (.priority_note == null or (.priority_note|type=="string"))
+             and (.comment | (keys|sort) == ["action","add_label","body_path","marker_id"] and (.action | IN("create","edit","refuse")) and (.marker_id == null or (.marker_id|type=="number")) and (.body_path|type=="string") and (.add_label|type=="boolean"))
+             and (.warnings|type=="array" and all(.[]; type=="string")) and (.dev_sha|length == 40) and (.evaluated_at|type=="string") and (.current_quarter|test("^q[1-4]-[0-9]{4}$")))
          and (.issues[] | select(.number == 11) | .self_authored == true and .board.status == "none" and .dedupe.skipped == false and .comment.action == "create")
          and (.issues[] | select(.number == 12) | .self_authored == false and .dedupe.skipped == true and .comment.action == "edit" and .comment.marker_id == 400 and .comment.add_label == true)' \
     "$d/facts.json" >/dev/null || fail "V12/$label" "facts.json does not match schema 1: $(jq -c '.issues[0] | keys' "$d/facts.json")"
@@ -412,9 +418,48 @@ jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort
         decision_reason:"line one\nline two — ask @cory and see #4242", evidence:{classification:"expected-by: docs\r\nsee @michaelhvisser", priority:"bug, no workaround"}}' > "$d/judgement-11.json"
 jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
 jfin "sanitise"
-grep -q 'line one line two — ask `@cory` and see #4242 (unverified)' "$d/comment-11.md" || fail V13 "decision_reason not sanitised: $(grep -- '- decision' "$d/comment-11.md")"
-grep -q 'expected-by: docs see `@michaelhvisser`' "$d/comment-11.md" || fail V13 "evidence not sanitised: $(grep -- '- classification' "$d/comment-11.md")"
-! grep -qE '(^|[^`])@(cory|michaelhvisser)' "$d/comment-11.md" || fail V13 "a bare @mention reached the comment"
+ZW=$(printf '\342\200\213')   # U+200B
+grep -q "line one line two — ask @${ZW}cory and see #4242 (unverified)" "$d/comment-11.md" || fail V13 "decision_reason not sanitised: $(grep -- '^decision' "$d/comment-11.md")"
+grep -q "expected-by: docs see @${ZW}michaelhvisser" "$d/comment-11.md" || fail V13 "evidence not sanitised: $(grep -- '^classification' "$d/comment-11.md")"
+! grep -qE '@(cory|michaelhvisser)' "$d/comment-11.md" || fail V13 "a live @mention reached the comment"
+# rendered form: the prose sits in one fenced text block after the YAML block, with no backtick inside it
+awk '/^```text$/{f=1; next} /^```$/{if(f){f=0}} f' "$d/comment-11.md" > "$d/prose-block.txt"
+[ -s "$d/prose-block.txt" ] && grep -q '^#11 — ' "$d/prose-block.txt" && grep -q '^decision: ' "$d/prose-block.txt" && ! grep -q '`' "$d/prose-block.txt" || fail V13 "prose must render inside a single fenced text block with no backtick: $(cat "$d/comment-11.md")"
+[ "$(grep -c '^```' "$d/comment-11.md")" = 4 ] || fail V13 "exactly two fenced blocks (yaml, text): $(grep -c '^```' "$d/comment-11.md")"
+# the five bypasses: on another author's issue each is refused by the normalised verb check
+for BAD in 'please cl**ose** this' 'pa<!-- -->rk this' 'won’t fix' 'W O N T fix' "cl${ZW}ose"; do
+  rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+  jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:{}}' > "$d/judgement-11.json"
+  jq -n --arg b "$BAD" '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:$b, evidence:{}}' > "$d/judgement-12.json"
+  jfin "bypass $BAD"
+  [ ! -f "$d/result-12.json" ] && grep -q "social rule: prose proposes close" "$d/report.txt" || fail V13 "bypass not caught: $BAD"
+done
+# and on your own issue the same inputs render inert: literal text inside the fence, mention broken, link reference visibly marked
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", decision_required:true,
+        decision_reason:"see [proof](https://example.invalid/#4242) and \\@cory", evidence:{classification:"cl**ose** pa<!-- -->rk won’t fix ```", priority:"bug"}}' > "$d/judgement-11.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "inert"
+awk '/^```text$/{f=1; next} /^```$/{if(f){f=0}} f' "$d/comment-11.md" > "$d/prose-block.txt"
+grep -qF "classification: bug — cl**ose** pa<!-- -->rk won’t fix '''" "$d/prose-block.txt" || fail V13 "emphasis/comment/backticks must render as literal text inside the fence: $(grep '^classification' "$d/prose-block.txt")"
+grep -qF "decision: see [proof](https://example.invalid/#4242 (unverified)) and \\@${ZW}cory" "$d/prose-block.txt" || fail V13 "link reference must be visibly marked and the mention broken: $(grep '^decision' "$d/prose-block.txt")"
+[ "$(grep -c '^```' "$d/comment-11.md")" = 4 ] || fail V13 "a value containing a fence must not open or close one"
+# a re-finalize after a rejected judgement leaves nothing stale in the SAME run dir
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+judge "$d" stale; jfin "first"
+[ -f "$d/result-12.json" ] && [ -f "$d/comment-12.md" ] || fail V13 "first finalize must produce 12's result"
+sleep 1; jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:"park this", evidence:{}}' > "$d/judgement-12.json"
+jfin "second"
+[ ! -f "$d/result-12.json" ] && [ ! -f "$d/comment-12.md" ] && [ ! -f "$d/prose-12.json" ] || fail V13 "a rejected re-finalize must remove 12's stale artifacts"
+[ -f "$d/result-11.json" ] || fail V13 "11 must still finalize on the second pass"
+jq -e '(.issues | map(.number)) == [11] and (.unevaluated | map(.number)) == [12]' "$d/facts.json" >/dev/null || fail V13 "facts.json must partition 11 evaluated / 12 unevaluated: $(jq -c '{i: (.issues|map(.number)), u: .unevaluated}' "$d/facts.json")"
+[ "$(grep -c '=== #12 ===' "$d/report.txt")" = 1 ] && grep -q '=== #12 === unevaluated: social rule' "$d/report.txt" || fail V13 "report must show 12 once, as unevaluated: $(grep '#12' "$d/report.txt")"
+: > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V13 "post after re-finalize"
+[ "$(grep -c 'issues/12\|comments/400' "$STUB_LOG")" = 0 ] && grep -q '^#11 posted$' "$d.post.out" || fail V13 "post must write 11 and make zero calls for 12: $(cat "$STUB_LOG")"
+# and the reverse: a rejected first pass then a good second pass evaluates the issue (the finalize ledger restarts)
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "third"
+[ -f "$d/result-12.json" ] && jq -e '(.issues | map(.number)) == [11,12] and .unevaluated == []' "$d/facts.json" >/dev/null || fail V13 "a good judgement after a rejected one must evaluate again"
 rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
 jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:{classification:"we should close this once #90 lands"}}' > "$d/judgement-11.json"
 jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:"park this", evidence:{}}' > "$d/judgement-12.json"
@@ -428,7 +473,7 @@ jfin "missing"
 grep -q '=== #11 === unevaluated: no judgement-11.json' "$d/report.txt" && jq -e '.unevaluated | map(.number) == [11]' "$d/facts.json" >/dev/null || fail V13 "a missing judgement must be unevaluated everywhere"
 : > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V13 "post"
 [ "$(grep -c 'issues/11' "$STUB_LOG")" = 0 ] || fail V13 "an unjudged issue must never be written"
-[ "$FAILS" = 0 ] && pass V13 "judgement boundary: malformed/missing → unevaluated; prose single-line, @mentions backticked, unfetched #N marked; close verb refused on another author's issue"
+[ "$FAILS" = 0 ] && pass V13 "judgement boundary: malformed/missing → unevaluated; prose inert in a text block; normalised verb check catches Markdown/Unicode bypasses; re-finalize leaves nothing stale"
 
 if [ "$FAILS" -gt 0 ]; then echo "issue-details-triage: $FAILS failure(s)"; exit 1; fi
 echo "issue-details-triage: OK"
