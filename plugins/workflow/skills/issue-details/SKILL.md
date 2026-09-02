@@ -48,7 +48,7 @@ the ≤12-line-per-issue summary; there is no separate page.
 ## Scope — what this version deliberately leaves out
 
 This is the "first deliverable" of the issue-intake design
-(`issue-pipeline.md`, 2026-09-02, §"Second review by an independent Fable agent"):
+(`plugins/workflow/docs/issue-pipeline.md`, 2026-09-02, §"Second review by an independent Fable agent"):
 classify, dedupe by title terms, propose goal, priority, and effort, post one marker
 comment. Excluded on purpose, each with its later home:
 
