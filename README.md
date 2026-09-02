@@ -26,6 +26,8 @@ Most people want `workflow` plus the language plugin for their stack — for Nod
 
 Language-agnostic PR and review workflow skills. No toolchain assumptions — it resolves the repo's lint / typecheck / test / build commands at runtime from `package.json`, `go.mod`, `Cargo.toml`, or a `Makefile`.
 
+- **`/workflow:pr-details`** — read-only situation report for one PR with an approvable execution plan to merge-readiness
+- **`/workflow:issue-details`** — read-only triage evaluation for issues: class, advisory duplicate verdict, goal alignment, proposed priority and effort, one marker comment per issue edited in place — posted only past the closing approval
 - **`/workflow:antagonist-review`** — cross-model adversarial review: a strong finder model and the local Codex CLI fight over every finding, a third model breaks ties, and a human settles only what the models can't
 - **`/workflow:codex-ship`** — triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop) with a second-opinion cross-check, fix only the confirmed-real set, and loop until Codex runs out of genuine value
 - **`/workflow:commit`**, **`/workflow:create-pr`** — conventional commits and template-driven PRs
