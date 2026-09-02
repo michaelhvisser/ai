@@ -101,6 +101,15 @@ comments (plus `triage:needs-decision` where a decision is required), print
 them, or stop. `--json` and non-interactive sessions mean print only. It
 never changes board Status or Priority, never closes, never edits a body.
 
+The mechanics are one script, `scripts/issue-details.sh` (`collect` →
+judgement → `finalize` → `print` / `post`): every GitHub read, every per-issue
+fact (held in `state-<n>.json`, never in shell variables between steps), the
+guards, the comment render, the fail-closed pre-write refresh, and the
+three-command write set. The orchestrator's only job between `collect` and
+`finalize` is the judgement — class, verdict, priority, proposed effort —
+written to `judgement-<n>.json`. `tests/issue-details-triage.test.sh` drives
+the script end to end against a stubbed `gh`.
+
 Deliberately out of scope in this version: planning, the pinned-read
 still-needed check (a marked hook only), the antagonist review, and any sweep
 or close logic.

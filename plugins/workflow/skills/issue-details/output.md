@@ -9,14 +9,17 @@ consumer are *also* carried inside the JSON as `warnings[]`.
 
 ## §1 The marker comment
 
-One per issue, drafted to `$RUN_DIR/comment-<n>.md` before the gate and written only past
-it (`execute.md`). The marker is the **first line**, so `facts.md` §1d can find it with
-`startswith`; the YAML block is fenced so a script can lift it without parsing prose; the
-prose follows with one line per fact, each carrying its citation.
+One per issue, rendered by `finalize` to `$RUN_DIR/comment-<n>.md` and written only by
+`post` (`execute.md`). The marker is the **first line**, exactly
+`<!-- issue-details:v1 dev=<sha40> -->`, which is how `facts.md` §1d finds this skill's own
+comment on a re-run; the YAML block is fenced so a script can lift it without parsing
+prose; the prose follows with one line per fact, each carrying its citation.
 
 ```
 <!-- issue-details:v1 dev=<sha40> -->
 ## Issue details
+
+**#<n>** <issue title>
 
 ```yaml
 classification: <bug|goal|idea|question|noise>
@@ -31,7 +34,7 @@ evaluated_at: <ISO-8601 Z>
 ```
 
 - classification: <class> — <one line; for bug: `expected-by: path or #N`; for noise: the signal>
-- dedupe: searched `<terms>` → <n> open issues, <n> open PRs; merged into <base> since filing naming this issue: <none|#N …>; in flight: <none|#N …>
+- dedupe: searched `<terms>` → <n> open issues, <n> open PRs; merged into base since filing naming this issue: <none|#N …> <(unknown: #N — closing list truncated)?>; in flight: <none|#N …>
   <verdict note, when the guard downgraded>
 - goal: <label> — <source: own label | via #N | none: reason>
 - priority: <P> — <rule that fired>; board: <Status> / <Priority>
@@ -46,7 +49,8 @@ evaluated_at: <ISO-8601 Z>
 Rules:
 
 - The YAML keys are exactly these nine, in this order; a consumer may `awk` the block out
-  and parse it with any YAML reader.
+  and parse it with any YAML reader. The bold `#<n>` title line above it names the issue
+  the comment belongs to, so a comment file can never be mistaken for another issue's.
 - `canonical` and `goal` are quoted strings or a bare `null`.
 - Prose is at most **12 lines**; a longer justification goes in the run dir, not the issue.
 - Citations are `path:line` (for `expected-by` and the like) or `#N`. No prose claim
@@ -57,20 +61,21 @@ Rules:
 
 ## §2 Terminal report
 
-≤ 12 lines per issue, then a run footer:
+`$RUN_DIR/report.txt`, ≤ 12 lines per issue, then a run footer; an issue that did not
+complete prints one line, `=== #<n> === unevaluated: <reason>`:
 
 ```
 === #<n> · <title> ===
 <slug> · by <author><, you|> · <state> · board <Status>/<Priority> · created <date>
   class     <class>          <one-line reason>
-  verdict   <verdict>        <terms → counts · shipped/in-flight summary>
+  verdict   <verdict>        <`terms` → counts | dedupe not run> · shipped naming it: <…> · in flight: <…>
   goal      <label|none>     <source or reason>
   priority  <P>              <rule>  <(board differs — note for @author)?>
   effort    <tier> (<stance>)<existing block, when present>
   decision  <yes — reason|no>
-  comment   <create|edit #<id>>  <+ label triage:needs-decision?>
+  comment   <create|edit #<id>|refuse>  <+ label triage:needs-decision?>
 
---- <k> issue(s) · dev @ <sha7> · registry: <n> goal label(s) · files: <run dir>
+--- <k> issue(s) · <base> @ <sha7> · registry: <n> goal label(s), <m> issue(s) · files: <run dir>
 ```
 
 Warning lines (registry empty, shipped sweep truncated, duplicate markers, batch cap,
@@ -79,8 +84,10 @@ ASCII-safe.
 
 ## §3 `--json` schema, version 1
 
-Stdout carries this object and nothing else. The same object is written to
-`$RUN_DIR/facts.json` on every run.
+`finalize` writes this object to `$RUN_DIR/facts.json` on every run; with `--json` the
+skill prints that file to stdout and nothing else. `issues[]` entries are the
+`result-<n>.json` files — the state (`facts.md` §1) merged with the judgement and the
+guards' output.
 
 ```json
 {
@@ -122,7 +129,7 @@ Stdout carries this object and nothing else. The same object is written to
 Closed vocabularies a consumer may branch on: `classification`, `verdict`, `priority`,
 `effort`, `effort_stance ∈ {propose, agree, disagree}`, `goal.source ∈ {own-label,
 reference, none}`, `comment.action ∈ {create, edit, refuse, none}` (`refuse` when more
-than one owned marker comment exists — `facts.md` §1d; `none` for a closed issue).
+than one owned marker comment exists — `facts.md` §1d).
 `unevaluated[]` is `[{number, reason}]` for every selected issue that did not complete
 (`facts.md` §1); an issue is either fully in `issues[]` or listed there, never half-done.
 

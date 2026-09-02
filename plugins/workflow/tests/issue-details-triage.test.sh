@@ -1,505 +1,363 @@
 #!/bin/bash
-# Executes issue-details' ACTUAL blocks — extracted from SKILL.md, facts.md,
-# triage.md, and execute.md, so the doc is the code under test — against
-# fixtures and a stubbed pr_facts_gh. Every block is sourced under both bash
-# and zsh, because agents run them in the user's shell. Scenarios:
-#   V1 verdict vocabulary  → the four forms pass; a #N that never appeared in a
-#                            search result, or any wording outside the
-#                            vocabulary, downgrades to `unclear` with a note
-#   V2 never max           → a proposed `max` clamps to xhigh; an existing
-#                            block is reported (agree/disagree), never
-#                            replaced; the extractor reads only the fence
-#   V3 marker lookup       → no marker = create; one owned = edit by numeric
-#                            id; a foreign login's marker = create; a quoted
-#                            marker mid-body or a v10 marker = create; two
-#                            owned = refuse
-#   V4 social rule         → another author never gets a close, gets a
-#                            decision; priority disagreement is a note; a
-#                            deleted account is not self and not `@:`
-#   V5 noise is mechanical → fingerprint or build-output path forces noise;
-#                            prose mentioning "build" does not
-#   V6 refresh + dispatch  → create / edit / conditional label / foreign
-#                            marker / duplicate markers / stale marker /
-#                            failed refresh / empty JSON / closed issue /
-#                            changed issue / WRITE_OK=0 writes nothing
-#   V7 --since             → malformed values exit 2; a URL parses and must
-#                            be alone; the selection caps at the oldest 50
-#                            with a warning
-#   V8 rate gates          → Phase-0 gate exits 3 under errexit when below
-#                            reserve; the per-issue gate stops the batch on
-#                            core/GraphQL, sleeps (not stops) on search,
-#                            stops on an unreadable rate_limit
-#   V9 merged-PR sweep     → pages accumulate; truncation comes from the page
-#                            cap or a failed page, never from timestamps; a
-#                            403 on a page stops the batch; a PR closing >100
-#                            issues is carried as an unknown match
-#   V10 two passes         → pass B reloads each issue's own values from
-#                            issue-<n>.json; a pass-A failure is persisted and
-#                            skipped in pass B
-#   V11 noise skips search → with DEDUPE_SKIPPED the term/search block issues
-#                            zero gh calls; without it, exactly two
+# Drives scripts/issue-details.sh — the deterministic half of the
+# issue-details skill — against a stubbed `gh`/`git`. The script is sourced,
+# so the shipped code is what runs; only GitHub responses are scripted.
+#   V1  verdict vocabulary     closed; unseen numbers / foreign wording → unclear + note
+#   V2  never max              proposed max clamps; an existing block is reported, never replaced
+#   V3  marker lookup          owned + exact first-line grammar; create / edit / refuse
+#   V4  social rule            no close/park for another author; note not field write; decision routed
+#   V5  noise is mechanical    fingerprint or build-output path forces noise; prose does not
+#   V6  refresh + dispatch     fail-closed on every drift; bare POST never retried; label only on decision
+#   V7  arguments + selection  strict --since; URLs; explicit numbers AND --since materialise selected.txt; oldest-50 cap
+#   V8  rate gates             below reserve / malformed / unreadable stop the batch; search sleeps
+#   V9  merged-PR sweep        window from earliest filing; truncation from pagination; GraphQL errors are failures
+#   V11 noise skips search     zero search calls on noise or --no-dup-search; exactly two otherwise
+#   V12 end to end             collect → judge → finalize → post for two issues, explicit and --since;
+#                              exact gh call sequence; each comment carries its own title; a gate
+#                              failure on the second issue leaves the first written and the second
+#                              unevaluated with no call after the failed gate
 set -euo pipefail
 PLUGIN_DIR=$(cd "$(dirname "$0")/.." && pwd)
-SK="$PLUGIN_DIR/skills/issue-details"
+SCRIPT="$PLUGIN_DIR/scripts/issue-details.sh"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
-command -v zsh >/dev/null 2>&1 || { echo "issue-details-triage: zsh is required (bash-and-zsh is the invariant)"; exit 1; }
-
-extract_blocks() {  # $1 = md file, $2 = output prefix
-  awk -v out="$2" '
-    /^```bash$/ {inb=1; n++; f=out "." n ".sh"; next}
-    /^```/      {inb=0; next}
-    inb         {print > f}
-  ' "$1"
-}
-extract_blocks "$SK/SKILL.md"   "$SANDBOX/skill"
-extract_blocks "$SK/facts.md"   "$SANDBOX/facts"
-extract_blocks "$SK/triage.md"  "$SANDBOX/triage"
-extract_blocks "$SK/execute.md" "$SANDBOX/execute"
-pick() { grep -l "$1" "$SANDBOX"/$2.*.sh | head -1; }
-ARGS_BLOCK=$(pick 'not an issue URL' skill)
-GATE0_BLOCK=$(pick 'RG_RC=0' facts)
-SINCE_BLOCK=$(pick 'since-all.json' facts)
-ISSUEGH_BLOCK=$(pick '^issue_gh()' facts)
-SWEEP_BLOCK=$(pick 'SWEEP_GQL=' facts)
-MARKER_BLOCK=$(pick 'COMMENT_ACTION="create"' facts)
-FETCH_BLOCK=$(pick 'issue view "\$ISSUE_NUM" -R' facts)
-LOAD_BLOCK=$(pick 'PASS_SKIP=0' facts)
-EXISTING_BLOCK="$LOAD_BLOCK"
-NOISE_BLOCK=$(pick 'NOISE_SIGNAL=""' facts)
-GATE1_BLOCK=$(pick 'RL_SEARCH_RESET=' facts)
-DEDUPE_BLOCK=$(pick 'DEDUPE_SKIPPED=1' facts)
-VERDICT_BLOCK=$(pick 'outside the verdict vocabulary' triage)
-EFFORT_BLOCK=$(pick 'EFFORT_STANCE="agree"' triage)
-SOCIAL_BLOCK=$(pick 'SELF_AUTHORED=1; else SELF_AUTHORED=0' triage)
-DECISION_BLOCK=$(pick 'NEEDS_DECISION=false' triage)
-REFRESH_BLOCK=$(pick 'pre-write refresh failed' execute)
-DISPATCH_BLOCK=$(pick 'WROTE=""' execute)
-for B in "$ARGS_BLOCK" "$GATE0_BLOCK" "$SINCE_BLOCK" "$ISSUEGH_BLOCK" "$SWEEP_BLOCK" "$MARKER_BLOCK" "$FETCH_BLOCK" "$LOAD_BLOCK" \
-         "$NOISE_BLOCK" "$GATE1_BLOCK" "$DEDUPE_BLOCK" "$VERDICT_BLOCK" "$EFFORT_BLOCK" "$SOCIAL_BLOCK" "$DECISION_BLOCK" \
-         "$REFRESH_BLOCK" "$DISPATCH_BLOCK"; do
-  [ -n "$B" ] || { echo "FAIL: a block extraction came up empty"; exit 1; }
-  bash -n "$B"; zsh -n "$B"
-done
-
-# Combined runners: issue_gh + the block that calls it, built ONCE (rebuilding
-# inside the shell loop would cat a file into itself).
-SWEEP_RUN="$SANDBOX/sweep.sh"; { cat "$ISSUEGH_BLOCK"; cat "$SWEEP_BLOCK"; } > "$SWEEP_RUN"
-FETCH_RUN="$SANDBOX/fetch.sh"; { cat "$ISSUEGH_BLOCK"; cat "$FETCH_BLOCK"; } > "$FETCH_RUN"
-GATE1_RUN="$SANDBOX/gate1.sh"; { cat "$ISSUEGH_BLOCK"; cat "$GATE1_BLOCK"; } > "$GATE1_RUN"
-DEDUPE_RUN="$SANDBOX/dedupe.sh"; { cat "$ISSUEGH_BLOCK"; cat "$DEDUPE_BLOCK"; } > "$DEDUPE_RUN"
-
+bash -n "$SCRIPT"
 FAILS=0
 fail() { echo "FAIL [$1]: $2"; FAILS=$((FAILS+1)); }
 pass() { echo "  ok [$1] $2"; }
+SHA=0123456789abcdef0123456789abcdef01234567
 
-# The stub every scenario runs against. It logs each call, fails when told to,
-# and answers reads from STUB_* fixtures. Writes are logged and succeed.
-STUB='
-pr_facts_gh() {
-  printf "%s\n" "$*" >> "${STUB_LOG:-/dev/null}"
-  if [ "${STUB_FAIL:-0}" = 1 ]; then echo "HTTP 403: API rate limit exceeded" >&2; return 1; fi
-  if [ "${STUB_FAIL:-0}" = 404 ]; then echo "HTTP 404: Not Found" >&2; return 1; fi
+# ---------------------------------------------------------------- stubs ----
+# The stub answers every read from $STUB_DIR fixtures and logs every call.
+STUB_DIR="$SANDBOX/stub"; mkdir -p "$STUB_DIR"
+export STUB_DIR STUB_LOG="$SANDBOX/gh.log"
+stub_env() { cat <<'STUB'
+gh() {
+  printf '%s\n' "$*" >> "$STUB_LOG"
+  local n
   case "$*" in
-    *"-X POST"*)      if [ "${STUB_POST_FAIL:-0}" = 1 ]; then echo "EOF" >&2; return 1; fi; printf "{}" ;;
-    *"/comments?"*)   if [ -n "${STUB_COMMENTS_AFTER+x}" ] && grep -q "X POST" "${STUB_LOG:-/dev/null}" 2>/dev/null; then printf "%s" "$STUB_COMMENTS_AFTER"; else printf "%s" "${STUB_COMMENTS:-}"; fi ;;
-    *"issue view"*)   printf "%s" "${STUB_ISSUE:-}" ;;
-    *"issue list"*)   printf "%s" "${STUB_LIST:-}" ;;
-    *rate_limit*)     printf "%s" "${STUB_RATE:-}" ;;
-    *graphql*)        STUB_PAGE=$(( $(cat "$STUB_LOG.page" 2>/dev/null || echo 0) + 1 )); printf "%s" "$STUB_PAGE" > "$STUB_LOG.page"
-                      if [ "$STUB_PAGE" -gt "${STUB_PAGES_OK:-99}" ]; then echo "HTTP 502" >&2; return 1; fi
-                      printf "%s" "$(eval "printf %s \"\${STUB_GQL_$STUB_PAGE:-}\"")" ;;
+    "repo view --json nameWithOwner"*) printf 'o/r' ;;
+    "repo view --json url"*) printf 'github.com' ;;
+    "repo view --json defaultBranchRef"*) printf 'main' ;;
+    "auth status"*) : ;;
+    *" user --jq .login") printf 'me' ;;
+    *rate_limit*)
+      n=$(( $(cat "$STUB_DIR/rate.count" 2>/dev/null || echo 0) + 1 )); printf '%s' "$n" > "$STUB_DIR/rate.count"
+      if [ "$n" = "${STUB_RATE_FAIL_AT:-0}" ]; then echo "HTTP 403: API rate limit exceeded" >&2; return 1; fi
+      if [ -n "${STUB_RATE_OVERRIDE:-}" ]; then printf '%s' "$STUB_RATE_OVERRIDE"; else printf '{"resources":{"core":{"remaining":4000},"graphql":{"remaining":4000},"search":{"remaining":29,"reset":0}}}'; fi ;;
+    "pr list -R o/r --state open --limit 100 --json number,title,isDraft,closingIssuesReferences") cat "$STUB_DIR/open-prs.json" ;;
+    "label list"*) cat "$STUB_DIR/labels.json" ;;
+    "issue list -R o/r --label "*) cat "$STUB_DIR/goal-issues.json" ;;
+    "issue list -R o/r --state open --limit 500"*) cat "$STUB_DIR/since.json" ;;
+    "issue view "*" --json number,title,body,author"*)
+      n=$(printf '%s' "$*" | sed -E 's/^issue view ([0-9]+) .*/\1/'); [ -f "$STUB_DIR/issue-$n.json" ] && cat "$STUB_DIR/issue-$n.json" || { echo "HTTP 404: Not Found" >&2; return 1; } ;;
+    "issue view "*" --json state,updatedAt,labels")
+      n=$(printf '%s' "$*" | sed -E 's/^issue view ([0-9]+) .*/\1/'); [ -f "$STUB_DIR/refresh-$n.json" ] && cat "$STUB_DIR/refresh-$n.json" || jq -c '{state, updatedAt, labels}' "$STUB_DIR/issue-$n.json" ;;
+    *"graphql"*"search(query"*)
+      n=$(( $(cat "$STUB_DIR/page.count" 2>/dev/null || echo 0) + 1 )); printf '%s' "$n" > "$STUB_DIR/page.count"
+      [ -f "$STUB_DIR/sweep-$n.json" ] && cat "$STUB_DIR/sweep-$n.json" || printf '{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}' ;;
+    *"graphql"*"projectItems"*)
+      n=$(printf '%s' "$*" | tr '\n' ' ' | sed -E 's/.* -F num=([0-9]+).*/\1/'); [ -f "$STUB_DIR/board-$n.json" ] && cat "$STUB_DIR/board-$n.json" || printf '{"data":{"repository":{"issue":{"projectItems":{"nodes":[]}}}}}' ;;
+    *"-X POST"*) if [ "${STUB_POST_FAIL:-0}" = 1 ]; then echo "EOF" >&2; return 1; fi; printf '{}' ;;
+    *"-X PATCH"*) printf '{}' ;;
+    *"issue edit "*"--add-label"*) : ;;
+    *"/comments?"*)
+      n=$(printf '%s' "$*" | sed -E 's#.*/issues/([0-9]+)/comments.*#\1#')
+      if grep -q 'X POST' "$STUB_LOG" && [ -f "$STUB_DIR/comments-after-$n.json" ]; then cat "$STUB_DIR/comments-after-$n.json"
+      elif [ -f "$STUB_DIR/comments-$n.json" ]; then cat "$STUB_DIR/comments-$n.json"; else printf '[[]]'; fi ;;
+    "search issues"*) printf '[]' ;;
+    "pr list -R o/r --state open --limit 10 --search"*) printf '[]' ;;
+    *) echo "stub: unexpected gh $*" >&2; return 1 ;;
   esac
-  return 0
 }
-gh() { pr_facts_gh "$@"; }   # the bare create POST and its confirming read go through gh directly
-pr_facts_rate_gate() { [ "${STUB_GATE_RC:-0}" = 0 ] || { echo "core 5/5000 < reserve 1000"; return "${STUB_GATE_RC}"; }; return 0; }
-pr_facts_graphql_ok() { jq -e "(.errors // []) | length == 0" <<<"$1" >/dev/null 2>&1; }
-'
-VARS='PASS_SKIP ISSUE_TITLE ISSUE_AUTHOR ISSUE_UPDATED ISSUE_LABELS DEDUPE_SKIPPED TERMS COMMENT_IDS CLASSIFICATION NOISE_SIGNAL VERDICT VERDICT_NOTE CANONICAL PROPOSED_EFFORT EFFORT EFFORT_STANCE EFFORT_NOTE SELF_AUTHORED AUTHOR_REF RECOMMENDATION PRIORITY_NOTE NEEDS_DECISION MARKER_ID MARKER_COUNT MARKER_UPDATED COMMENT_ACTION EXISTING_EFFORT WRITE_OK WRITE_NOTE WROTE STOP_BATCH STOP_REASON ISSUE_FAILED ISSUE_ERROR SHIPPED_TRUNCATED SWEEP_PAGE SINCE_TOTAL SINCE_ARG BASE_ARG URL_SLUG URL_HOST ISSUE_ARGS DO_DUP AS_JSON'
-# run_block <shell> <block> <var-assignments...> — sources the block under the
-# given shell with the stub and the assignments as preset state; prints the
-# resulting variables as NAME=VALUE lines and, last, RC=<exit status>.
-run_block() {
-  local RB_SHELL="$1" RB_BLOCK="$2"; shift 2
-  local RB_SCRIPT="$SANDBOX/run.$$.sh"
-  {
-    printf 'set -u\n'
-    printf '%s\n' "$STUB"
-    for KV in "$@"; do printf '%s\n' "$KV"; done
-    printf 'RC=0; . "%s" || RC=$?\n' "$RB_BLOCK"
-    printf 'for V in %s; do\n' "$VARS"
-    printf '  eval "X=\\${$V-__unset__}"; printf "%%s=%%s\\n" "$V" "$X"\n'
-    printf 'done; printf "RC=%%s\\n" "$RC"\n'
-  } > "$RB_SCRIPT"
-  "$RB_SHELL" "$RB_SCRIPT" 2>/dev/null || true
+git() { case "$*" in "ls-remote origin refs/heads/dev") printf '%s\trefs/heads/dev\n' "$SHA" ;; *) command git "$@" ;; esac; }
+STUB
 }
-# run_script <shell> <block> — runs the block as a whole script (for exit codes)
-run_script() {
-  local RS_SHELL="$1" RS_BLOCK="$2"; shift 2
-  local RS_SCRIPT="$SANDBOX/script.$$.sh"
-  { printf '%s\n' "$STUB"; for KV in "$@"; do printf '%s\n' "$KV"; done; printf 'set -e\n'; cat "$RS_BLOCK"; printf '\nexit 0\n'; } > "$RS_SCRIPT"
-  "$RS_SHELL" "$RS_SCRIPT" >/dev/null 2>&1; echo $?
+# with_script <shell-code>: run code in a subshell with the stub and the script's functions loaded
+with_script() { ( export SHA; eval "$(stub_env)"; . "$SCRIPT"; eval "$1" ); }
+reset_stub() { : > "$STUB_LOG"; rm -f "$STUB_DIR"/*.count "$STUB_DIR"/*.json; printf '[]' > "$STUB_DIR/open-prs.json"; printf '[]' > "$STUB_DIR/labels.json"; printf '[]' > "$STUB_DIR/goal-issues.json"; }
+mkissue() {  # <n> <title> <author> <labels-json> <body> [updatedAt]
+  jq -n --argjson n "$1" --arg t "$2" --arg a "$3" --argjson l "$4" --arg b "$5" --arg u "${6:-2026-02-01T00:00:00Z}" \
+    '{number:$n, title:$t, body:$b, author:(if $a == "" then null else {login:$a} end), createdAt:"2026-01-10T00:00:00Z", updatedAt:$u,
+      labels:($l | map({name: .})), state:"OPEN", url:("https://github.com/o/r/issues/" + ($n|tostring)), milestone:null}' > "$STUB_DIR/issue-$1.json"
 }
-get() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
+RUN="$SANDBOX/run"; rm -rf "$RUN"; mkdir -p "$RUN"
+run_env="RUN_DIR='$RUN'; HOST=github.com; SLUG=o/r; OWNER=o; NAME=r; ME=me; BASE=dev; BASE_SHA=$SHA; PROJECT_SLUG=PVT_x; GRAPHQL_RESERVE=1000; REST_RESERVE=1000; DO_DUP=1; : > \"$RUN/warnings.txt\"; : > \"$RUN/unevaluated.tsv\"; : > \"$RUN/failed.txt\""
 
-for SH in bash zsh; do
-  # ---------- V1: closed verdict vocabulary ----------
-  OPEN='[12,40]'; SHIPPED='[7]'
-  for CASE in \
-    'needed|needed|null' \
-    'unclear|unclear|null' \
-    'likely-duplicate-of #12|likely-duplicate-of #12|#12' \
-    'already-fixed-by #7|already-fixed-by #7|#7' \
-    'likely-duplicate-of #99|unclear|null' \
-    'already-fixed-by #12|unclear|null' \
-    'likely-duplicate-of #7|unclear|null' \
-    'superseded-by #12|unclear|null' \
-    'needed (probably)|unclear|null' \
-    'likely-duplicate-of #12 and #40|unclear|null'
-  do
-    IN="${CASE%%|*}"; REST="${CASE#*|}"; WANT="${REST%%|*}"; WANT_CANON="${REST#*|}"
-    OUT=$(run_block "$SH" "$VERDICT_BLOCK" "VERDICT='$IN'" "CANDIDATES_OPEN='$OPEN'" "CANDIDATES_SHIPPED='$SHIPPED'")
-    GOT=$(get "$OUT" VERDICT); GOT_CANON=$(get "$OUT" CANONICAL); NOTE=$(get "$OUT" VERDICT_NOTE)
-    if [ "$GOT" != "$WANT" ] || [ "$GOT_CANON" != "$WANT_CANON" ]; then
-      fail "V1/$SH" "'$IN' -> '$GOT' canonical '$GOT_CANON' (want '$WANT' / '$WANT_CANON')"
-    elif [ "$WANT" = unclear ] && [ "$IN" != unclear ] && [ -z "$NOTE" ]; then
-      fail "V1/$SH" "'$IN' downgraded without a note"
-    fi
-  done
-  [ "$FAILS" = 0 ] && pass "V1/$SH" "vocabulary closed; unseen numbers and foreign wording downgrade with a note"
-
-  # ---------- V2: never max, existing block reported not replaced ----------
-  OUT=$(run_block "$SH" "$EFFORT_BLOCK" "PROPOSED_EFFORT=max" "EXISTING_EFFORT=")
-  [ "$(get "$OUT" EFFORT)" = xhigh ] || fail "V2/$SH" "proposed max did not clamp to xhigh: $(get "$OUT" EFFORT)"
-  [ -n "$(get "$OUT" EFFORT_NOTE)" ] || fail "V2/$SH" "clamp left no note"
-  [ "$(get "$OUT" EFFORT_STANCE)" = propose ] || fail "V2/$SH" "no block should be 'propose'"
-  OUT=$(run_block "$SH" "$EFFORT_BLOCK" "PROPOSED_EFFORT=high" "EXISTING_EFFORT=max")
-  [ "$(get "$OUT" EFFORT)" = high ] || fail "V2/$SH" "existing max must not become the proposal"
-  [ "$(get "$OUT" EFFORT_STANCE)" = disagree ] || fail "V2/$SH" "existing max vs proposed high should disagree"
-  [ "$(get "$OUT" EXISTING_EFFORT)" = max ] || fail "V2/$SH" "existing block value was rewritten"
-  OUT=$(run_block "$SH" "$EFFORT_BLOCK" "PROPOSED_EFFORT=medium" "EXISTING_EFFORT=medium")
-  [ "$(get "$OUT" EFFORT_STANCE)" = agree ] || fail "V2/$SH" "matching tiers should agree"
-  OUT=$(run_block "$SH" "$EFFORT_BLOCK" "PROPOSED_EFFORT=enormous" "EXISTING_EFFORT=")
-  [ "$(get "$OUT" EFFORT)" = xhigh ] || fail "V2/$SH" "foreign tier did not clamp"
-  : > "$SANDBOX/failed.txt"
-  jq -n '{number: 1, title: "t", author: {login: "me"}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", labels: [], state: "OPEN",
-          body: "## Plan\n\neffort: max\n\n```detent-agent\nschema: 1\neffort: medium\n```\n\n```yaml\neffort: xhigh\n```\n"}' > "$SANDBOX/issue-1.json"
-  OUT=$(run_block "$SH" "$EXISTING_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "ISSUE_FAILED=0")
-  [ "$(get "$OUT" EXISTING_EFFORT)" = medium ] || fail "V2/$SH" "extractor read outside the detent-agent fence: $(get "$OUT" EXISTING_EFFORT)"
-  jq -n '{number: 1, title: "t", author: {login: "me"}, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", labels: [], state: "OPEN", body: "## Plan\n\nno block here\n"}' > "$SANDBOX/issue-1.json"
-  OUT=$(run_block "$SH" "$EXISTING_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "ISSUE_FAILED=0")
-  [ -z "$(get "$OUT" EXISTING_EFFORT)" ] || fail "V2/$SH" "no block should yield empty"
-  [ "$FAILS" = 0 ] && pass "V2/$SH" "max never proposed; existing block reported, never replaced; fence-only extraction"
-
-  # ---------- V3: marker comment lookup — owned, exact grammar ----------
-  SHA=0123456789abcdef0123456789abcdef01234567
-  jq -n --arg sha "$SHA" '[
-    {id: 300, login: "someone", body: "unrelated", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z"},
-    {id: 301, login: "someone", body: ("quoting:\n<!-- issue-details:v1 dev=" + $sha + " -->\nnot mine"), created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"},
-    {id: 302, login: "other",   body: ("<!-- issue-details:v1 dev=" + $sha + " -->\nsomeone elses marker"), created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"},
-    {id: 303, login: "me",      body: ("<!-- issue-details:v10 dev=" + $sha + " -->\nfuture"), created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"},
-    {id: 304, login: "me",      body: "<!-- issue-details:v1 dev=abc -->\nbad sha", created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"},
-    {id: 305, login: "me",      body: ("<!-- issue-details:v1 dev=" + $sha + " -->junk\ntrailing text"), created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"},
-    {id: 306, login: "me",      body: ("reply:\n<!-- issue-details:v1 dev=" + $sha + " -->\nowned but quoted on line 2"), created_at: "2026-01-02T00:00:00Z", updated_at: "2026-01-02T00:00:00Z"}
-  ]' > "$SANDBOX/comments-1.json"
-  OUT=$(run_block "$SH" "$MARKER_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "ME=me")
-  [ "$(get "$OUT" COMMENT_ACTION)" = create ] || fail "V3/$SH" "foreign / quoted / v10 / bad-sha / trailing-junk / line-2 markers must all be ignored: $(get "$OUT" COMMENT_ACTION)"
-  [ -z "$(get "$OUT" MARKER_ID)" ] || fail "V3/$SH" "a non-owned or malformed marker matched: $(get "$OUT" MARKER_ID)"
-  jq -n --arg sha "$SHA" '[
-    {id: 400, login: "me", body: ("<!-- issue-details:v1 dev=" + $sha + " -->\n## Issue details"), created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-03T00:00:00Z"},
-    {id: 350, login: "x",  body: "hello", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z"}
-  ]' > "$SANDBOX/comments-1.json"
-  OUT=$(run_block "$SH" "$MARKER_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "ME=me")
-  [ "$(get "$OUT" COMMENT_ACTION)" = edit ] || fail "V3/$SH" "one owned marker should be edit"
-  [ "$(get "$OUT" MARKER_ID)" = 400 ] || fail "V3/$SH" "wrong marker id: $(get "$OUT" MARKER_ID)"
-  [ "$(get "$OUT" MARKER_UPDATED)" = "2026-01-03T00:00:00Z" ] || fail "V3/$SH" "snapshot updated_at not captured"
-  [ "$(get "$OUT" COMMENT_IDS)" = "[350,400]" ] || fail "V3/$SH" "comment id set not captured: $(get "$OUT" COMMENT_IDS)"
-  jq -n --arg sha "$SHA" '[
-    {id: 500, login: "me", body: ("<!-- issue-details:v1 dev=" + $sha + " -->\nnewer"), created_at: "2026-01-05T00:00:00Z", updated_at: "2026-01-05T00:00:00Z"},
-    {id: 400, login: "me", body: ("<!-- issue-details:v1 dev=" + $sha + " -->\nolder"), created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z"}
-  ]' > "$SANDBOX/comments-1.json"
-  OUT=$(run_block "$SH" "$MARKER_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "ME=me")
-  [ "$(get "$OUT" COMMENT_ACTION)" = refuse ] || fail "V3/$SH" "two owned markers must refuse, got $(get "$OUT" COMMENT_ACTION)"
-  [ "$(get "$OUT" MARKER_COUNT)" = 2 ] || fail "V3/$SH" "duplicate markers not counted"
-  grep -q 'delete all but one by hand' "$SANDBOX/warnings.txt" || fail "V3/$SH" "refusal did not name the manual cleanup"
-  [ "$FAILS" = 0 ] && pass "V3/$SH" "marker lookup: owned + exact grammar; create / edit / refuse"
-
-  # ---------- V4: the social rule ----------
-  OUT=$(run_block "$SH" "$SOCIAL_BLOCK" "ISSUE_AUTHOR=cory" "ME=michael" "VERDICT='likely-duplicate-of #12'" "CANONICAL='#12'" "BOARD_PRIORITY=Medium" "PRIORITY=High")
-  [ "$(get "$OUT" SELF_AUTHORED)" = 0 ] || fail "V4/$SH" "other author marked self"
-  case "$(get "$OUT" RECOMMENDATION)" in
-    *"@cory"*) : ;; *) fail "V4/$SH" "other author's recommendation not addressed to them: $(get "$OUT" RECOMMENDATION)" ;;
-  esac
-  case "$(get "$OUT" RECOMMENDATION)$(get "$OUT" PRIORITY_NOTE)" in
-    *close*|*park*) fail "V4/$SH" "close/park proposed on another author's issue" ;;
-  esac
-  case "$(get "$OUT" PRIORITY_NOTE)" in
-    *"@cory"*"left as is"*) : ;; *) fail "V4/$SH" "priority disagreement not phrased as a note to the author: $(get "$OUT" PRIORITY_NOTE)" ;;
-  esac
-  OUT=$(run_block "$SH" "$SOCIAL_BLOCK" "ISSUE_AUTHOR=michael" "ME=michael" "VERDICT='already-fixed-by #7'" "CANONICAL='#7'" "BOARD_PRIORITY=Medium" "PRIORITY=High")
-  [ "$(get "$OUT" SELF_AUTHORED)" = 1 ] || fail "V4/$SH" "running user not marked self"
-  case "$(get "$OUT" RECOMMENDATION)" in
-    "close"*"#7"*) : ;; *) fail "V4/$SH" "self-authored fixed issue should recommend close: $(get "$OUT" RECOMMENDATION)" ;;
-  esac
-  [ -z "$(get "$OUT" PRIORITY_NOTE)" ] || fail "V4/$SH" "self-authored priority disagreement needs no note to the author"
-  OUT=$(run_block "$SH" "$SOCIAL_BLOCK" "ISSUE_AUTHOR=" "ME=michael" "VERDICT='likely-duplicate-of #12'" "CANONICAL='#12'" "BOARD_PRIORITY=none" "PRIORITY=Low")
-  [ "$(get "$OUT" SELF_AUTHORED)" = 0 ] || fail "V4/$SH" "deleted-account author must not count as self"
-  case "$(get "$OUT" RECOMMENDATION)" in
-    *"for @:"*) fail "V4/$SH" "deleted account rendered as a dangling @: $(get "$OUT" RECOMMENDATION)" ;;
-    *"account deleted"*) : ;; *) fail "V4/$SH" "deleted account not named as such: $(get "$OUT" RECOMMENDATION)" ;;
-  esac
-  OUT=$(run_block "$SH" "$DECISION_BLOCK" "VERDICT='likely-duplicate-of #12'" "CLASSIFICATION=idea" "SELF_AUTHORED=0" "DECISION_REQUIRED=0")
-  [ "$(get "$OUT" NEEDS_DECISION)" = true ] || fail "V4/$SH" "other author's duplicate must need a decision"
-  OUT=$(run_block "$SH" "$DECISION_BLOCK" "VERDICT='likely-duplicate-of #12'" "CLASSIFICATION=idea" "SELF_AUTHORED=1" "DECISION_REQUIRED=0")
-  [ "$(get "$OUT" NEEDS_DECISION)" = false ] || fail "V4/$SH" "own duplicate needs no decision label"
-  OUT=$(run_block "$SH" "$DECISION_BLOCK" "VERDICT=needed" "CLASSIFICATION=question" "SELF_AUTHORED=1" "DECISION_REQUIRED=0")
-  [ "$(get "$OUT" NEEDS_DECISION)" = true ] || fail "V4/$SH" "a question is a decision"
-  OUT=$(run_block "$SH" "$DECISION_BLOCK" "VERDICT=needed" "CLASSIFICATION=bug" "SELF_AUTHORED=1" "DECISION_REQUIRED=0")
-  [ "$(get "$OUT" NEEDS_DECISION)" = false ] || fail "V4/$SH" "a plain needed bug needs no decision"
-  [ "$FAILS" = 0 ] && pass "V4/$SH" "social rule: no close/park for another author, note not field write, decision routed"
-
-  # ---------- V5: noise needs a mechanical signal ----------
-  printf 'body\n' > "$SANDBOX/body-9.md"
-  for T in 'TODO in apps/frontend/.next/dev/server/chunks/ssr/x.js:2812' 'chore: regenerate domain/storage/_generated/queries.go' 'stray file in node_modules/foo'; do
-    OUT=$(run_block "$SH" "$NOISE_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=9" "ISSUE_TITLE='$T'" "CLASSIFICATION=idea")
-    [ "$(get "$OUT" CLASSIFICATION)" = noise ] || fail "V5/$SH" "path signal missed: $T"
-  done
-  for T in 'fix(build): recognize worktree caches' 'perf: the build output is slow' 'docs: dist tarball notes'; do
-    OUT=$(run_block "$SH" "$NOISE_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=9" "ISSUE_TITLE='$T'" "CLASSIFICATION=idea")
-    [ "$(get "$OUT" CLASSIFICATION)" = idea ] || fail "V5/$SH" "prose mention misread as noise: $T"
-  done
-  printf 'looks fine\n<!-- detent-intake:abc123 -->\n' > "$SANDBOX/body-9.md"
-  OUT=$(run_block "$SH" "$NOISE_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=9" "ISSUE_TITLE='plain title'" "CLASSIFICATION=bug")
-  [ "$(get "$OUT" CLASSIFICATION)" = noise ] || fail "V5/$SH" "fingerprint did not force noise"
-  [ "$(get "$OUT" NOISE_SIGNAL)" = "detent-intake fingerprint" ] || fail "V5/$SH" "fingerprint signal not named"
-  [ "$FAILS" = 0 ] && pass "V5/$SH" "noise only on a fingerprint or a build-output/_generated/node_modules path"
-
-  # ---------- V6: refresh (fail closed) + guarded dispatcher ----------
-  C_NONE='[[{"id":1,"user":{"login":"x"},"body":"hi","updated_at":"2026-01-01T00:00:00Z"}]]'
-  C_MINE="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nmine\",\"updated_at\":\"2026-01-03T00:00:00Z\"}]]"
-  C_MINE_EDITED="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nmine\",\"updated_at\":\"2026-01-09T00:00:00Z\"}]]"
-  C_FOREIGN="[[{\"id\":401,\"user\":{\"login\":\"other\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\ntheirs\",\"updated_at\":\"2026-01-03T00:00:00Z\"}]]"
-  C_TWO="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\na\",\"updated_at\":\"2026-01-03T00:00:00Z\"},{\"id\":500,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nb\",\"updated_at\":\"2026-01-04T00:00:00Z\"}]]"
-  printf 'draft\n' > "$SANDBOX/comment-1.md"
-  ISSUE_OPEN='{"state":"OPEN","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"}]}'
-  ISSUE_CLOSED='{"state":"CLOSED","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"}]}'
-  ISSUE_MOVED='{"state":"OPEN","updatedAt":"2026-02-02T00:00:00Z","labels":[{"name":"bug"}]}'
-  ISSUE_RELABELLED='{"state":"OPEN","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"},{"name":"triage:needs-decision"}]}'
-  C_JUNK='[["junk"]]'
-  C_NONE_PLUS='[[{"id":1,"user":{"login":"x"},"body":"hi","updated_at":"2026-01-01T00:00:00Z"},{"id":2,"user":{"login":"y"},"body":"new","updated_at":"2026-01-02T00:00:00Z"}]]'
-  C_MINE_JUNK="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->junk\\nmine\",\"updated_at\":\"2026-01-03T00:00:00Z\"}]]"
-  COMMON=("RUN_DIR='$SANDBOX'" "ISSUE_NUM=1" "SLUG=o/r" "HOST=h" "ME=me" "ISSUE_UPDATED=2026-02-01T00:00:00Z" "ISSUE_LABELS='[\"bug\"]'" "STUB_LOG='$SANDBOX/log'")
-  refresh() { : > "$SANDBOX/log"; run_block "$SH" "$REFRESH_BLOCK" "${COMMON[@]}" "$@"; }
-  # create, clean
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_NONE'")
-  [ "$(get "$OUT" WRITE_OK)" = 1 ] || fail "V6/$SH" "clean create refused: $(get "$OUT" WRITE_NOTE)"
-  # create, but a foreign marker exists → still create (theirs is not ours)
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[401]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_FOREIGN'")
-  [ "$(get "$OUT" WRITE_OK)" = 1 ] || fail "V6/$SH" "foreign marker must not block our create: $(get "$OUT" WRITE_NOTE)"
-  # create, but our marker appeared since the read
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_MINE'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "create with a marker that appeared must be refused"
-  # edit, clean
-  OUT=$(refresh "COMMENT_ACTION=edit" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_MINE'")
-  [ "$(get "$OUT" WRITE_OK)" = 1 ] || fail "V6/$SH" "clean edit refused: $(get "$OUT" WRITE_NOTE)"
-  # malformed-but-array-shaped comments → fail closed, for both actions
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_JUNK'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "[[\"junk\"]] must fail closed on create"
-  OUT=$(refresh "COMMENT_ACTION=edit" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_JUNK'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "[[\"junk\"]] must fail closed on edit"
-  # labels changed since evaluation
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_RELABELLED'" "STUB_COMMENTS='$C_NONE'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "changed labels must be refused"
-  # a new comment (id set changed) since evaluation
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_NONE_PLUS'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "changed comment id set must be refused"
-  # an owned marker with trailing junk is not a marker: create sees none, edit sees its target gone
-  OUT=$(refresh "COMMENT_ACTION=edit" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_MINE_JUNK'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "trailing junk after the marker must not match in the refresh"
-  # edit, marker edited since the read
-  OUT=$(refresh "COMMENT_ACTION=edit" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_MINE_EDITED'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "stale marker must be refused"
-  # duplicate owned markers
-  OUT=$(refresh "COMMENT_ACTION=edit" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400,500]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_TWO'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "duplicate owned markers must be refused"
-  case "$(get "$OUT" WRITE_NOTE)" in *"delete all but one"*) : ;; *) fail "V6/$SH" "duplicate markers must name manual cleanup" ;; esac
-  # closed issue
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_CLOSED'" "STUB_COMMENTS='$C_NONE'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "closed issue must never be written"
-  # issue changed since evaluation
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_MOVED'" "STUB_COMMENTS='$C_NONE'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "changed updatedAt must be refused"
-  # API failure → fail closed
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_FAIL=1")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "failed refresh must fail closed"
-  # empty JSON → fail closed (jq on empty input exits 0 without -e)
-  OUT=$(refresh "COMMENT_ACTION=create" "MARKER_ID=" "MARKER_UPDATED=" "COMMENT_IDS='[1]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS=")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "empty comments response must fail closed"
-  # refuse action never becomes a write
-  OUT=$(refresh "COMMENT_ACTION=refuse" "MARKER_ID=400" "MARKER_UPDATED=2026-01-03T00:00:00Z" "COMMENT_IDS='[400]'" "STUB_ISSUE='$ISSUE_OPEN'" "STUB_COMMENTS='$C_MINE'")
-  [ "$(get "$OUT" WRITE_OK)" = 0 ] || fail "V6/$SH" "refuse action must not write"
-  # dispatcher: WRITE_OK=0 writes nothing at all
-  dispatch() { : > "$SANDBOX/log"; run_block "$SH" "$DISPATCH_BLOCK" "${COMMON[@]}" "$@" >/dev/null; cat "$SANDBOX/log"; }
-  LOG=$(dispatch "WRITE_OK=0" "COMMENT_ACTION=create" "MARKER_ID=" "NEEDS_DECISION=true" "WRITE_NOTE=x")
-  [ -z "$LOG" ] || fail "V6/$SH" "WRITE_OK=0 must issue no gh call: $LOG"
-  # create + no decision → exactly one call, a comment
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=create" "MARKER_ID=" "NEEDS_DECISION=false" "WRITE_NOTE=")
-  [ "$(printf '%s\n' "$LOG" | grep -c .)" = 1 ] || fail "V6/$SH" "create without decision must be one call: $LOG"
-  case "$LOG" in *"-X POST repos/o/r/issues/1/comments"*) : ;; *) fail "V6/$SH" "create must be a bare POST: $LOG" ;; esac
-  # ambiguous POST, comment landed → reported posted, exactly one POST, then the label
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=create" "MARKER_ID=" "NEEDS_DECISION=true" "WRITE_NOTE=" "STUB_POST_FAIL=1" "STUB_COMMENTS_AFTER='$C_MINE'")
-  [ "$(printf '%s\n' "$LOG" | grep -c 'X POST')" = 1 ] || fail "V6/$SH" "an ambiguous POST must never be retried: $LOG"
-  case "$LOG" in *"--add-label"*) : ;; *) fail "V6/$SH" "a confirmed-landed POST should still label: $LOG" ;; esac
-  # ambiguous POST, nothing landed → not retried, no label
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=create" "MARKER_ID=" "NEEDS_DECISION=true" "WRITE_NOTE=" "STUB_POST_FAIL=1" "STUB_COMMENTS_AFTER='$C_NONE'")
-  [ "$(printf '%s\n' "$LOG" | grep -c 'X POST')" = 1 ] || fail "V6/$SH" "a failed POST must never be retried: $LOG"
-  case "$LOG" in *"--add-label"*) fail "V6/$SH" "no label after a failed create" ;; esac
-  # create + decision → comment then label, no PATCH
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=create" "MARKER_ID=" "NEEDS_DECISION=true" "WRITE_NOTE=")
-  [ "$(printf '%s\n' "$LOG" | grep -c .)" = 2 ] || fail "V6/$SH" "create with decision must be two calls: $LOG"
-  case "$LOG" in *PATCH*) fail "V6/$SH" "create run issued a PATCH" ;; esac
-  case "$LOG" in *"--add-label triage:needs-decision"*) : ;; *) fail "V6/$SH" "decision label missing: $LOG" ;; esac
-  printf '%s\n' "$LOG" | tail -1 | grep -q 'add-label' || fail "V6/$SH" "label must come after the comment"
-  # edit + no decision → exactly one PATCH on the marker id
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=edit" "MARKER_ID=400" "NEEDS_DECISION=false" "WRITE_NOTE=")
-  [ "$(printf '%s\n' "$LOG" | grep -c .)" = 1 ] || fail "V6/$SH" "edit must be one call: $LOG"
-  case "$LOG" in *"-X PATCH repos/o/r/issues/comments/400"*) : ;; *) fail "V6/$SH" "edit did not PATCH the marker: $LOG" ;; esac
-  case "$LOG" in *"issue comment"*) fail "V6/$SH" "edit run posted a second comment" ;; esac
-  # refuse action with WRITE_OK somehow 1 → still no write
-  LOG=$(dispatch "WRITE_OK=1" "COMMENT_ACTION=refuse" "MARKER_ID=400" "NEEDS_DECISION=true" "WRITE_NOTE=")
-  [ -z "$LOG" ] || fail "V6/$SH" "refuse must issue no gh call: $LOG"
-  [ "$FAILS" = 0 ] && pass "V6/$SH" "refresh fails closed on stale/closed/changed/relabelled/new-comment/failed/empty/junk; bare POST never retried; label only on decision"
-
-  # ---------- V7: --since validation, URL parsing, the 50 cap ----------
-  args_rc() {  # $1 = argument string, substituted for $ARGUMENTS the way the driver does
-    sed "s|\$ARGUMENTS|$1|" "$ARGS_BLOCK" > "$SANDBOX/args.sh"
-    run_script "$SH" "$SANDBOX/args.sh"
-  }
-  for BAD in '--since 1oopsd' '--since 0d' '--since 7' '--since' 'abc' '' '3094 --since 7d' 'https://github.com/o/r/pull/5' '3094 https://github.com/o/r/issues/5' 'https://github.com/o/r/issues/5junk'; do
-    [ "$(args_rc "$BAD")" = 2 ] || fail "V7/$SH" "'$BAD' should exit 2"
-  done
-  for GOOD in '--since 7d' '3094' '3094 3087 --json' 'https://github.com/o/r/issues/5'; do
-    [ "$(args_rc "$GOOD")" = 0 ] || fail "V7/$SH" "'$GOOD' should parse"
-  done
-  sed "s|\$ARGUMENTS|https://github.com/o/r/issues/5|" "$ARGS_BLOCK" > "$SANDBOX/args.sh"
-  OUT=$(run_block "$SH" "$SANDBOX/args.sh")
-  [ "$(get "$OUT" URL_SLUG)" = "o/r" ] && [ "$(get "$OUT" URL_HOST)" = "github.com" ] && [ "$(get "$OUT" ISSUE_ARGS)" = " 5" ] \
-    || fail "V7/$SH" "URL not parsed into host/slug/number: $(get "$OUT" URL_SLUG) $(get "$OUT" ISSUE_ARGS)"
-  # the cap: 60 in-window issues, newest first as gh returns them → oldest 50 selected, warning emitted
-  TODAY=$(date -u +%Y-%m-%d)   # inside any --since window; the boundary is computed from now
-  LIST=$(jq -nc --arg d "$TODAY" '[range(60) | {number: (1000 + .), createdAt: ($d + "T00:" + ("0" + tostring)[-2:] + ":00Z")}] | reverse')
-  : > "$SANDBOX/warnings.txt"
-  OUT=$(run_block "$SH" "$SINCE_BLOCK" "RUN_DIR='$SANDBOX'" "SLUG=o/r" "SINCE_ARG=30d" "STUB_LIST='$LIST'")
-  [ "$(get "$OUT" SINCE_TOTAL)" = 60 ] || fail "V7/$SH" "expected 60 in-window matches, got $(get "$OUT" SINCE_TOTAL)"
-  [ "$(wc -l < "$SANDBOX/selected.txt" | tr -d ' ')" = 50 ] || fail "V7/$SH" "cap not applied: $(wc -l < "$SANDBOX/selected.txt") selected"
-  FIRST=$(head -1 "$SANDBOX/selected.txt"); OLDEST=$(jq -r 'min_by(.createdAt) | .number' <<<"$LIST")
-  [ "$FIRST" = "$OLDEST" ] || fail "V7/$SH" "selection must start at the oldest issue ($OLDEST), got $FIRST"
-  grep -q 'evaluating the oldest 50' "$SANDBOX/warnings.txt" || fail "V7/$SH" "cap warning not recorded"
-  [ "$FAILS" = 0 ] && pass "V7/$SH" "--since strict; URL parsed and alone; oldest-50 cap with warning"
-
-  # ---------- V8: the two rate gates ----------
-  [ "$(run_script "$SH" "$GATE0_BLOCK" "HOST=h" "STUB_GATE_RC=1")" = 3 ] || fail "V8/$SH" "phase-0 gate below reserve must exit 3"
-  [ "$(run_script "$SH" "$GATE0_BLOCK" "HOST=h" "STUB_GATE_RC=2")" = 3 ] || fail "V8/$SH" "phase-0 gate unreadable must exit 3"
-  [ "$(run_script "$SH" "$GATE0_BLOCK" "HOST=h" "STUB_GATE_RC=0")" = 0 ] || fail "V8/$SH" "phase-0 gate clean must continue"
-  G1=("RUN_DIR='$SANDBOX'" "HOST=h" "ISSUE_NUM=1" "ISSUE_ERROR=" "REST_RESERVE=1000" "GRAPHQL_RESERVE=1000" "SEARCH_RESERVE=5" "STOP_BATCH=0" "STOP_REASON=" "ISSUE_FAILED=0" "STUB_LOG='$SANDBOX/log'")
-  RATE_OK='{"resources":{"core":{"remaining":4000},"graphql":{"remaining":4000},"search":{"remaining":29,"reset":0}}}'
-  RATE_CORE='{"resources":{"core":{"remaining":12},"graphql":{"remaining":4000},"search":{"remaining":29,"reset":0}}}'
-  RATE_GQL='{"resources":{"core":{"remaining":4000},"graphql":{"remaining":900},"search":{"remaining":29,"reset":0}}}'
-  RATE_SEARCH='{"resources":{"core":{"remaining":4000},"graphql":{"remaining":4000},"search":{"remaining":1,"reset":1}}}'
-  gate1() { run_block "$SH" "$GATE1_RUN" "${G1[@]}" "$@"; }
-  OUT=$(gate1 "STUB_RATE='$RATE_OK'");     [ "$(get "$OUT" STOP_BATCH)" = 0 ] && [ "$(get "$OUT" ISSUE_FAILED)" = 0 ] || fail "V8/$SH" "healthy gate must not stop"
-  OUT=$(gate1 "STUB_RATE='$RATE_CORE'");   [ "$(get "$OUT" STOP_BATCH)" = 1 ] && [ "$(get "$OUT" ISSUE_FAILED)" = 1 ] || fail "V8/$SH" "core below reserve must stop the batch"
-  OUT=$(gate1 "STUB_RATE='$RATE_GQL'");    [ "$(get "$OUT" STOP_BATCH)" = 1 ] || fail "V8/$SH" "graphql below reserve must stop the batch"
-  OUT=$(gate1 "STUB_RATE='$RATE_SEARCH'"); [ "$(get "$OUT" STOP_BATCH)" = 0 ] || fail "V8/$SH" "search below reserve must sleep, not stop"
-  OUT=$(gate1 "STUB_FAIL=1");              [ "$(get "$OUT" STOP_BATCH)" = 1 ] || fail "V8/$SH" "unreadable rate_limit must stop the batch"
-  OUT=$(gate1 "STUB_RATE='{}'");           [ "$(get "$OUT" STOP_BATCH)" = 1 ] || fail "V8/$SH" "malformed rate_limit ({}) must fail closed"
-  OUT=$(gate1 "STUB_RATE='{\"resources\":{\"core\":{\"remaining\":null},\"graphql\":{\"remaining\":4000},\"search\":{\"remaining\":29,\"reset\":0}}}'")
-  [ "$(get "$OUT" STOP_BATCH)" = 1 ] || fail "V8/$SH" "a null bucket must fail closed"
-  # issue_gh itself: a terminal 403 sets STOP_BATCH and ISSUE_ERROR when written to a file
-  printf 'issue_gh issue view 1 -R o/r > "$RUN_DIR/x.json" || ISSUE_FAILED=1\n' > "$SANDBOX/ig.sh"
-  { cat "$ISSUEGH_BLOCK"; cat "$SANDBOX/ig.sh"; } > "$SANDBOX/ig-run.sh"
-  OUT=$(run_block "$SH" "$SANDBOX/ig-run.sh" "${G1[@]}" "STUB_FAIL=1")
-  [ "$(get "$OUT" STOP_BATCH)" = 1 ] && [ "$(get "$OUT" ISSUE_FAILED)" = 1 ] || fail "V8/$SH" "a 403 through issue_gh must stop the batch and fail the issue"
-  case "$(get "$OUT" ISSUE_ERROR)" in *403*) : ;; *) fail "V8/$SH" "ISSUE_ERROR should carry the error line: $(get "$OUT" ISSUE_ERROR)" ;; esac
-  [ "$FAILS" = 0 ] && pass "V8/$SH" "phase-0 gate exits 3 under errexit; per-issue gate stops on core/graphql, sleeps on search; 403 stops the batch"
-
-  # ---------- V9: merged-PR sweep pagination ----------
-  rm -f "$SANDBOX"/issue-*.json
-  jq -n '{createdAt: "2026-01-10T00:00:00Z"}' > "$SANDBOX/issue-7.json"
-  jq -n '{createdAt: "2026-01-05T00:00:00Z"}' > "$SANDBOX/issue-8.json"
-  P1='{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[{"number":10,"title":"a","mergedAt":"2026-01-06T00:00:00Z","closingIssuesReferences":{"pageInfo":{"hasNextPage":false},"nodes":[{"number":8}]}}]}}}'
-  P2='{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":11,"title":"b","mergedAt":"2026-01-07T00:00:00Z","closingIssuesReferences":{"pageInfo":{"hasNextPage":true},"nodes":[{"number":9}]}}]}}}'
-  PN='{"data":{"search":{"issueCount":900,"pageInfo":{"hasNextPage":true,"endCursor":"c"},"nodes":[{"number":12,"title":"c","mergedAt":"2026-01-08T00:00:00Z","closingIssuesReferences":{"pageInfo":{"hasNextPage":false},"nodes":[]}}]}}}'
-  : > "$SANDBOX/log"
-  SW=("RUN_DIR='$SANDBOX'" "SLUG=o/r" "BASE=dev" "HOST=h" "ISSUE_NUM=sweep" "ISSUE_ERROR=" "STOP_BATCH=0" "STOP_REASON=" "STUB_LOG='$SANDBOX/log'")
-  : > "$SANDBOX/warnings.txt"; rm -f "$SANDBOX/log.page"
-  OUT=$(run_block "$SH" "$SWEEP_RUN" "${SW[@]}" "STUB_GQL_1='$P1'" "STUB_GQL_2='$P2'")
-  [ "$(get "$OUT" SHIPPED_TRUNCATED)" = false ] || fail "V9/$SH" "two pages fully read must not be truncated"
-  [ "$(jq length "$SANDBOX/shipped.json")" = 2 ] || fail "V9/$SH" "both pages must accumulate: $(cat "$SANDBOX/shipped.json")"
-  [ "$(jq -c '.[0].issues' "$SANDBOX/shipped.json")" = "[8]" ] || fail "V9/$SH" "closingIssuesReferences not extracted"
-  [ "$(jq -r '.[1].issues_truncated' "$SANDBOX/shipped.json")" = true ] || fail "V9/$SH" "a PR with >100 closing refs must be flagged"
-  grep -q 'PR #11 closes more than 100 issues' "$SANDBOX/warnings.txt" || fail "V9/$SH" "truncated closing list must warn by PR number"
-  # per-issue: #7 is not listed by #11, whose list was truncated → unknown, not absent
-  printf '%s' "$(jq -c . "$SANDBOX/shipped.json")" > "$SANDBOX/shipped.json"
-  FIXED_BLOCK=$(pick 'fixed-by-unknown-' facts)
-  printf '[]' > "$SANDBOX/open-prs.json"
-  OUT=$(run_block "$SH" "$FIXED_BLOCK" "RUN_DIR='$SANDBOX'" "ISSUE_NUM=7" "ISSUE_CREATED=2026-01-01T00:00:00Z")
-  [ "$(jq -c . "$SANDBOX/fixed-by-unknown-7.json")" = "[11]" ] || fail "V9/$SH" "truncated PR must be an unknown match: $(cat "$SANDBOX/fixed-by-unknown-7.json")"
-  [ "$(jq -c . "$SANDBOX/fixed-by-7.json")" = "[]" ] || fail "V9/$SH" "an unknown match must not count as fixed"
-  grep -q 'merged:>=2026-01-05T00:00:00Z' "$SANDBOX/log" || fail "V9/$SH" "window must start at the earliest selected createdAt: $(cat "$SANDBOX/log")"
-  rm -f "$SANDBOX/log.page"
-  OUT=$(run_block "$SH" "$SWEEP_RUN" "${SW[@]}" "STUB_GQL_1='$PN'" "STUB_GQL_2='$PN'" "STUB_GQL_3='$PN'" "STUB_GQL_4='$PN'" "STUB_GQL_5='$PN'" "STUB_GQL_6='$PN'")
-  [ "$(get "$OUT" SHIPPED_TRUNCATED)" = true ] || fail "V9/$SH" "hasNextPage at the page cap must report truncation"
-  [ "$(get "$OUT" SWEEP_PAGE)" = 5 ] || fail "V9/$SH" "page cap is 5, ran $(get "$OUT" SWEEP_PAGE)"
-  rm -f "$SANDBOX/log.page"
-  OUT=$(run_block "$SH" "$SWEEP_RUN" "${SW[@]}" "STUB_PAGES_OK=0")
-  [ "$(get "$OUT" SHIPPED_TRUNCATED)" = true ] || fail "V9/$SH" "a failed page must report truncation"
-  [ "$(jq length "$SANDBOX/shipped.json")" = 0 ] || fail "V9/$SH" "a failed first page must yield an empty sweep, not stale data"
-  rm -f "$SANDBOX/log.page"
-  OUT=$(run_block "$SH" "$SWEEP_RUN" "${SW[@]}" "STUB_FAIL=1")
-  [ "$(get "$OUT" STOP_BATCH)" = 1 ] || fail "V9/$SH" "a 403 on a sweep page must stop the batch"
-  [ "$FAILS" = 0 ] && pass "V9/$SH" "sweep window from earliest filing; truncation from pagination only; 403 stops; >100 refs = unknown"
-
-  # ---------- V10: two passes — pass B reloads each issue's own values ----------
-  rm -f "$SANDBOX"/issue-*.json "$SANDBOX/failed.txt"; : > "$SANDBOX/failed.txt"
-  TP=("RUN_DIR='$SANDBOX'" "SLUG=o/r" "STOP_BATCH=0" "STOP_REASON=" "ISSUE_FAILED=0" "ISSUE_ERROR=" "STUB_LOG='$SANDBOX/log'")
-  I1='{"number":21,"title":"first","author":{"login":"alice"},"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T01:00:00Z","labels":[{"name":"z"},{"name":"a"}],"state":"OPEN","body":"one\n```detent-agent\neffort: high\n```"}'
-  I2='{"number":22,"title":"second","author":{"login":"bob"},"createdAt":"2026-01-02T00:00:00Z","updatedAt":"2026-01-02T01:00:00Z","labels":[],"state":"OPEN","body":"two"}'
-  run_block "$SH" "$FETCH_RUN" "${TP[@]}" "ISSUE_NUM=21" "STUB_ISSUE='$I1'" >/dev/null
-  run_block "$SH" "$FETCH_RUN" "${TP[@]}" "ISSUE_NUM=22" "STUB_ISSUE='$I2'" >/dev/null
-  OUT=$(run_block "$SH" "$FETCH_RUN" "${TP[@]}" "ISSUE_NUM=23" "STUB_FAIL=404")
-  [ "$(get "$OUT" ISSUE_FAILED)" = 1 ] || fail "V10/$SH" "a 404 in pass A must fail the issue"
-  [ "$(get "$OUT" STOP_BATCH)" = 0 ] || fail "V10/$SH" "a 404 must not stop the batch"
-  grep -qx 23 "$SANDBOX/failed.txt" || fail "V10/$SH" "pass-A failure not persisted to failed.txt"
-  # pass B: a fresh shell per issue, everything must come from the file
-  OUT=$(run_block "$SH" "$LOAD_BLOCK" "${TP[@]}" "ISSUE_NUM=22" "ISSUE_TITLE=stale" "ISSUE_AUTHOR=stale" "EXISTING_EFFORT=stale" "ISSUE_LABELS=stale")
-  [ "$(get "$OUT" ISSUE_TITLE)" = second ] && [ "$(get "$OUT" ISSUE_AUTHOR)" = bob ] && [ "$(get "$OUT" ISSUE_UPDATED)" = "2026-01-02T01:00:00Z" ] \
-    && [ "$(get "$OUT" ISSUE_LABELS)" = "[]" ] && [ -z "$(get "$OUT" EXISTING_EFFORT)" ] && [ "$(cat "$SANDBOX/body-22.md")" = two ] \
-    || fail "V10/$SH" "pass B did not reload #22's own values: $(get "$OUT" ISSUE_TITLE)/$(get "$OUT" ISSUE_AUTHOR)/$(get "$OUT" EXISTING_EFFORT)"
-  OUT=$(run_block "$SH" "$LOAD_BLOCK" "${TP[@]}" "ISSUE_NUM=21" "ISSUE_TITLE=stale" "ISSUE_AUTHOR=stale" "EXISTING_EFFORT=stale" "ISSUE_LABELS=stale")
-  [ "$(get "$OUT" ISSUE_TITLE)" = first ] && [ "$(get "$OUT" ISSUE_AUTHOR)" = alice ] && [ "$(get "$OUT" ISSUE_UPDATED)" = "2026-01-01T01:00:00Z" ] \
-    && [ "$(get "$OUT" ISSUE_LABELS)" = '["a","z"]' ] && [ "$(get "$OUT" EXISTING_EFFORT)" = high ] \
-    || fail "V10/$SH" "pass B did not reload #21's own values: $(get "$OUT" ISSUE_TITLE)/$(get "$OUT" ISSUE_LABELS)/$(get "$OUT" EXISTING_EFFORT)"
-  OUT=$(run_block "$SH" "$LOAD_BLOCK" "${TP[@]}" "ISSUE_NUM=23")
-  [ "$(get "$OUT" PASS_SKIP)" = 1 ] && [ "$(get "$OUT" ISSUE_FAILED)" = 1 ] || fail "V10/$SH" "pass B must skip a pass-A failure"
-  cp "$SANDBOX/issue-21.json" "$SANDBOX/issue-24.json"   # a file for the wrong issue is not this issue's record
-  OUT=$(run_block "$SH" "$LOAD_BLOCK" "${TP[@]}" "ISSUE_NUM=24")
-  [ "$(get "$OUT" PASS_SKIP)" = 1 ] || fail "V10/$SH" "a record whose number differs must not load"
-  [ "$FAILS" = 0 ] && pass "V10/$SH" "two passes: pass B reloads per-issue values from the file; pass-A failures persisted and skipped"
-
-  # ---------- V11: a noise issue issues zero searches ----------
-  DD=("RUN_DIR='$SANDBOX'" "SLUG=o/r" "STOP_BATCH=0" "ISSUE_FAILED=0" "ISSUE_ERROR=" "ISSUE_NUM=5" "ISSUE_TITLE='engagement nightly lookback rewrite'" "STUB_LOG='$SANDBOX/log'")
-  : > "$SANDBOX/log"; OUT=$(run_block "$SH" "$DEDUPE_RUN" "${DD[@]}" "NOISE_SIGNAL='detent-intake fingerprint'" "DO_DUP=1")
-  [ -z "$(cat "$SANDBOX/log")" ] || fail "V11/$SH" "noise must issue no search: $(cat "$SANDBOX/log")"
-  [ "$(get "$OUT" DEDUPE_SKIPPED)" = 1 ] && [ "$(cat "$SANDBOX/dup-issues-5.json")" = "[]" ] || fail "V11/$SH" "skip must initialise empty candidates"
-  : > "$SANDBOX/log"; OUT=$(run_block "$SH" "$DEDUPE_RUN" "${DD[@]}" "NOISE_SIGNAL=" "DO_DUP=0")
-  [ -z "$(cat "$SANDBOX/log")" ] || fail "V11/$SH" "--no-dup-search must issue no search"
-  : > "$SANDBOX/log"; OUT=$(run_block "$SH" "$DEDUPE_RUN" "${DD[@]}" "NOISE_SIGNAL=" "DO_DUP=1" "STUB_LIST='[]'")
-  [ "$(grep -c . "$SANDBOX/log")" = 2 ] || fail "V11/$SH" "a searchable title must issue exactly two searches: $(cat "$SANDBOX/log")"
-  [ "$(get "$OUT" TERMS)" = "engagement lookback nightly" ] || fail "V11/$SH" "terms: $(get "$OUT" TERMS)"
-  [ "$FAILS" = 0 ] && pass "V11/$SH" "dedupe: zero searches on noise or --no-dup-search; two otherwise"
+# ---------- V1: closed verdict vocabulary ----------
+for CASE in 'needed|needed|null' 'unclear|unclear|null' 'likely-duplicate-of #12|likely-duplicate-of #12|#12' 'already-fixed-by #7|already-fixed-by #7|#7' \
+  'likely-duplicate-of #99|unclear|null' 'already-fixed-by #12|unclear|null' 'likely-duplicate-of #7|unclear|null' 'superseded-by #12|unclear|null' \
+  'needed (probably)|unclear|null' 'likely-duplicate-of #12 and #40|unclear|null'; do
+  IN="${CASE%%|*}"; REST="${CASE#*|}"; WANT="${REST%%|*}"; WANT_CANON="${REST#*|}"
+  OUT=$(with_script "id_verdict_guard '$IN' '[12,40]' '[7]'")
+  GOT="${OUT%%|*}"; GOT_CANON=$(printf '%s' "$OUT" | cut -d'|' -f2); NOTE="${OUT##*|}"
+  [ "$GOT" = "$WANT" ] && [ "$GOT_CANON" = "$WANT_CANON" ] || fail V1 "'$IN' -> '$GOT' / '$GOT_CANON' (want '$WANT' / '$WANT_CANON')"
+  if [ "$WANT" = unclear ] && [ "$IN" != unclear ] && [ -z "$NOTE" ]; then fail V1 "'$IN' downgraded without a note"; fi
 done
+[ "$FAILS" = 0 ] && pass V1 "vocabulary closed; unseen numbers and foreign wording downgrade with a note"
+
+# ---------- V2: never max; existing block reported, never replaced ----------
+OUT=$(with_script "id_effort_guard max ''");        [ "${OUT%%|*}" = xhigh ] && [ -n "${OUT##*|}" ] || fail V2 "max did not clamp with a note: $OUT"
+OUT=$(with_script "id_effort_guard high max");      [ "${OUT%%|*}" = high ] && [ "$(printf '%s' "$OUT" | cut -d'|' -f2)" = disagree ] || fail V2 "existing max must be reported as disagree, not adopted: $OUT"
+OUT=$(with_script "id_effort_guard medium medium"); [ "$(printf '%s' "$OUT" | cut -d'|' -f2)" = agree ] || fail V2 "matching tiers should agree"
+OUT=$(with_script "id_effort_guard enormous ''");   [ "${OUT%%|*}" = xhigh ] || fail V2 "foreign tier did not clamp"
+reset_stub; mkissue 1 t me '[]' $'## Plan\n\neffort: max\n\n```detent-agent\nschema: 1\neffort: medium\n```\n\n```yaml\neffort: xhigh\n```'
+with_script "$run_env; id_fetch 1" >/dev/null
+[ "$(jq -r .existing_effort "$RUN/state-1.json")" = medium ] || fail V2 "extractor read outside the detent-agent fence: $(jq -r .existing_effort "$RUN/state-1.json")"
+mkissue 1 t me '[]' $'## Plan\n\nno block here'; with_script "$run_env; id_fetch 1" >/dev/null
+[ -z "$(jq -r .existing_effort "$RUN/state-1.json")" ] || fail V2 "no block should yield empty"
+[ "$FAILS" = 0 ] && pass V2 "max never proposed; existing block reported, never replaced; fence-only extraction"
+
+# ---------- V3: marker lookup — owned, exact first-line grammar ----------
+comments() { jq -n --arg sha "$SHA" "$1" > "$STUB_DIR/comments-1.json"; }
+comments '[[
+  {id:300, user:{login:"someone"}, body:"unrelated", updated_at:"2026-01-01T00:00:00Z"},
+  {id:301, user:{login:"someone"}, body:("quoting:\n<!-- issue-details:v1 dev=" + $sha + " -->\nnot mine"), updated_at:"2026-01-02T00:00:00Z"},
+  {id:302, user:{login:"other"},   body:("<!-- issue-details:v1 dev=" + $sha + " -->\nsomeone elses"), updated_at:"2026-01-02T00:00:00Z"},
+  {id:303, user:{login:"me"},      body:("<!-- issue-details:v10 dev=" + $sha + " -->\nfuture"), updated_at:"2026-01-02T00:00:00Z"},
+  {id:304, user:{login:"me"},      body:"<!-- issue-details:v1 dev=abc -->\nbad sha", updated_at:"2026-01-02T00:00:00Z"},
+  {id:305, user:{login:"me"},      body:("<!-- issue-details:v1 dev=" + $sha + " -->junk\ntrailing"), updated_at:"2026-01-02T00:00:00Z"},
+  {id:306, user:{login:"me"},      body:("reply:\n<!-- issue-details:v1 dev=" + $sha + " -->\nowned, quoted on line 2"), updated_at:"2026-01-02T00:00:00Z"}]]'
+with_script "$run_env; id_comments 1" >/dev/null
+[ "$(jq -r .comment_action "$RUN/state-1.json")" = create ] || fail V3 "foreign / quoted / v10 / bad-sha / trailing-junk / line-2 markers must all be ignored: $(jq -r .comment_action "$RUN/state-1.json")"
+[ "$(jq -r .marker_id "$RUN/state-1.json")" = null ] || fail V3 "a non-owned or malformed marker matched"
+comments '[[{id:400, user:{login:"me"}, body:("<!-- issue-details:v1 dev=" + $sha + " -->\n## Issue details"), updated_at:"2026-01-03T00:00:00Z"},
+            {id:350, user:{login:"x"},  body:"hello", updated_at:"2026-01-01T00:00:00Z"}]]'
+with_script "$run_env; id_comments 1" >/dev/null
+[ "$(jq -r .comment_action "$RUN/state-1.json")" = edit ] && [ "$(jq -r .marker_id "$RUN/state-1.json")" = 400 ] || fail V3 "one owned marker should be edit #400"
+[ "$(jq -r .marker_updated "$RUN/state-1.json")" = "2026-01-03T00:00:00Z" ] || fail V3 "marker updated_at not captured"
+[ "$(jq -c .comments_fingerprint "$RUN/state-1.json")" = '[{"id":350,"updated_at":"2026-01-01T00:00:00Z"},{"id":400,"updated_at":"2026-01-03T00:00:00Z"}]' ] || fail V3 "full comment fingerprint not captured: $(jq -c .comments_fingerprint "$RUN/state-1.json")"
+comments '[[{id:500, user:{login:"me"}, body:("<!-- issue-details:v1 dev=" + $sha + " -->\nnewer"), updated_at:"2026-01-05T00:00:00Z"},
+            {id:400, user:{login:"me"}, body:("<!-- issue-details:v1 dev=" + $sha + " -->\nolder"), updated_at:"2026-01-01T00:00:00Z"}]]'
+with_script "$run_env; id_comments 1" >/dev/null 2>&1
+[ "$(jq -r .comment_action "$RUN/state-1.json")" = refuse ] && [ "$(jq -r .marker_count "$RUN/state-1.json")" = 2 ] || fail V3 "two owned markers must refuse"
+grep -q 'delete all but one by hand' "$RUN/warnings.txt" || fail V3 "refusal did not name the manual cleanup"
+printf '[["junk"]]' > "$STUB_DIR/comments-1.json"
+with_script "$run_env; id_comments 1 && echo OKAY" | grep -q OKAY && fail V3 "malformed comments must be a fetch failure"
+[ "$FAILS" = 0 ] && pass V3 "marker lookup: owned + exact grammar; create / edit / refuse; full fingerprint; malformed = failure"
+
+# ---------- V4: the social rule and needs_decision (finalize) ----------
+mkstate() {  # <n> <author> <self:true|false> <board-priority> <verdict-candidates-open> <existing-effort>
+  jq -n --argjson n "$1" --arg a "$2" --argjson s "$3" --arg bp "$4" --argjson open "$5" --arg eff "$6" \
+    '{number:$n, evaluated:true, error:null, title:"t", author:$a, created_at:"2026-01-10T00:00:00Z", updated_at:"2026-02-01T00:00:00Z", state:"OPEN",
+      url:"u", labels:[], body_path:"", existing_effort:$eff, comments_fingerprint:[], marker_count:0, marker_id:null, marker_updated:"", comment_action:"create",
+      noise_signal:"", board_status:"Todo", board_priority:$bp, dedupe_skipped:0, terms:"a b c", candidates_open:$open, candidates_shipped:[7], fixed_by_unknown:[],
+      in_flight:[], dup_issues:[], dup_prs:[], goal_refs:[], goal_own_label:null, self_authored:$s}' > "$RUN/state-$1.json"
+}
+mkjudge() { jq -n --arg c "$1" --arg v "$2" --arg p "$3" --arg e "$4" --argjson d "${5:-false}" '{classification:$c, verdict:$v, priority:$p, proposed_effort:$e, decision_required:$d, evidence:{classification:"x", priority:"y"}}' > "$RUN/judgement-$6.json"; }
+: > "$RUN/goal-registry.tsv"; : > "$RUN/goal-labels.txt"; printf '1\n' > "$RUN/selected.txt"
+mkstate 1 cory false Medium '[12]' ''; mkjudge idea 'likely-duplicate-of #12' High high false 1
+with_script "$run_env; id_finalize_issue 1" >/dev/null
+R="$RUN/result-1.json"
+[ "$(jq -r .self_authored "$R")" = false ] || fail V4 "other author marked self"
+case "$(jq -r .recommendation "$R")" in *"@cory"*) : ;; *) fail V4 "recommendation not addressed to the author: $(jq -r .recommendation "$R")" ;; esac
+case "$(jq -r '.recommendation + .priority_note' "$R")" in *close*|*park*) fail V4 "close/park proposed on another author's issue" ;; esac
+case "$(jq -r .priority_note "$R")" in *"@cory"*"left as is"*) : ;; *) fail V4 "priority disagreement not a note to the author" ;; esac
+[ "$(jq -r .needs_decision "$R")" = true ] || fail V4 "other author's duplicate must need a decision"
+grep -q 'close' "$RUN/comment-1.md" && fail V4 "the word close reached another author's comment"
+mkstate 1 me true Medium '[12]' ''; mkjudge bug 'already-fixed-by #7' High high false 1
+with_script "$run_env; id_finalize_issue 1" >/dev/null
+case "$(jq -r .recommendation "$R")" in "close"*"#7"*) : ;; *) fail V4 "self-authored fixed issue should recommend close: $(jq -r .recommendation "$R")" ;; esac
+[ "$(jq -r .priority_note "$R")" = null ] && [ "$(jq -r .needs_decision "$R")" = false ] || fail V4 "own fixed issue: no author note, no decision"
+mkstate 1 '' false none '[12]' ''; mkjudge idea 'likely-duplicate-of #12' Low high false 1
+with_script "$run_env; id_finalize_issue 1" >/dev/null
+case "$(jq -r .recommendation "$R")" in *"for @:"*) fail V4 "deleted account rendered as @:" ;; *"account deleted"*) : ;; *) fail V4 "deleted account not named" ;; esac
+mkstate 1 me true none '[]' ''; mkjudge question needed none medium false 1; with_script "$run_env; id_finalize_issue 1" >/dev/null
+[ "$(jq -r .needs_decision "$R")" = true ] || fail V4 "a question is a decision"
+mkstate 1 me true none '[]' ''; mkjudge bug needed High high false 1; with_script "$run_env; id_finalize_issue 1" >/dev/null
+[ "$(jq -r .needs_decision "$R")" = false ] || fail V4 "a plain needed bug needs no decision"
+mkstate 1 me true none '[]' 'max'; mkjudge bug needed High max false 1; with_script "$run_env; id_finalize_issue 1" >/dev/null
+[ "$(jq -r .effort "$R")" = xhigh ] && [ "$(jq -r .effort_stance "$R")" = disagree ] || fail V4 "proposed max must clamp and disagree with an existing max"
+[ "$FAILS" = 0 ] && pass V4 "social rule: no close/park for another author, note not field write, decision routed, deleted account named"
+
+# ---------- V5: noise needs a mechanical signal ----------
+for T in 'TODO in apps/frontend/.next/dev/server/chunks/ssr/x.js:2812' 'chore: regenerate domain/storage/_generated/queries.go' 'stray file in node_modules/foo'; do
+  mkissue 9 "$T" me '[]' 'body'; with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
+  [ -n "$(jq -r .noise_signal "$RUN/state-9.json")" ] || fail V5 "path signal missed: $T"
+done
+for T in 'fix(build): recognize worktree caches' 'perf: the build output is slow' 'docs: dist tarball notes'; do
+  mkissue 9 "$T" me '[]' 'body'; with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
+  [ -z "$(jq -r .noise_signal "$RUN/state-9.json")" ] || fail V5 "prose mention misread as noise: $T"
+done
+mkissue 9 'plain title' me '[]' $'looks fine\n<!-- detent-intake:abc123 -->'; with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
+[ "$(jq -r .noise_signal "$RUN/state-9.json")" = "detent-intake fingerprint" ] || fail V5 "fingerprint not named"
+[ "$FAILS" = 0 ] && pass V5 "noise only on a fingerprint or a build-output/_generated/node_modules path"
+
+# ---------- V6: refresh (fail closed) + dispatcher ----------
+SNAP='{"number":1,"evaluated":true,"title":"t","state":"OPEN","updated_at":"2026-02-01T00:00:00Z","labels":["bug"],"comments_fingerprint":[{"id":1,"updated_at":"2026-01-01T00:00:00Z"}],"marker_id":null,"marker_updated":"","comment_action":"create","marker_count":0}'
+C_NONE='[[{"id":1,"user":{"login":"x"},"body":"hi","updated_at":"2026-01-01T00:00:00Z"}]]'
+C_NONE_EDITED='[[{"id":1,"user":{"login":"x"},"body":"hi (edited)","updated_at":"2026-01-09T00:00:00Z"}]]'
+C_NONE_PLUS='[[{"id":1,"user":{"login":"x"},"body":"hi","updated_at":"2026-01-01T00:00:00Z"},{"id":2,"user":{"login":"y"},"body":"new","updated_at":"2026-01-02T00:00:00Z"}]]'
+C_MINE="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nmine\",\"updated_at\":\"2026-01-03T00:00:00Z\"}]]"
+C_MINE_EDITED="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nmine\",\"updated_at\":\"2026-01-09T00:00:00Z\"}]]"
+C_FOREIGN="[[{\"id\":1,\"user\":{\"login\":\"other\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\ntheirs\",\"updated_at\":\"2026-01-01T00:00:00Z\"}]]"
+C_TWO="[[{\"id\":400,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\na\",\"updated_at\":\"2026-01-03T00:00:00Z\"},{\"id\":500,\"user\":{\"login\":\"me\"},\"body\":\"<!-- issue-details:v1 dev=$SHA -->\\nb\",\"updated_at\":\"2026-01-04T00:00:00Z\"}]]"
+SNAP_EDIT=$(jq -c '.comment_action="edit" | .marker_id=400 | .marker_updated="2026-01-03T00:00:00Z" | .marker_count=1 | .comments_fingerprint=[{id:400,updated_at:"2026-01-03T00:00:00Z"}]' <<<"$SNAP")
+SNAP_TWO=$(jq -c '.comments_fingerprint=[{id:400,updated_at:"2026-01-03T00:00:00Z"},{id:500,updated_at:"2026-01-04T00:00:00Z"}]' <<<"$SNAP_EDIT")
+refresh() {  # <state-json> <refresh-issue-json> <comments-json> [extra env]
+  printf '%s' "$1" > "$RUN/state-1.json"; printf '%s' "$2" > "$STUB_DIR/refresh-1.json"; printf '%s' "$3" > "$STUB_DIR/comments-1.json"
+  with_script "$run_env; ${4:-:}; id_refresh 1 >/dev/null 2>&1 || true; jq -r '\"\\(.write_ok)|\\(.write_note)\"' \"$RUN/state-1.json\""
+}
+OPEN='{"state":"OPEN","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"}]}'
+OUT=$(refresh "$SNAP" "$OPEN" "$C_NONE");        [ "${OUT%%|*}" = 1 ] || fail V6 "clean create refused: $OUT"
+OUT=$(refresh "$SNAP" "$OPEN" "$C_FOREIGN" "printf '%s' '$(jq -c '.comments_fingerprint=[{id:1,updated_at:"2026-01-01T00:00:00Z"}]' <<<"$SNAP")' > $RUN/state-1.json"); [ "${OUT%%|*}" = 1 ] || fail V6 "a foreign marker must not block our create: $OUT"
+OUT=$(refresh "$SNAP" "$OPEN" "$C_MINE");        [ "${OUT%%|*}" = 0 ] || fail V6 "create with a marker that appeared must be refused"
+OUT=$(refresh "$SNAP_EDIT" "$OPEN" "$C_MINE");   [ "${OUT%%|*}" = 1 ] || fail V6 "clean edit refused: $OUT"
+OUT=$(refresh "$SNAP_EDIT" "$OPEN" "$C_MINE_EDITED"); [ "${OUT%%|*}" = 0 ] || fail V6 "stale marker must be refused"
+OUT=$(refresh "$SNAP" "$OPEN" "$C_NONE_EDITED"); [ "${OUT%%|*}" = 0 ] || fail V6 "an edited non-marker comment must be refused (full fingerprint)"
+OUT=$(refresh "$SNAP" "$OPEN" "$C_NONE_PLUS");   [ "${OUT%%|*}" = 0 ] || fail V6 "a new comment must be refused"
+OUT=$(refresh "$SNAP_TWO" "$OPEN" "$C_TWO");     [ "${OUT%%|*}" = 0 ] || fail V6 "duplicate owned markers must be refused"; case "$OUT" in *"delete all but one"*) : ;; *) fail V6 "duplicates must name manual cleanup" ;; esac
+OUT=$(refresh "$SNAP" '{"state":"CLOSED","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"}]}' "$C_NONE"); [ "${OUT%%|*}" = 0 ] || fail V6 "closed issue must never be written"
+OUT=$(refresh "$SNAP" '{"state":"OPEN","updatedAt":"2026-02-02T00:00:00Z","labels":[{"name":"bug"}]}' "$C_NONE"); [ "${OUT%%|*}" = 0 ] || fail V6 "changed updatedAt must be refused"
+OUT=$(refresh "$SNAP" '{"state":"OPEN","updatedAt":"2026-02-01T00:00:00Z","labels":[{"name":"bug"},{"name":"x"}]}' "$C_NONE"); [ "${OUT%%|*}" = 0 ] || fail V6 "changed labels must be refused"
+OUT=$(refresh "$SNAP" "$OPEN" '[["junk"]]');     [ "${OUT%%|*}" = 0 ] || fail V6 "[[\"junk\"]] must fail closed"
+OUT=$(refresh "$SNAP" "$OPEN" '');               [ "${OUT%%|*}" = 0 ] || fail V6 "empty comments must fail closed"
+OUT=$(refresh "$SNAP" "$OPEN" "$C_NONE" "gh() { echo 'HTTP 403' >&2; return 1; }"); [ "${OUT%%|*}" = 0 ] || fail V6 "API failure must fail closed"
+OUT=$(refresh "$(jq -c '.comment_action="refuse"' <<<"$SNAP_TWO")" "$OPEN" "$C_TWO"); [ "${OUT%%|*}" = 0 ] || fail V6 "refuse action must not write"
+dispatch() {  # <state-json> <result-json> [extra env] → log
+  : > "$STUB_LOG"; printf '%s' "$1" > "$RUN/state-1.json"; printf '%s' "$2" > "$RUN/result-1.json"; printf 'draft\n' > "$RUN/comment-1.md"
+  with_script "$run_env; ${3:-:}; id_dispatch 1" > "$RUN/dispatch.out"; cat "$STUB_LOG"
+}
+ST_OK=$(jq -c '.write_ok=1 | .write_note=""' <<<"$SNAP"); ST_NO=$(jq -c '.write_ok=0 | .write_note="x"' <<<"$SNAP")
+LOG=$(dispatch "$ST_NO" '{"needs_decision":true,"state":"OPEN"}');                     [ -z "$LOG" ] || fail V6 "WRITE_OK=0 must issue no gh call: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":false,"state":"OPEN"}');                    [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X POST repos/o/r/issues/1/comments' <<<"$LOG" || fail V6 "create without decision must be one bare POST: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}');                     [ "$(grep -c . <<<"$LOG")" = 2 ] && [ "$(tail -1 <<<"$LOG" | grep -c 'add-label triage:needs-decision')" = 1 ] || fail V6 "create with decision must be POST then label: $LOG"
+grep -q PATCH <<<"$LOG" && fail V6 "create run issued a PATCH"
+LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}'); [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X PATCH repos/o/r/issues/comments/400' <<<"$LOG" || fail V6 "edit must be one PATCH on the marker: $LOG"
+printf '%s' "$C_MINE" > "$STUB_DIR/comments-after-1.json"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && grep -q 'add-label' <<<"$LOG" && grep -q 'posted (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous POST that landed: one POST, confirmed, labelled: $LOG"
+printf '%s' "$C_NONE" > "$STUB_DIR/comments-after-1.json"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'not retried' "$RUN/dispatch.out" || fail V6 "failed POST: never retried, no label: $LOG"
+rm -f "$STUB_DIR/comments-after-1.json"
+LOG=$(dispatch "$(jq -c '.write_ok=1 | .comment_action="refuse"' <<<"$SNAP_TWO")" '{"needs_decision":true,"state":"OPEN"}'); [ -z "$LOG" ] || fail V6 "refuse must issue no gh call"
+[ "$FAILS" = 0 ] && pass V6 "refresh fails closed on every drift incl. edited non-marker comments; bare POST never retried; label only on decision"
+
+# ---------- V7: arguments and selection ----------
+args_rc() { with_script "RC=0; ( id_main collect --run-dir '$RUN/args' $1 ) >/dev/null 2>&1 || RC=\$?; echo \$RC" 2>/dev/null | tail -1; }
+for BAD in '--since 1oopsd' '--since 0d' '--since 7' '--since' 'abc' '' '3094 --since 7d' 'https://github.com/o/r/pull/5' '3094 https://github.com/o/r/issues/5' 'https://github.com/o/r/issues/5junk'; do
+  [ "$(args_rc "$BAD")" = 2 ] || fail V7 "'$BAD' should exit 2, got $(args_rc "$BAD")"
+done
+reset_stub; mkissue 5 five me '[]' body
+with_script "id_main collect --run-dir '$RUN/url' https://github.com/o/r/issues/5" >/dev/null 2>&1 || fail V7 "a lone issue URL should run"
+[ "$(cat "$RUN/url/selected.txt")" = 5 ] || fail V7 "URL did not materialise selected.txt"
+with_script "id_main collect --run-dir '$RUN/nums' 5 5" >/dev/null 2>&1 || fail V7 "explicit numbers should run"
+[ "$(cat "$RUN/nums/selected.txt")" = 5 ] || fail V7 "explicit numbers must materialise selected.txt (deduped): $(cat "$RUN/nums/selected.txt")"
+TODAY=$(date -u +%Y-%m-%d)
+jq -nc --arg d "$TODAY" '[range(60) | {number: (1000 + .), createdAt: ($d + "T00:" + ("0" + tostring)[-2:] + ":00Z")}] | reverse' > "$STUB_DIR/since.json"
+with_script "$run_env; SINCE_ARG=30d; id_select" >/dev/null 2>&1
+[ "$(wc -l < "$RUN/selected.txt" | tr -d ' ')" = 50 ] && [ "$(head -1 "$RUN/selected.txt")" = 1000 ] || fail V7 "since cap must keep the oldest 50: $(wc -l < "$RUN/selected.txt") from $(head -1 "$RUN/selected.txt")"
+grep -q 'evaluating the oldest 50' "$RUN/warnings.txt" || fail V7 "cap warning not recorded"
+[ "$FAILS" = 0 ] && pass V7 "arguments strict; URL and explicit numbers materialise selected.txt; oldest-50 cap with warning"
+
+# ---------- V8: rate gates ----------
+gate() { with_script "$run_env; ${1:-:}; STOP_BATCH=0; RC=0; id_gate t || RC=\$?; echo \"rc=\$RC stop=\$STOP_BATCH reason=\$STOP_REASON\""; }
+OUT=$(gate); case "$OUT" in *"rc=0 stop=0"*) : ;; *) fail V8 "healthy gate must pass: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_OVERRIDE='{\"resources\":{\"core\":{\"remaining\":12},\"graphql\":{\"remaining\":4000},\"search\":{\"remaining\":29,\"reset\":0}}}'"); case "$OUT" in *"stop=1"*"below reserve"*) : ;; *) fail V8 "core below reserve must stop: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_OVERRIDE='{\"resources\":{\"core\":{\"remaining\":4000},\"graphql\":{\"remaining\":900},\"search\":{\"remaining\":29,\"reset\":0}}}'"); case "$OUT" in *"stop=1"*) : ;; *) fail V8 "graphql below reserve must stop: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_OVERRIDE='{\"resources\":{\"core\":{\"remaining\":4000},\"graphql\":{\"remaining\":4000},\"search\":{\"remaining\":1,\"reset\":1}}}'"); case "$OUT" in *"rc=0 stop=0"*) : ;; *) fail V8 "search below reserve must sleep, not stop: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_OVERRIDE='{}'"); case "$OUT" in *"stop=1"*malformed*) : ;; *) fail V8 "{} must fail closed: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_OVERRIDE='{\"resources\":{\"core\":{\"remaining\":null},\"graphql\":{\"remaining\":4000},\"search\":{\"remaining\":29,\"reset\":0}}}'"); case "$OUT" in *"stop=1"*) : ;; *) fail V8 "a null bucket must fail closed: $OUT" ;; esac
+OUT=$(gate "STUB_RATE_FAIL_AT=1; rm -f $STUB_DIR/rate.count"); case "$OUT" in *"stop=1"*unreadable*) : ;; *) fail V8 "unreadable rate_limit must stop: $OUT" ;; esac
+[ "$FAILS" = 0 ] && pass V8 "gate: below reserve / malformed / unreadable stop the batch; search sleeps"
+
+# ---------- V9: merged-PR sweep ----------
+reset_stub; mkissue 7 seven me '[]' body; mkissue 8 eight me '[]' body
+jq -c '.createdAt="2026-01-10T00:00:00Z"' "$STUB_DIR/issue-7.json" > "$STUB_DIR/t" && mv "$STUB_DIR/t" "$STUB_DIR/issue-7.json"
+jq -c '.createdAt="2026-01-05T00:00:00Z"' "$STUB_DIR/issue-8.json" > "$STUB_DIR/t" && mv "$STUB_DIR/t" "$STUB_DIR/issue-8.json"
+rm -f "$RUN"/state-*.json
+printf '%s' '{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[{"number":10,"title":"a","mergedAt":"2026-01-06T00:00:00Z","closingIssuesReferences":{"pageInfo":{"hasNextPage":false},"nodes":[{"number":8}]}}]}}}' > "$STUB_DIR/sweep-1.json"
+printf '%s' '{"data":{"search":{"issueCount":150,"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":11,"title":"b","mergedAt":"2026-01-12T00:00:00Z","closingIssuesReferences":{"pageInfo":{"hasNextPage":true},"nodes":[{"number":9}]}}]}}}' > "$STUB_DIR/sweep-2.json"
+with_script "$run_env; id_fetch 7; id_fetch 8; id_sweep" >/dev/null 2>&1
+[ "$(cat "$RUN/shipped-truncated.txt")" = false ] || fail V9 "two pages fully read must not be truncated"
+[ "$(jq length "$RUN/shipped.json")" = 2 ] && [ "$(jq -c '.[0].issues' "$RUN/shipped.json")" = "[8]" ] || fail V9 "pages must accumulate with closing refs: $(cat "$RUN/shipped.json")"
+[ "$(jq -r '.[1].issues_truncated' "$RUN/shipped.json")" = true ] && grep -q 'PR #11 closes more than 100' "$RUN/warnings.txt" || fail V9 ">100 closing refs must be flagged and warned"
+grep -q 'merged:>=2026-01-05T00:00:00Z' "$STUB_LOG" || fail V9 "window must start at the earliest selected createdAt"
+printf '[]' > "$RUN/open-prs.json"; with_script "$run_env; id_dedupe 7" >/dev/null 2>&1
+[ "$(jq -c .fixed_by_unknown "$RUN/state-7.json")" = "[11]" ] && [ "$(jq -c .candidates_shipped "$RUN/state-7.json")" = "[]" ] || fail V9 "truncated PR must be an unknown match, not fixed"
+rm -f "$STUB_DIR"/sweep-*.json "$STUB_DIR/page.count"
+for i in 1 2 3 4 5 6; do printf '%s' '{"data":{"search":{"issueCount":900,"pageInfo":{"hasNextPage":true,"endCursor":"c"},"nodes":[]}}}' > "$STUB_DIR/sweep-$i.json"; done
+with_script "$run_env; id_sweep" >/dev/null 2>&1; [ "$(cat "$RUN/shipped-truncated.txt")" = true ] && [ "$(cat "$STUB_DIR/page.count")" = 5 ] || fail V9 "page cap 5 must report truncation"
+rm -f "$STUB_DIR"/sweep-*.json "$STUB_DIR/page.count"; printf '%s' '{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}],"data":null}' > "$STUB_DIR/sweep-1.json"
+OUT=$(with_script "$run_env; id_sweep; echo stop=\$STOP_BATCH" 2>/dev/null); case "$OUT" in *stop=1*) : ;; *) fail V9 "a RATE_LIMITED GraphQL error must stop the batch: $OUT" ;; esac
+[ "$(jq length "$RUN/shipped.json")" = 0 ] && [ "$(cat "$RUN/shipped-truncated.txt")" = true ] || fail V9 "an errored page must not become an empty fact silently"
+# board: GraphQL errors are a fetch failure, never "none"; the tracker project wins
+printf '%s' '{"errors":[{"message":"boom"}],"data":null}' > "$STUB_DIR/board-7.json"
+with_script "$run_env; id_board 7 && echo OKAY" 2>/dev/null | grep -q OKAY && fail V9 "a GraphQL error board response must be a failure"
+printf '%s' '{"data":{"repository":{"issue":{"projectItems":{"nodes":[{"project":{"id":"PVT_other"},"fieldValues":{"nodes":[{"name":"Done","field":{"name":"Status"}}]}},{"project":{"id":"PVT_x"},"fieldValues":{"nodes":[{"name":"Todo","field":{"name":"Status"}},{"name":"High","field":{"name":"Priority"}}]}}]}}}}}' > "$STUB_DIR/board-7.json"
+with_script "$run_env; id_board 7" >/dev/null 2>&1
+[ "$(jq -r .board_status "$RUN/state-7.json")" = Todo ] && [ "$(jq -r .board_priority "$RUN/state-7.json")" = High ] || fail V9 "the tracker project's item must win: $(jq -c '{board_status,board_priority}' "$RUN/state-7.json")"
+[ "$FAILS" = 0 ] && pass V9 "sweep: window from earliest filing; truncation from pagination; GraphQL errors fail; tracker project wins"
+
+# ---------- V11: noise issues zero searches ----------
+reset_stub; mkissue 5 'engagement nightly lookback rewrite' me '[]' $'x\n<!-- detent-intake:abc -->'; printf '[]' > "$RUN/shipped.json"; printf '[]' > "$RUN/open-prs.json"
+with_script "$run_env; id_fetch 5; id_noise 5; : > '$STUB_LOG'; id_dedupe 5" >/dev/null 2>&1
+[ ! -s "$STUB_LOG" ] && [ "$(jq -r .dedupe_skipped "$RUN/state-5.json")" = 1 ] || fail V11 "noise must issue no search: $(cat "$STUB_LOG")"
+mkissue 5 'engagement nightly lookback rewrite' me '[]' 'plain'
+with_script "$run_env; id_fetch 5; id_noise 5; : > '$STUB_LOG'; DO_DUP=0; id_dedupe 5" >/dev/null 2>&1; [ ! -s "$STUB_LOG" ] || fail V11 "--no-dup-search must issue no search"
+with_script "$run_env; id_fetch 5; id_noise 5; : > '$STUB_LOG'; id_dedupe 5" >/dev/null 2>&1
+[ "$(grep -c . "$STUB_LOG")" = 2 ] && [ "$(jq -r .terms "$RUN/state-5.json")" = "engagement lookback nightly" ] || fail V11 "a searchable title must issue exactly two searches: $(cat "$STUB_LOG")"
+mkissue 5 'the and of' me '[]' 'plain'; with_script "$run_env; id_fetch 5; id_noise 5; : > '$STUB_LOG'; id_dedupe 5" >/dev/null 2>&1
+[ ! -s "$STUB_LOG" ] && [ "$(jq -r .dedupe_skipped "$RUN/state-5.json")" = 1 ] || fail V11 "an all-stopword title must not abort or search under pipefail"
+[ "$FAILS" = 0 ] && pass V11 "dedupe: zero searches on noise / --no-dup-search / generic title; two otherwise"
+
+# ---------- V12: end to end ----------
+e2e_fixtures() {
+  reset_stub
+  mkissue 11 'engagement: nightly lookback window is never passed' me '["bug"]' $'## Problem\n\nno lookback.\n\n```detent-agent\nschema: 1\neffort: xhigh\n```'
+  mkissue 12 'TODO in apps/frontend/.next/dev/server/chunks/x.js:1' cory '[]' $'<!-- detent-intake:abc -->\nTODO' "2026-02-02T00:00:00Z"
+  printf '[[]]' > "$STUB_DIR/comments-11.json"
+  printf '%s' "$C_MINE" > "$STUB_DIR/comments-12.json"
+  printf '%s' '[{"number":90,"title":"x","isDraft":false,"closingIssuesReferences":[]}]' > "$STUB_DIR/open-prs.json"
+  printf '%s' '[{"name":"goal:q3-2026"},{"name":"bug"}]' > "$STUB_DIR/labels.json"; printf '[]' > "$STUB_DIR/goal-issues.json"
+  jq -nc '[{number:11, createdAt:"2026-01-10T00:00:00Z"},{number:12, createdAt:"2026-01-10T00:00:00Z"}]' | jq -c --arg d "$(date -u +%Y-%m-%d)" 'map(.createdAt = $d + "T00:00:00Z")' > "$STUB_DIR/since.json"
+}
+judge() {  # the orchestrator's step, scripted: it reads state files and writes judgements
+  local d="$1"
+  [ "$(jq -r .title "$d/state-11.json")" = 'engagement: nightly lookback window is never passed' ] || fail "V12/$2" "state-11 carries the wrong title"
+  [ "$(jq -r .existing_effort "$d/state-11.json")" = xhigh ] && [ -z "$(jq -r .existing_effort "$d/state-12.json")" ] || fail "V12/$2" "per-issue effort blocks leaked between issues"
+  jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", decision_required:false, evidence:{classification:"expected-by: lookback contract", priority:"bug, no workaround stated"}}' > "$d/judgement-11.json"
+  jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_required:false, evidence:{}}' > "$d/judgement-12.json"
+}
+e2e() {  # <label> <collect args...>
+  local label="$1"; shift; local d="$RUN/e2e-$label"; rm -rf "$d"
+  e2e_fixtures
+  with_script "id_main collect --run-dir '$d' $*" > "$d.collect.out" 2>&1 || fail "V12/$label" "collect failed: $(tail -3 "$d.collect.out")"
+  [ "$(tr '\n' ' ' < "$d/selected.txt")" = "11 12 " ] || fail "V12/$label" "selected.txt: $(cat "$d/selected.txt")"
+  judge "$d" "$label"
+  with_script "id_main finalize --run-dir '$d'" > "$d.finalize.out" 2>&1 || fail "V12/$label" "finalize failed: $(tail -3 "$d.finalize.out")"
+  grep -q 'engagement: nightly lookback' "$d/comment-11.md" && grep -q 'TODO in apps/frontend' "$d/comment-12.md" || fail "V12/$label" "each comment must carry its own title"
+  grep -q 'engagement: nightly' "$d/comment-12.md" && fail "V12/$label" "issue 11's title leaked into 12's comment"
+  [ "$(jq -r .needs_decision "$d/result-11.json")" = false ] && [ "$(jq -r .needs_decision "$d/result-12.json")" = true ] || fail "V12/$label" "needs_decision: 11 false, 12 true"
+  [ "$(jq -r .classification "$d/result-12.json")" = noise ] && [ "$(jq -r .verdict "$d/result-12.json")" = unclear ] || fail "V12/$label" "noise must override the judgement"
+  [ "$(jq -r .comment_action "$d/result-11.json")" = create ] && [ "$(jq -r .comment_action "$d/result-12.json")" = edit ] || fail "V12/$label" "11 create, 12 edit"
+  grep -q '^  goal      none' "$d/report.txt" && grep -q 'registry: 1 goal label(s), 0 issue(s)' "$d/report.txt" || fail "V12/$label" "report: $(cat "$d/report.txt")"
+  [ "$(jq '.issues | length' "$d/facts.json")" = 2 ] && [ "$(jq '.unevaluated | length' "$d/facts.json")" = 0 ] || fail "V12/$label" "facts.json shape"
+  # zero searches for the noise issue, two for the other
+  [ "$(grep -c 'search issues' "$STUB_LOG")" = 1 ] && [ "$(grep -c -- '--search' "$STUB_LOG")" = 1 ] || fail "V12/$label" "noise must not be searched: $(grep -c 'search' "$STUB_LOG") search calls"
+  grep -q 'issues/12/comments\|search issues.*12' "$STUB_LOG" && grep -q '^issue view 12' "$STUB_LOG" || true
+  # the gate answered "post"
+  : > "$STUB_LOG"
+  with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail "V12/$label" "post failed: $(tail -3 "$d.post.out")"
+  local writes; writes=$(grep -E 'X POST|X PATCH|add-label' "$STUB_LOG" | sed -E 's/ -F body=@.*//; s/ --hostname github.com//')
+  [ "$writes" = "$(printf 'api -X POST repos/o/r/issues/11/comments\napi -X PATCH repos/o/r/issues/comments/400\nissue edit 12 -R o/r --add-label triage:needs-decision')" ] \
+    || fail "V12/$label" "write sequence: $(printf '%s' "$writes" | tr '\n' ';')"
+  grep -q '^#11 posted$' "$d.post.out" && grep -q '^#12 edited #400, label added$' "$d.post.out" || fail "V12/$label" "post output: $(cat "$d.post.out")"
+}
+e2e explicit 11 12
+e2e since --since 7d
+# the rate gate fails at pass B on issue 12: 11 is written, 12 is unevaluated, nothing follows the failed gate
+d="$RUN/e2e-gate"; rm -rf "$d"; e2e_fixtures
+with_script "STUB_RATE_FAIL_AT=6; id_main collect --run-dir '$d' 11 12" > "$d.collect.out" 2>&1 || fail V12/gate "collect must survive a mid-batch gate stop: $(tail -2 "$d.collect.out")"
+[ "$(tail -1 "$STUB_LOG")" = "api --hostname github.com rate_limit" ] || fail V12/gate "no call may follow the failed gate: $(tail -1 "$STUB_LOG")"
+[ "$(awk -F'\t' '$1 == 12' "$d/unevaluated.tsv" | wc -l | tr -d ' ')" = 1 ] && [ "$(awk -F'\t' '$1 == 11' "$d/unevaluated.tsv" | wc -l | tr -d ' ')" = 0 ] || fail V12/gate "12 must be unevaluated and 11 not: $(cat "$d/unevaluated.tsv")"
+[ "$(jq -r .evaluated "$d/state-11.json")" = true ] || fail V12/gate "11 must be fully evaluated"
+judge_one() { jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", decision_required:false, evidence:{}}' > "$1/judgement-11.json"; }
+judge_one "$d"; with_script "id_main finalize --run-dir '$d'" >/dev/null 2>&1 || fail V12/gate "finalize"
+[ "$(jq '.unevaluated | length' "$d/facts.json")" = 1 ] && [ "$(jq -r '.unevaluated[0].number' "$d/facts.json")" = 12 ] || fail V12/gate "facts.json must list 12 as unevaluated"
+grep -q '=== #12 === unevaluated: batch stopped' "$d/report.txt" || fail V12/gate "report must say 12 was unevaluated: $(grep '#12' "$d/report.txt")"
+: > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V12/gate "post"
+grep -q '^#11 posted$' "$d.post.out" && [ "$(grep -c 'issues/12' "$STUB_LOG")" = 0 ] || fail V12/gate "only 11 may be written: $(cat "$d.post.out")"
+[ "$FAILS" = 0 ] && pass V12 "end to end: explicit and --since; exact write sequence; own titles; gate stop leaves 11 written, 12 unevaluated"
 
 if [ "$FAILS" -gt 0 ]; then echo "issue-details-triage: $FAILS failure(s)"; exit 1; fi
 echo "issue-details-triage: OK"
