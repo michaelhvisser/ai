@@ -15,9 +15,10 @@ regression the ordering has to keep passing.
 | `HUMAN_CR` | some `human/person` author's latest review is `CHANGES_REQUESTED` |
 | `CODEX_CR` | the **Codex connector's** latest review is `CHANGES_REQUESTED` (`login startswith "chatgpt-codex-connector"`) |
 | `BOT_CR` | any bot's latest review is `CHANGES_REQUESTED` — retained for reporting only; **no row keys on it** |
-| `UNRES_H` | unresolved threads whose origin class is `human/person` |
-| `UNRES_CODEX` | unresolved threads whose origin class is `codex-bot` |
-| `UNRES_B` | unresolved threads whose origin is any bot **other than** `codex-bot` |
+| `UNRES_H` | unresolved threads whose origin class is `human/person`. **Unknown-resolution rule** (`facts.md` §2c): when `resolution_known` is false, a root thread counts as unresolved unless its latest comment is by the PR author or carries a skill marker (`Fixed in`, `Addressed in`, `Dismissed (`); the count is an upper bound and the report says so |
+| `UNRES_CODEX` | unresolved threads whose origin class is `codex-bot`; same unknown-resolution rule |
+| `UNRES_B` | unresolved threads whose origin is any bot **other than** `codex-bot`; same unknown-resolution rule |
+| `RESOLUTION_KNOWN` | the GraphQL thread read succeeded (`facts.md` §2c). False with `THREADS_REQ` true and ≥1 root thread sets `FACTS_INCOMPLETE` — resolution is a merge gate that cannot be read; false with `THREADS_REQ` false leaves rows 12–14 keyed on the upper bounds |
 | `BEHIND` / `STRICT` | `behind_by > 0` / ruleset `strict_up_to_date` |
 | `THREADS_REQ` | ruleset `threads_required` |
 | `APPROVALS_GIVEN` / `APPROVALS_REQUIRED` | distinct latest-`APPROVED` authors excluding the PR author / ruleset `approvals_required` |
@@ -26,7 +27,7 @@ regression the ordering has to keep passing.
 | `AR_AT_HEAD` / `CS_AT_HEAD` / `E2E_AT_HEAD` / `RD_AT_HEAD` | prior-skill evidence (`facts.md` §2g) dated at or after `HEAD_SHA` |
 | `DIFF_LINES` | `wc -l` of the cached `diff.patch` |
 | `IS_DRAFT` | `pr.json .isDraft` |
-| `BOARD_STATUS` / `BOARD_AMBIGUOUS` | least-advanced linked issue's board Status (`still-needed.md` §5) / several project items matched |
+| `BOARD_STATUS` / `BOARD_AMBIGUOUS` | least-advanced linked issue's board Status (`still-needed.md` §5), from Detent's snapshot first and GraphQL only when absent or stale (`facts.md` §2f); `unknown` when neither answered, which sets `FACTS_INCOMPLETE` / several project items matched (GraphQL path only) |
 | `PLAN_COMBINED` / `PLAN_SPLIT` | `plan-check.md` §4, reduced across issues by worst verdict |
 | `FACTS_INCOMPLETE` | any load-bearing fact is `unknown` (`facts.md` §0f) |
 | `READY_VERIFIABLE` | §3 below |
@@ -209,9 +210,9 @@ who prefers to drive.
 | `rebase` | from a clean checkout of the PR head: `git fetch <base-remote> && git rebase <base-remote>/<base>`, then `git push --force-with-lease=refs/heads/<headRefName>:<observed-head-sha> <head-remote> HEAD:refs/heads/<headRefName>`. `<base-remote>` is the remote whose URL matches the PR's **base** repository (usually `origin`; on a fork checkout often `upstream` — rebasing onto a fork's stale `origin/<base>` is the trap), and `<head-remote>` matches the **head** repository; the `HEAD:` refspec pushes the rebased commit itself, and the explicit lease pins the expectation to the head SHA you rebased from, so neither an unrelated same-named branch nor a contributor's unseen push can be overwritten. On conflicts, resolve by hand or run `/workflow:resolve-conflicts` |
 | `address-review` | open each unresolved thread (URLs in the report), fix in the editor, push, then reply and resolve on GitHub |
 | `codex-ship` | comment `@codex review` on the PR, wait for the verdict, judge each finding yourself, fix the real ones, dismiss the rest with a stated reason, resolve the threads |
-| `antagonist-review` | no direct manual equivalent — nearest: review `gh pr diff <n>` yourself with the repo's conventions open, or run the language plugin's `review-deep` |
+| `antagonist-review` | no direct manual equivalent — nearest: review the diff yourself (`gh api -H 'Accept: application/vnd.github.diff' repos/<slug>/pulls/<n>`, the REST form `pr_facts_pr_diff` uses) with the repo's conventions open, or run the language plugin's `review-deep` |
 | `fix-plan` | edit the issue's Plan section by hand; the proposed replacement text is in `$RUN_DIR/plan-*.md` |
-| `wait-ci` | `gh pr checks <n> -R <host>/<slug> --watch` — repo-qualified, since a fork checkout's inferred repository may not be the resolved base |
+| `wait-ci` | `source "${CLAUDE_PLUGIN_ROOT}/lib/github-rest.sh" && github_watch_pr_checks <n> <head-sha>` from a checkout of the base repository — a REST poll of `check-runs` and the combined status that handles the registration window and exits `4` on a head shift. `gh pr checks --watch` is GraphQL and is not used |
 | `ui-review` | open `<preview_url><route>` for each listed route, or run the repo's dev server and visit them |
 | `complete-gate` | run the contract gate (`<gate.run>`) at the head commit, then post the evidence the contract names — workpad update, review comment, label |
 | `human-approval` | this **is** the local step: read the report, then approve (`gh pr review <n> -R <host>/<slug> --approve` — repo-qualified: this is an outward-facing write and the ambient checkout may be a fork with a same-numbered PR), merge, or move the board item per the contract |
@@ -245,3 +246,5 @@ table, the resolution map, or the render.
 | **F26** | `--json` | a gate prompt corrupts machine-readable stdout | — | `--json` implies `--no-gate`. Stdout carries the JSON object and nothing else. |
 | **F27** | linked issue's problem still reproduces on base, but a merged PR since the merge-base replaced the subsystem this PR patches (no file overlap with §3's probe) | "NEEDED — the code path still misbehaves" recommends finishing a PR whose target is already dead code | **7** (`close-superseded`) | the §1e shipped sweep hands the researcher the replacing PR; verdict `no-longer-needed because-of #N`, `confidence: high` (shipped), and row 7 accepts it alongside `already-fixed-by`. |
 | **F28** | a Backlog issue sketches a rework of the same area, nothing shipped | a bare idea closes a working fix | **not 7** | the §4 guard caps a planned-but-unscheduled obsoleter at `confidence: low`, so row 7 cannot fire; the report carries the direction candidate as an annotation instead. |
+| **F29** | REST found 1 root thread whose latest comment is a reviewer's (no author reply, no skill marker); the GraphQL resolution read is refused (`API rate limit already exceeded`); CI green, board `Human Review` | (a) the refusal set `FACTS_INCOMPLETE` on a repo where resolution is not a merge gate, blocking every report during a fleet-wide GraphQL squeeze; (b) or the thread was silently counted resolved, manufacturing "ready" | **12** (`address-review`) when `THREADS_REQ` is false; **3** (`facts-incomplete`) when true | with `THREADS_REQ` false the unknown-resolution rule counts the thread as open, `UNRES_H = 1` (upper bound), row 12 fires and the report reads `≤ 1 unresolved (resolution unknown)` with the `warnings[]` line. With `THREADS_REQ` true (client-portals `dev`) the same facts set `FACTS_INCOMPLETE` because C2 cannot be evaluated, and row 3 names the refused read. |
+| **F30** | the linked issue is in the Detent snapshot at age 20 s with no board change after `saved_at`; GraphQL is exhausted | the board read spent a GraphQL call it did not need and the run failed with the fleet's limit | **per issue row**, zero GraphQL | `pr_facts_board_local` answers (`Human Review`, `source: detent-snapshot`); `pr_facts_board` never runs. Verified live on getparable/parable #1763 with `rate_limits.github_graphql.status: exhausted` in the same snapshot. |

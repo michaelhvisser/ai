@@ -19,11 +19,22 @@ source "${CLAUDE_PLUGIN_ROOT}/lib/github-rest.sh"
 source "${CLAUDE_PLUGIN_ROOT}/lib/pr-facts.sh"
 ```
 
-From `github-rest.sh`: `github_pr`, `github_current_pr`, `github_pr_reviews`,
-`github_check_snapshot`. From `pr-facts.sh`: `pr_facts_gh` (the retry wrapper — every `gh`
-call goes through it), `pr_facts_graphql_ok`, `pr_facts_rate_gate`, `pr_facts_rules`,
-`pr_facts_check_matrix`, `pr_facts_ci_state`, `pr_facts_review_threads`, `pr_facts_board`,
-`pr_facts_compare`, `pr_facts_shared_files`, `pr_facts_run_dir`.
+From `github-rest.sh`: `github_pr`, `github_current_pr`, `github_check_snapshot`,
+`github_watch_pr_checks`. From `pr-facts.sh` — REST and local: `pr_facts_gh` (the retry
+wrapper — every `gh` call goes through it), `pr_facts_rate_gate`, `pr_facts_repo_identity`,
+`pr_facts_pr_record`, `pr_facts_pr_files`, `pr_facts_pr_diff`, `pr_facts_issue`,
+`pr_facts_issue_links`, `pr_facts_rules`, `pr_facts_check_matrix`, `pr_facts_ci_state`,
+`pr_facts_pr_reviews`, `pr_facts_review_decision`, `pr_facts_review_threads_rest`,
+`pr_facts_compare`, `pr_facts_shared_files`, `pr_facts_closed_issues`,
+`pr_facts_shipped_local`, `pr_facts_snapshot_path`, `pr_facts_board_local`,
+`pr_facts_snapshot_pr_issue`, `pr_facts_run_dir`. GraphQL fallbacks only, each behind its
+guard: `pr_facts_review_threads`, `pr_facts_board`, with `pr_facts_graphql_ok` checking
+their responses.
+
+**Transport.** A normal run issues zero GraphQL queries — see "Remaining GraphQL paths"
+below and `facts.md`'s transport rule. `gh pr view/list/checks/diff`, `gh issue view/list`,
+`gh repo view` and `gh project *` are GraphQL under the hood and are not used in the report
+phases.
 
 ---
 
@@ -74,12 +85,17 @@ comment counts produces false alarms from concurrent humans, misses reviews, lab
 reactions, edits, and pushes, and its usual recovery (`git stash push -u`) mutates the user's
 tree and captures unrelated work.
 
-1. **The report phases issue only `gh` read verbs.** The complete allowed list: `gh pr view`,
-   `gh pr list`, `gh pr checks`, `gh pr diff`, `gh issue view`, `gh issue list`,
-   `gh search issues`, `gh search prs`, `gh repo view`, `gh project list`,
-   `gh project field-list`, `gh auth status`, `gh api` with no
-   `--method`/`-X` (or an explicit `-X GET`), and `gh api graphql` with a `query` operation
-   only. Any other verb before the Phase 8 selection is a bug.
+1. **The report phases issue only read verbs, and only REST-or-local ones.** The complete
+   allowed list: `gh search issues`, `gh search prs`, `gh auth status`, `gh api` with no
+   `--method`/`-X` (or an explicit `-X GET`), `gh api graphql` with a `query` operation
+   **only inside the two named fallbacks** (threads when REST found ≥1 root thread, board
+   when the issue is absent from or stale in the Detent snapshot — `facts.md` §2c, §2f),
+   plus `git` reads and reads of the Detent snapshot file and `sqlite3 -readonly` on
+   `detent.db`. `gh pr view`, `gh pr list`, `gh pr checks`, `gh pr diff`, `gh issue view`,
+   `gh issue list`, `gh repo view`, `gh project list` and `gh project field-list` are **not**
+   on the list: each is GraphQL under the hood, and GraphQL's secondary limit is the failure
+   this skill has to survive (`facts.md` §0b). Any other verb before the Phase 8 selection is
+   a bug.
 2. **Codex runs sandboxed.** `-s read-only` plus `-c sandbox_mode="read-only"` plus
    `-c approval_policy="never"`. `approval_policy="never"` is what denies outward-facing tool
    calls; the sandbox flag fences only the filesystem.
@@ -92,6 +108,21 @@ path, and that combination is the mitigation this skill relies on.
 The skill never runs `git stash`, `git checkout`, `git reset`, `git fetch --prune`, or
 anything else that changes the working tree or branch state. Its only `git` writes are
 object-only fetches into `refs/pr-details/*`, a namespace this skill owns (`facts.md` §0c).
+
+## Remaining GraphQL paths
+
+Three, and a normal run on a Detent-tracked repo reaches none of them:
+
+| Path | When it runs | When it does not | On refusal |
+|---|---|---|---|
+| `pr_facts_review_threads` (`facts.md` §2c) | REST `pulls/{n}/comments` found ≥ 1 root thread — `isResolved` is the one fact REST lacks | zero root threads | keep the REST threads with `resolution_known: false`; count a root as open unless the PR author or a skill marker spoke last; `facts-incomplete` only when the ruleset requires thread resolution |
+| `pr_facts_board` (`facts.md` §2f) | the linked issue is absent from Detent's snapshot or the snapshot is stale (age past `refresh.stale_after_seconds`, or a board change after `saved_at`) | the issue is in the snapshot and fresh — the usual case on a repo the daemon watches | `BOARD_STATUS=unknown`, `board.source: none`, `facts-incomplete` |
+| the Detent hand-off (`execute.md` §3) | only past the Phase 8 gate, on the "hand to Detent" selection: one `pr_facts_board` read for `item_id`/`project_id`, then the `gh project field-list` / `item-edit` mutation — Projects v2 has no REST surface | any other selection | say so and stop; the by-hand recipe is printed |
+
+Everything else — identity, the PR and issue records, files, diff, reviews, checks, the
+ruleset, the shipped and closed-issue sweeps, duplicate candidates and their board lanes —
+is REST core, local git, or the snapshot. Duplicate candidates never trigger the board
+fallback: an absent candidate is `board_status: unknown`.
 
 **The screenshot phase browses, it never acts — and the browser enforces that.** Phase 5b
 captures the PR's preview deployment only in a context where read-only is enforceable
@@ -111,11 +142,11 @@ means no navigation at all.
 
 | Flag | Default | Why |
 |---|---|---|
-| `[PR-number]` | auto from the current branch via `github_current_pr`, then `gh pr list --search <HEAD sha>` | House convention. A branch name or a full PR **URL** is also accepted; a URL sets host, owner, and repo too (`facts.md` §0a). |
+| `[PR-number]` | auto from the current branch via `github_current_pr` (REST `commits/{sha}/pulls`) | House convention. A branch name or a full PR **URL** is also accepted; a URL sets host, owner, and repo too (`facts.md` §0a). There is no `gh pr list --search` fallback — it is GraphQL, and a head SHA unknown to `commits/{sha}/pulls` is on no open PR. |
 | `--plan-model fable\|codex\|both\|none` | `fable` if a strong subagent tier exists, else `codex` if `command -v codex`, else `none` | `both` runs a two-model quorum. Never silently downgrade — an unavailable model produces a warning line in the report. |
 | `--effort low\|medium\|high\|xhigh` | `xhigh` | Passed to `codex exec -c model_reasoning_effort=`; mapped to the subagent effort hint for Fable. |
 | `--no-plan-check` | off | Phase 4 is the only slow phase. Skipping it makes this a ~20-second status command. |
-| `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket. Also skips the §1e supersession sweep (recently shipped + backlog) — same question, same budget decision. |
+| `--no-dup-search` | off | Duplicate discovery costs search calls, which charge **both** the 30/min search bucket and the GraphQL bucket, plus up to 51 REST core calls for the shared-files signal. Also skips the §1e supersession sweep (recently shipped from local git — free — plus one paginated REST closed-issue list) — same question, same budget decision. |
 | `--no-shots` | off | Skip Phase 5b screenshot capture. The UI verdict is unaffected — screenshots are evidence for the human, never a fact (`screenshots.md` §1). |
 | `--no-gate` | off | Report and stop — no approval prompt. `--json` implies it. |
 | `--json` | off | Machine schema on stdout (`output.md` §2). |
@@ -197,8 +228,8 @@ fetched.
 | Phase | What | Detail file |
 |---|---|---|
 | 0 | Preflight: **resolve identity first**, auth for that host, rate gate, git pins, contract + ruleset discovery, run dir and cache | `facts.md` §0 |
-| 1 | PR record, linked issues, duplicates + supersession sweep (shipped and backlog), diff | `facts.md` §1 |
-| 2 | Status snapshot: CI, reviews, threads, mergeability, local state, board, prior-skill evidence | `facts.md` §2 |
+| 1 | PR record and files (REST), linked issues (timeline + Detent), duplicates + supersession sweep (local git, REST), diff | `facts.md` §1 |
+| 2 | Status snapshot: CI, reviews (decision derived), threads (REST, GraphQL only for resolution), mergeability, local state, board (Detent snapshot first), prior-skill evidence | `facts.md` §2 |
 | 3 | Still-needed validation, per linked issue | `still-needed.md` |
 | 4 | Plan check by a strong model (skippable) | `plan-check.md` |
 | 5 | UI-review detection (deterministic, no model) | below |
@@ -363,7 +394,7 @@ QUALITY     codex-ship ✓ at head · antagonist ✗ not run · deep review stal
 EXECUTION PLAN
   1 → /workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/261   [row 21]
       why:   codex-ship clean at head but no second-family review, and the diff is 354 lines ≥ 150
-      local: review gh pr diff 261 yourself, or run the language plugin's review-deep
+      local: review the diff yourself (gh api -H 'Accept: application/vnd.github.diff' repos/threefold-solutions/client-portals/pulls/261), or run the language plugin's review-deep
   2 → complete the pre-review gate                    [row 23 · projected]
       why:   the contract's deep-review conjunct is observably false at this head
   3 → your approval                                   [row 28 · projected]  ready pending: local gate
@@ -373,10 +404,11 @@ EXECUTION PLAN
 
 ## Supporting files
 
-- `facts.md` — Phases 0–2: identity, auth, rate gate, git pins, contract and ruleset
-  discovery, run dir and cache, retries, PR and issue records, duplicates and the
-  supersession sweep (recently shipped, backlog), CI, reviews, threads, mergeability, board,
-  prior-skill evidence
+- `facts.md` — Phases 0–2: the transport rule, identity (git remote), auth, rate gate, git
+  pins, contract and ruleset discovery, run dir and cache, retries, PR and issue records
+  (REST), duplicates and the supersession sweep (local git, REST), CI, reviews (derived
+  decision), threads (REST, GraphQL fallback), mergeability, board (Detent snapshot,
+  GraphQL fallback), prior-skill evidence
 - `still-needed.md` — Phase 3: pinned-read rule, claim extraction, mechanical base probe,
   researcher brief, per-issue aggregation
 - `plan-check.md` — Phase 4: prompt template, Fable routing, the Codex `exec` invocation,
@@ -386,4 +418,4 @@ EXECUTION PLAN
 - `screenshots.md` — Phase 5b: preview-deploy screenshots
 - `execute.md` — Phase 8: approval boundary, executor modes (local / Detent), per-step
   execution, stop conditions
-- `output.md` — Phase 7: terminal grammar, `--json` schema v3, exit codes, scratch hygiene
+- `output.md` — Phase 7: terminal grammar, `--json` schema v4, exit codes, scratch hygiene

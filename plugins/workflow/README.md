@@ -118,9 +118,9 @@ The next-step vocabulary is closed, so callers can branch on it:
 `move-to-human-review`, `hand-to-detent`, `needs-human`. There is no "optional"
 outcome — a weaker secondary suggestion goes in `then[]` or `notes[]`.
 
-`--json` puts the whole fact set on stdout (schema 3 — drops `page`, widens
-`duplicates[].kind` with the supersession sweep; every other schema-2 field is
-unchanged) with every diagnostic on stderr; the same object is written to the
+`--json` puts the whole fact set on stdout (schema 4 — adds `pr.transport`,
+`status.threads.resolution_known`, `issues[].board.source` and `snapshot_age_s`;
+every schema-3 field is unchanged) with every diagnostic on stderr; the same object is written to the
 run directory as `facts.json` on every run. Nothing consumes it yet — siblings may later, to share one `HEAD_SHA` pin
 across a session instead of each re-deriving the PR number, base, linked issue,
 bot logins, and thread state.
@@ -129,10 +129,16 @@ Exit codes are `0` for any report produced (**including a `blocked` verdict**),
 `2` usage, `3` auth or rate-limit refusal, `4` PR not found.
 
 `lib/pr-facts.sh` carries the read-only fact recipes it uses — a retry wrapper,
-a partial-GraphQL guard, the three-bucket rate gate, ruleset aggregation, the
-check matrix that preserves `app_id`, the CI-state materializer, paginated
-review threads, Projects v2 lookups, compare, and shared-file duplicate
-detection. Source it alongside `lib/github-rest.sh`.
+the three-bucket rate gate, repo identity from the git remote, the PR / files /
+diff / issue records on REST in the `gh --json` shapes, issue-timeline links, the
+derived review decision, ruleset aggregation, the check matrix that preserves
+`app_id`, the CI-state materializer, REST review threads, the board row from
+Detent's local snapshot, the shipped sweep from local git, closed issues, compare,
+and shared-file duplicate detection. Exactly two functions speak GraphQL —
+paginated review threads (for resolution state) and Projects v2 lookups — and
+both are fallbacks the skill reaches only when REST or the snapshot cannot
+answer, because GraphQL's secondary limit is invisible to `rate_limit` and shared
+with the Detent fleet. Source it alongside `lib/github-rest.sh`.
 
 ## Project Detection
 
