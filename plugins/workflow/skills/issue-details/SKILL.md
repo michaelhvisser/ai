@@ -69,7 +69,7 @@ Everything before the Phase 6 answer is read-only, by construction:
    `gh issue view`, `gh issue list`, `gh search issues`, `gh pr list` (including
    `--search`), `gh label list`, `gh repo view`, `gh auth status`, `gh api` with no
    `--method`/`-X` (or an explicit `-X GET`), and `gh api graphql` with a `query` operation
-   only. Any other verb before the answer is a bug.
+   only (the merged-PR sweep is a `search` query). Any other verb before the answer is a bug.
 2. **No model runs with a token.** Classification and the verdict are the orchestrator's
    own judgement over fetched data; no subagent and no Codex process is dispatched in this
    version, so there is no second process holding `gh` credentials to fence.
@@ -77,8 +77,11 @@ Everything before the Phase 6 answer is read-only, by construction:
    (`facts.md` §0c); it runs no `git fetch`, `git show`, `git checkout`, or worktree
    creation, and never touches the working tree.
 
-Past the answer, the write set is exactly three commands (`execute.md` §2): create a
-comment, edit the marker comment in place, add `triage:needs-decision`. Board `Status` and
+Past the answer, the write set is exactly three commands, reached only through the
+guarded dispatcher in `execute.md` §4: **one** of create-comment or edit-marker-in-place
+per issue, then `triage:needs-decision` only when the comment landed and
+`needs_decision` is true — and none of them unless the pre-write refresh passed and the
+issue is still open. Board `Status` and
 `Priority`, the issue body, every other label, and the issue's open/closed state are never
 written, in any mode.
 
@@ -96,10 +99,10 @@ and the rules above decide.
 
 | Flag | Default | Why |
 |---|---|---|
-| `<n> ...` | — | One or more issue numbers, or one full issue URL (which also sets host and repo — a mismatch with the checkout's repository is exit 4). Never capped. |
+| `<n> ...` | — | One or more issue numbers, or one full issue URL on its own (parsed in the loop below; it also sets host and repo, and a mismatch with the checkout's repository is exit 4 in `facts.md` §0a). Never capped. |
 | `--since <n>d` | — | Every open issue created in the last *n* days, oldest first, cap 50 per run with a warning (`facts.md` §0f). Mutually exclusive with numbers. |
-| `--base <branch>` | `dev` when `origin` has it, else the repo default branch | The tip the verdict is stamped against, and the branch the "merged since filing" sweep reads. |
-| `--no-dup-search` | off | Skip the two title-term searches; the verdict is `unclear` with reason `dedupe skipped`. The merged-PR and open-PR lists still run — they are list endpoints, not search. |
+| `--base <branch>` | `dev` when `origin` has it, else the repo default branch | The tip the verdict is stamped against, and the branch the "merged since filing" sweep reads. An explicit branch that does not resolve is exit 3, never a fallback. |
+| `--no-dup-search` | off | Skip the two title-term searches; the verdict is `unclear` with reason `dedupe skipped`. The merged-PR sweep and open-PR list still run — they charge the GraphQL bucket, not the 30/min search bucket. |
 | `--no-gate` | off | Report and print the drafts — no approval prompt, nothing written. `--json` implies it. |
 | `--json` | off | Machine schema on stdout (`output.md` §3). |
 
@@ -111,7 +114,7 @@ Parse with the `for arg in $ARGUMENTS … case` loop and `SKIP_NEXT` for valued 
 `pr-details`:
 
 ```bash
-SINCE_ARG=""; BASE_ARG=""; DO_DUP=1; DO_GATE=1; AS_JSON=0; ISSUE_ARGS=""
+SINCE_ARG=""; BASE_ARG=""; DO_DUP=1; DO_GATE=1; AS_JSON=0; ISSUE_ARGS=""; URL_HOST=""; URL_SLUG=""
 SKIP_NEXT=""
 for arg in $ARGUMENTS; do
   case "$SKIP_NEXT" in
@@ -125,16 +128,29 @@ for arg in $ARGUMENTS; do
     --no-gate)       DO_GATE=0 ;;
     --json)          AS_JSON=1; DO_GATE=0 ;;
     --*)             echo "issue-details: unknown flag $arg" >&2; exit 2 ;;
-    *)               ISSUE_ARGS="$ISSUE_ARGS $arg" ;;
+    https://*)       # one full issue URL: host, owner/repo, and number all come from it
+      URL_HOST=$(printf '%s' "$arg" | sed -nE 's#^https?://([^/]+)/.*#\1#p')
+      URL_SLUG=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/([^/]+/[^/]+)/issues/[0-9]+.*#\1#p')
+      URL_NUM=$(printf '%s' "$arg" | sed -nE 's#^https?://[^/]+/[^/]+/[^/]+/issues/([0-9]+).*#\1#p')
+      [ -n "$URL_SLUG" ] && [ -n "$URL_NUM" ] || { echo "issue-details: not an issue URL: $arg" >&2; exit 2; }
+      ISSUE_ARGS="$ISSUE_ARGS $URL_NUM" ;;
+    *)
+      printf '%s' "$arg" | grep -qE '^[0-9]+$' || { echo "issue-details: not an issue number: $arg" >&2; exit 2; }
+      ISSUE_ARGS="$ISSUE_ARGS $arg" ;;
   esac
 done
 [ -n "$SKIP_NEXT" ] && { echo "issue-details: $SKIP_NEXT flag needs a value" >&2; exit 2; }
-case "$SINCE_ARG" in ""|[0-9]*d) : ;; *) echo "issue-details: --since takes <n>d" >&2; exit 2 ;; esac
+if [ -n "$SINCE_ARG" ] && ! printf '%s' "$SINCE_ARG" | grep -qE '^[1-9][0-9]*d$'; then
+  echo "issue-details: --since takes <n>d with n a positive integer" >&2; exit 2
+fi
 if [ -z "$SINCE_ARG" ] && [ -z "${ISSUE_ARGS# }" ]; then
   echo "issue-details: give issue numbers or --since <n>d" >&2; exit 2
 fi
 if [ -n "$SINCE_ARG" ] && [ -n "${ISSUE_ARGS# }" ]; then
   echo "issue-details: --since and issue numbers are mutually exclusive" >&2; exit 2
+fi
+if [ -n "$URL_SLUG" ] && [ "$(printf '%s' "${ISSUE_ARGS# }" | wc -w | tr -d ' ')" -gt 1 ]; then
+  echo "issue-details: a URL argument must be the only issue argument" >&2; exit 2
 fi
 ```
 
@@ -145,8 +161,10 @@ fi
 - Without `--json`: the terminal report on stdout (`output.md` §2), diagnostics on stderr,
   and in print-only mode the drafted comments after the report.
 - A batch is **per-issue all-or-nothing, run-level partial**: an issue is either fully
-  evaluated or listed in `unevaluated[]` with the reason; a core/GraphQL rate stop
-  mid-batch ends evaluation and the gate is offered on what completed.
+  evaluated or listed in `unevaluated[]` with the reason (`facts.md` §1). A core/GraphQL
+  shortfall at an issue's gate, or a terminal rate-limit 403 on any of its calls, stops
+  evaluation there: that issue and every later one are `unevaluated`, and the approval
+  gate is offered on what completed.
 
 Exit codes: `0` report produced, `2` usage, `3` auth/rate refusal or unresolvable base tip
 before any issue completed, `4` issue not found or repo mismatch (`output.md` §4).
@@ -157,22 +175,26 @@ before any issue completed, `4` issue not found or repo mismatch (`output.md` §
 |---|---|---|---|
 | **Orchestrator** | session model | argument parsing, every `gh` call, the mechanical blocks, classification and the verdict from fetched titles and bodies, priority and effort from the tables, the comment draft, the report | cheap — no dispatch |
 
-No subagent, no Codex. Cost is roughly 5 API calls per run plus 5 per issue (issue, comments,
-board, two searches); the searches are the bound, at 30 per minute account-wide.
+No subagent, no Codex. Cost: about 6 calls per run (user, rate gate, open PRs, labels, one
+per goal label, the `--since` list) plus one GraphQL call per 100 merged PRs in the sweep
+window, then **at least 6 per issue** — issue, comments, board, the per-issue rate check,
+and two searches — before pagination on a long comment thread or reading candidate
+bodies. The searches are the bound, at 30 per minute account-wide.
 
 ## Phase outline
 
 | Phase | What | Detail file |
 |---|---|---|
 | 0 | Preflight: identity and the running user, auth, rate gate, base-tip pin, run dir, run-wide lists (merged PRs, open PRs, goal registry), `--since` selection | `facts.md` §0 |
-| 1 | Per issue: record, comments and the marker, existing effort block, board state, dedupe candidates, goal references | `facts.md` §1 |
-| 2 | Classification, mechanical noise first | `triage.md` §1 |
+| 1 | Pass A per issue: the record; then the run-wide merged-PR sweep from the earliest filing date; pass B per issue: comments and the owned marker, existing effort block, the mechanical noise signal (before any search), board state, the per-issue rate gate, dedupe candidates, goal references | `facts.md` §1 |
+| 2 | Classification (noise already settled by `facts.md` §1e) | `triage.md` §1 |
 | 3 | Verdict from the candidates, then the vocabulary guard | `triage.md` §2–§3 |
 | 4 | Goal, priority, effort, the social rule, `needs_decision` | `triage.md` §4–§6 |
 | 5 | Draft the comment; render the report and `facts.json` | `output.md` |
 | 6 | Approval gate: post / print only / stop | `execute.md` |
 
-The rate gate runs in Phase 0 and again before each issue's searches (`facts.md` §1e).
+The rate gate runs in Phase 0 and in full again before each issue's costly work
+(`facts.md` §1g); a rate stop mid-batch leaves the remaining issues `unevaluated`.
 
 ## Output template
 
@@ -197,11 +219,11 @@ getparable/parable · by michaelhvisser, you · OPEN · board Todo/none · creat
 
 - `facts.md` — Phases 0–1: identity, auth, rate gate, base-tip pin, run dir, run-wide
   lists and the goal registry, `--since`; per issue: record, comments and marker, existing
-  effort, board, dedupe candidates, goal references
+  effort, the noise signal, board, the per-issue gate, dedupe candidates, goal references
 - `triage.md` — Phases 2–4: classification table and the noise check, the verdict
   vocabulary and its guard, goal resolution, priority and effort tables with the effort
   guard, the social rule, `needs_decision`, the still-needed hook
 - `output.md` — Phase 5: the marker comment, the terminal report, `--json` schema 1, exit
   codes, scratch hygiene
-- `execute.md` — Phase 6: the one question, the three-command write set,
-  snapshot-before-write, what is printed after
+- `execute.md` — Phase 6: the one question, the fail-closed pre-write refresh, the guarded
+  dispatcher over the three-command write set, what is printed after

@@ -22,21 +22,11 @@ wins.
 
 Judgement without a citation is not a `bug`. When the classifier cannot name where the
 expected behaviour is defined, the class is `question`, and `needs_decision` follows (§6).
-The mechanical noise check runs first and is the only rule a model does not get to
-override:
+The mechanical noise check is `facts.md` §1h — it runs in Phase 1, **before** the searches,
+and it is the only rule a model does not get to override: when `NOISE_SIGNAL` is set,
+`CLASSIFICATION` is already `noise` by the time this table is read.
 
-```bash
-NOISE_SIGNAL=""
-if grep -q '<!-- detent-intake:' "$RUN_DIR/body-${ISSUE_NUM}.md"; then
-  NOISE_SIGNAL="detent-intake fingerprint"
-elif printf '%s\n' "$ISSUE_TITLE" | cat - "$RUN_DIR/body-${ISSUE_NUM}.md" \
-     | grep -qE '(^|/|[[:space:]]|`)(\.next|dist|build|out|node_modules|_generated)/'; then
-  NOISE_SIGNAL="path under build output / node_modules / _generated"
-fi
-if [ -n "$NOISE_SIGNAL" ]; then CLASSIFICATION="noise"; fi
-```
-
-A `noise` classification skips dedupe (`facts.md` §1e) — the searches would cost two
+A `noise` classification skips dedupe (`facts.md` §1h) — the searches would cost two
 bucket calls per issue for a verdict the class already settles — and the verdict is
 `unclear` with reason `noise — dedupe not run`.
 
@@ -46,7 +36,7 @@ before work starts). That flag feeds §6; it never changes the class.
 
 ## §2 Dedupe is advisory, and names at most one canonical (Phase 3)
 
-The candidate sets from `facts.md` §1e — open issues and PRs by title terms, open PRs naming
+The candidate sets from `facts.md` §1h — open issues and PRs by title terms, open PRs naming
 this issue, merged PRs since filing naming this issue — are **context**, not a verdict. The
 orchestrator reads titles (and, for at most three, the bodies) and answers with exactly one
 of the closed vocabulary:
@@ -181,21 +171,23 @@ The issue's author decides its fate. When the author is not the user running the
 
 ```bash
 if [ -n "${ISSUE_AUTHOR:-}" ] && [ "$ISSUE_AUTHOR" = "$ME" ]; then SELF_AUTHORED=1; else SELF_AUTHORED=0; fi
+if [ -n "${ISSUE_AUTHOR:-}" ]; then AUTHOR_REF="@${ISSUE_AUTHOR}"; else AUTHOR_REF="the author (account deleted)"; fi
 RECOMMENDATION=""; PRIORITY_NOTE=""
 case "$VERDICT" in
   "likely-duplicate-of #"*)
     if [ "$SELF_AUTHORED" = 1 ]; then RECOMMENDATION="close as a duplicate of $CANONICAL"
-    else RECOMMENDATION="for @${ISSUE_AUTHOR}: this reads as a duplicate of $CANONICAL — your call"; fi ;;
+    else RECOMMENDATION="for ${AUTHOR_REF}: this reads as a duplicate of $CANONICAL — your call"; fi ;;
   "already-fixed-by #"*)
     if [ "$SELF_AUTHORED" = 1 ]; then RECOMMENDATION="close — fixed by $CANONICAL"
-    else RECOMMENDATION="for @${ISSUE_AUTHOR}: $CANONICAL appears to have fixed this — your call"; fi ;;
+    else RECOMMENDATION="for ${AUTHOR_REF}: $CANONICAL appears to have fixed this — your call"; fi ;;
 esac
 if [ "$SELF_AUTHORED" = 0 ] && [ "${BOARD_PRIORITY:-none}" != "none" ] && [ "$BOARD_PRIORITY" != "$PRIORITY" ]; then
-  PRIORITY_NOTE="for @${ISSUE_AUTHOR}: the table says $PRIORITY; the board says $BOARD_PRIORITY — left as is"
+  PRIORITY_NOTE="for ${AUTHOR_REF}: the table says $PRIORITY; the board says $BOARD_PRIORITY — left as is"
 fi
 ```
 
-An empty `ISSUE_AUTHOR` (deleted account) is not self-authored. `RECOMMENDATION` is the only
+An empty `ISSUE_AUTHOR` (deleted account) is not self-authored, and is addressed as "the
+author (account deleted)" rather than a dangling `@`. `RECOMMENDATION` is the only
 place the word "close" may appear in a comment, and only the self-authored branch writes it
 as an instruction.
 

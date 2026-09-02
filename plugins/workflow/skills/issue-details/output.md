@@ -113,7 +113,7 @@ Stdout carries this object and nothing else. The same object is written to
       "warnings": []
     }
   ],
-  "unevaluated": [],
+  "unevaluated": [{"number": 3095, "reason": "batch stopped: rate limit below reserve (core 812, graphql 4000)"}],
   "warnings": [],
   "files": {"run_dir": "…/issue-details/run/20260902T020000Z-a1b2c3"}
 }
@@ -121,16 +121,19 @@ Stdout carries this object and nothing else. The same object is written to
 
 Closed vocabularies a consumer may branch on: `classification`, `verdict`, `priority`,
 `effort`, `effort_stance ∈ {propose, agree, disagree}`, `goal.source ∈ {own-label,
-reference, none}`, `comment.action ∈ {create, edit, none}` (`none` for a closed issue).
+reference, none}`, `comment.action ∈ {create, edit, refuse, none}` (`refuse` when more
+than one owned marker comment exists — `facts.md` §1c; `none` for a closed issue).
+`unevaluated[]` is `[{number, reason}]` for every selected issue that did not complete
+(`facts.md` §1); an issue is either fully in `issues[]` or listed there, never half-done.
 
 ## §4 Exit codes
 
 | Exit | Meaning |
 |---|---|
 | `0` | A report was produced for at least one issue — including one whose every verdict is `unclear`. Callers branch on the fields, never on the exit code. |
-| `2` | Usage error: unknown flag, a valued flag with no value, `--since` with no unit, neither numbers nor `--since`. |
-| `3` | Auth or rate-limit refusal before any issue was evaluated, or an unresolvable base tip. No partial report. |
-| `4` | Issue not found, or the repository resolved from a URL differs from the checkout's. |
+| `2` | Usage error: unknown flag, a valued flag with no value, `--since` outside `<positive integer>d`, a non-numeric issue argument, a URL that is not an issue URL, neither numbers nor `--since`. |
+| `3` | Auth or rate-limit refusal before any issue was evaluated, an unresolvable base tip (including an explicit `--base` that does not exist), or a `--since` boundary `date(1)` cannot compute. No partial report. |
+| `4` | The repository resolved from a URL differs from the checkout's, or explicit issue numbers were given and none was found. A not-found issue inside a batch is `unevaluated[]`, not exit 4. |
 | `1` | Reserved for unexpected internal failure. Never used deliberately. |
 
 ## §5 Scratch hygiene
