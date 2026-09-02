@@ -12,6 +12,15 @@
 # Complements lib/github-rest.sh — source both. `github_pr`,
 # `github_current_pr`, `github_pr_reviews`, and `github_check_snapshot` stay
 # there and are used unchanged.
+#
+# Transport policy (workflow 0.7.0): REST core and local reads first. GitHub's
+# GraphQL endpoint carries a secondary limit (points per minute, concurrency)
+# that `rate_limit` never reports and that the Detent fleet shares with every
+# review session on the same token, so a normal pr-details run must issue
+# ZERO GraphQL queries. Exactly two functions here still speak GraphQL —
+# `pr_facts_review_threads` and `pr_facts_board` — and both are fallbacks
+# behind a REST or snapshot read (see the "REST-first and local facts"
+# section). Nothing else in this file may call `gh api graphql`.
 
 PR_FACTS_RETRIES="${PR_FACTS_RETRIES:-3}"
 PR_FACTS_BACKOFF="${PR_FACTS_BACKOFF:-2}"
@@ -248,6 +257,9 @@ pr_facts_ci_state() {
 }
 
 # pr_facts_review_threads <host> <owner> <name> <pr-number>
+# GraphQL FALLBACK — call only after pr_facts_review_threads_rest found at
+# least one root thread, because `isResolved` is the one fact REST lacks. On
+# failure the caller keeps the REST result with resolution_known:false.
 # Fully paginated review threads. The first page passes NO cursor (`-F
 # after=null` — gh converts the literal to JSON null); an empty string is not a
 # valid cursor. Comments are `first:1` + `last:1` because only the thread's
@@ -293,6 +305,10 @@ pr_facts_review_threads() {
 }
 
 # pr_facts_board <host> <owner> <name> issue|pullRequest <number>
+# GraphQL FALLBACK — Projects v2 has no REST surface. Call only when
+# pr_facts_board_local reports the issue absent or stale, and once more at
+# the Detent hand-off (execute.md §3) because the board move needs item_id
+# and project_id. Never for duplicate candidates.
 # Projects v2 items and their field values for one issue or PR. Detent's board
 # item is the ISSUE; the PR usually carries a stray row that must not be read as
 # the issue's state.
@@ -347,26 +363,416 @@ pr_facts_compare() {
 }
 
 # pr_facts_shared_files <host> <slug> <pr-number> <this-pr-files-json>
-# Duplicate signal 2: other open PRs touching this PR's files. `gh` has no
-# --argjson and `--jq` takes exactly one expression, so this pipes into
-# standalone jq. The 50-PR cap is the caller's `truncated` flag.
+# Duplicate signal 2: other open PRs touching this PR's files. REST only:
+# one `pulls?state=open&per_page=50` call, then `pulls/{n}/files` per other
+# open PR — at most 51 core calls, no GraphQL (`gh pr list --json files` was
+# GraphQL). Output: {truncated, open_prs, prs:[{number,title,headRefName,
+# shared[]}]}. `truncated` is true when the open-PR page hit the 50 cap, so
+# older open PRs went unexamined; the element shape inside `prs[]` is the
+# array this function used to return. A PR whose file list exceeds one page
+# (100 files) is compared on that first page only.
 pr_facts_shared_files() {
   local pf_host="${1:?host is required}"
   local pf_slug="${2:?slug is required}"
   local pf_num="${3:?PR number is required}"
   local pf_mine="${4:?file list JSON is required}"
+  local pf_open
+  local pf_count
+  local pf_rows
 
-  pr_facts_gh pr list -R "$pf_slug" --state open --limit 50 \
-    --json number,title,headRefName,files \
-    | jq -c --argjson mine "$pf_mine" --argjson me "$pf_num" '
-        [ .[]
-          | select(.number != $me)
-          | {number, title, headRefName,
-             shared: ([.files[].path]
-                      | map(select(test("(^|/)(_generated|__snapshots__)/") | not))
-                      | map(select(test("(pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock|bun\\.lock)$") | not))
-                      | map(select(. as $f | $mine | index($f))))}
-          | select((.shared | length) > 0) ]'
+  pf_open=$(pr_facts_gh api --hostname "$pf_host" \
+    "repos/$pf_slug/pulls?state=open&per_page=50") || return $?
+  pf_count=$(jq 'length' <<<"$pf_open") || return 1
+
+  # One files call per other open PR. The loop body runs in a pipeline so it
+  # is shell-neutral (no word-splitting of a command substitution, which zsh
+  # and bash treat differently); jq -s reassembles the rows.
+  pf_rows=$(jq -r --argjson me "$pf_num" '.[] | select(.number != $me) | .number' <<<"$pf_open" \
+    | while IFS= read -r PF_OTHER; do
+        [ -n "$PF_OTHER" ] || continue
+        PF_FILES=$(pr_facts_gh api --hostname "$pf_host" \
+          "repos/$pf_slug/pulls/$PF_OTHER/files?per_page=100" 2>/dev/null) || PF_FILES="[]"
+        jq -c --argjson files "$PF_FILES" --argjson other "$PF_OTHER" '
+          .[] | select(.number == $other)
+          | {number, title, headRefName: .head.ref, files: [ $files[] | .filename ]}' <<<"$pf_open"
+      done | jq -s '.') || return 1
+
+  jq -cn --argjson mine "$pf_mine" --argjson rows "${pf_rows:-[]}" --argjson n "$pf_count" '
+    {truncated: ($n >= 50), open_prs: $n,
+     prs: [ $rows[]
+            | {number, title, headRefName,
+               shared: (.files
+                        | map(select(test("(^|/)(_generated|__snapshots__)/") | not))
+                        | map(select(test("(pnpm-lock\\.yaml|package-lock\\.json|yarn\\.lock|bun\\.lock)$") | not))
+                        | map(select(. as $f | $mine | index($f))))}
+            | select((.shared | length) > 0) ]}'
+}
+
+# ---------------------------------------------------------------------------
+# REST-first and local facts (workflow 0.7.0)
+#
+# Everything below is REST core (`gh api` with no --method), plain git, or a
+# read of Detent's local board snapshot. Output shapes mirror the `gh pr view`
+# / `gh issue view` / GraphQL field names the pr-details docs already use, so
+# the report phases read the same keys whichever transport produced them.
+# ---------------------------------------------------------------------------
+
+# pr_facts_repo_identity [remote]
+# {host, slug, owner, name} parsed from `git remote get-url <remote>` — the
+# https, ssh:// and scp-style (git@host:owner/name.git) forms. Zero API calls;
+# replaces `gh repo view`, which is GraphQL. Returns 1 when the remote is
+# missing or the URL does not carry an owner/name pair.
+pr_facts_repo_identity() {
+  local pf_remote="${1:-origin}"
+  local pf_url
+  local pf_host
+  local pf_slug
+
+  pf_url=$(git remote get-url "$pf_remote" 2>/dev/null) || return 1
+  case "$pf_url" in
+    *://*)   # https://host/owner/name(.git) · ssh://git@host[:port]/owner/name(.git)
+      pf_host=$(printf '%s' "$pf_url" | sed -E 's#^[a-z+]+://([^@/]*@)?([^/:]+)(:[0-9]+)?/.*#\2#')
+      pf_slug=$(printf '%s' "$pf_url" | sed -E 's#^[a-z+]+://[^/]+/(.*)$#\1#') ;;
+    *@*:*)   # git@host:owner/name(.git)
+      pf_host=$(printf '%s' "$pf_url" | sed -E 's#^[^@]+@([^:]+):.*#\1#')
+      pf_slug=$(printf '%s' "$pf_url" | sed -E 's#^[^@]+@[^:]+:(.*)$#\1#') ;;
+    *) return 1 ;;
+  esac
+  pf_slug="${pf_slug%/}"
+  pf_slug="${pf_slug%.git}"
+  case "$pf_slug" in */*) : ;; *) return 1 ;; esac
+  jq -cn --arg host "$pf_host" --arg slug "$pf_slug" \
+    '{host:$host, slug:$slug, owner:($slug|split("/")[0]), name:($slug|split("/")[1])}'
+}
+
+# pr_facts_pr_record <host> <slug> <pr-number>
+# REST `pulls/{n}` normalised to the `gh pr view --json` field names:
+# state OPEN|CLOSED|MERGED (REST says closed + merged_at), mergeable
+# MERGEABLE|CONFLICTING|UNKNOWN (REST bool/null), mergeStateStatus upper-cased
+# from mergeable_state, labels[{name}], reviewRequests[], autoMergeRequest.
+# `reviewDecision` is NOT here — derive it with pr_facts_review_decision.
+# Exit code is gh's on failure (404 for a missing PR).
+pr_facts_pr_record() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?PR number is required}"
+  local pf_raw
+
+  pf_raw=$(pr_facts_gh api --hostname "$pf_host" "repos/$pf_slug/pulls/$pf_num") || return $?
+  jq -c '{
+    number, title, body: (.body // ""), url: .html_url,
+    state: (if .merged_at != null then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end),
+    isDraft: (.draft // false),
+    author: {login: (.user.login // null)},
+    createdAt: .created_at, updatedAt: .updated_at, mergedAt: .merged_at, closedAt: .closed_at,
+    baseRefName: .base.ref, baseRefOid: .base.sha,
+    headRefName: .head.ref, headRefOid: .head.sha,
+    headRepository: {name: (.head.repo.name // null)},
+    headRepositoryOwner: {login: (.head.repo.owner.login // null)},
+    isCrossRepository: ((.head.repo.full_name // "") != .base.repo.full_name),
+    mergeable: (if .mergeable == true then "MERGEABLE"
+                elif .mergeable == false then "CONFLICTING" else "UNKNOWN" end),
+    mergeStateStatus: ((.mergeable_state // "unknown") | ascii_upcase),
+    labels: [ .labels[]? | {name} ],
+    autoMergeRequest: .auto_merge,
+    additions, deletions, changedFiles: .changed_files, commits,
+    reviewRequests: ([ .requested_reviewers[]? | {__typename: "User", login} ]
+                     + [ .requested_teams[]? | {__typename: "Team", name, slug} ]),
+    transport: "rest"
+  }' <<<"$pf_raw"
+}
+
+# pr_facts_pr_files <host> <slug> <pr-number>
+# Every changed file, paginated at 100 — no `gh pr view --json files` cap, so
+# there is no files_truncated case. [{path, status, additions, deletions,
+# previous_filename}].
+pr_facts_pr_files() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?PR number is required}"
+  local pf_pages
+
+  pf_pages=$(pr_facts_gh api --hostname "$pf_host" --paginate --slurp \
+    "repos/$pf_slug/pulls/$pf_num/files?per_page=100") || return $?
+  jq -c '[ .[][] | {path: .filename, status, additions, deletions,
+                    previous_filename: (.previous_filename // null)} ]' <<<"$pf_pages"
+}
+
+# pr_facts_pr_diff <host> <slug> <pr-number>
+# The unified diff via the REST media type — replaces `gh pr diff`, whose PR
+# lookup is GraphQL. A trailing newline is restored (command substitution in
+# the retry wrapper strips it) so `wc -l` counts the last hunk line.
+pr_facts_pr_diff() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?PR number is required}"
+
+  pr_facts_gh api --hostname "$pf_host" -H 'Accept: application/vnd.github.diff' \
+    "repos/$pf_slug/pulls/$pf_num" || return $?
+  printf '\n'
+}
+
+# pr_facts_issue <host> <slug> <issue-number>
+# REST `issues/{n}` in the `gh issue view --json` shape (state OPEN|CLOSED,
+# labels[{name}], url). `isPullRequest` is true when the number is a PR —
+# REST serves both from this endpoint, `gh issue view` refuses PRs.
+pr_facts_issue() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?issue number is required}"
+  local pf_raw
+
+  pf_raw=$(pr_facts_gh api --hostname "$pf_host" "repos/$pf_slug/issues/$pf_num") || return $?
+  jq -c '{number, title, body: (.body // ""), state: (.state | ascii_upcase),
+          stateReason: .state_reason, url: .html_url,
+          labels: [ .labels[]? | {name} ],
+          author: {login: (.user.login // null)},
+          createdAt: .created_at, updatedAt: .updated_at, closedAt: .closed_at,
+          isPullRequest: has("pull_request"), transport: "rest"}' <<<"$pf_raw"
+}
+
+# pr_facts_issue_links <host> <slug> <issue-number> <pr-number>
+# Reads the issue timeline (paginated). `cross_referenced_by_pr` is true when
+# a `cross-referenced` event names <pr-number> with `pull_request` non-null
+# in this repository — the REST-visible proof that the PR body mentions the
+# issue. Sidebar-only links ("Development" panel) emit no REST event and are
+# invisible here. `last_board_change_at` is the newest
+# `project_v2_item_status_changed` event: REST carries no status name on it,
+# so it serves only as a staleness tripwire for the Detent snapshot.
+pr_facts_issue_links() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_issue="${3:?issue number is required}"
+  local pf_pr="${4:?PR number is required}"
+  local pf_pages
+
+  pf_pages=$(pr_facts_gh api --hostname "$pf_host" --paginate --slurp \
+    "repos/$pf_slug/issues/$pf_issue/timeline?per_page=100") || return $?
+  jq -c --argjson pr "$pf_pr" --arg slug "$pf_slug" '
+    [ .[][] ] as $ev
+    | ([ $ev[] | select(.event == "cross-referenced")
+                | select(.source.issue.pull_request != null)
+                | select((.source.issue.repository.full_name // $slug) == $slug)
+                | .source.issue.number ] | unique) as $prs
+    | {cross_referenced_by_pr: (($prs | index($pr)) != null),
+       cross_referenced_prs: $prs,
+       last_board_change_at: ([ $ev[] | select(.event == "project_v2_item_status_changed")
+                                       | .created_at ] | max),
+       events: ($ev | length), transport: "rest"}' <<<"$pf_pages"
+}
+
+# pr_facts_pr_reviews <host> <slug> <pr-number>
+# Host- and repo-explicit REST reviews (github_pr_reviews reads the ambient
+# checkout's {owner}/{repo}). Paginated; raw REST review objects.
+pr_facts_pr_reviews() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?PR number is required}"
+  local pf_pages
+
+  pf_pages=$(pr_facts_gh api --hostname "$pf_host" --paginate --slurp \
+    "repos/$pf_slug/pulls/$pf_num/reviews?per_page=100") || return $?
+  jq -c '[ .[][] ]' <<<"$pf_pages"
+}
+
+# pr_facts_review_decision <reviews-json> <rules-json> <pr-author-login>
+# `reviewDecision` derived the way GitHub derives it, from REST facts: latest
+# non-COMMENTED review per author (the PR author excluded), CHANGES_REQUESTED
+# anywhere → CHANGES_REQUESTED; fewer distinct APPROVED authors than the
+# ruleset's approvals_required → REVIEW_REQUIRED; any approval → APPROVED;
+# else "" (the gh empty-string convention when nothing is required). A
+# DISMISSED review supersedes that author's earlier approval.
+pr_facts_review_decision() {
+  local pf_reviews="${1:?reviews JSON is required}"
+  local pf_rules="${2:?rules JSON is required}"
+  local pf_author="${3:-}"
+
+  jq -cn --argjson reviews "$pf_reviews" --argjson rules "$pf_rules" --arg author "$pf_author" '
+    ($reviews
+     | map(select(.user != null and .user.login != $author))
+     | map(select(.state != "COMMENTED" and .state != "PENDING"))
+     | group_by(.user.login) | map(max_by([.submitted_at, .id]))) as $latest
+    | ($latest | map(select(.state == "APPROVED")) | map(.user.login)) as $approved
+    | ($latest | map(select(.state == "CHANGES_REQUESTED")) | map(.user.login)) as $cr
+    | ($rules.approvals_required // 0) as $need
+    | {reviewDecision: (if ($cr | length) > 0 then "CHANGES_REQUESTED"
+                        elif $need > ($approved | length) then "REVIEW_REQUIRED"
+                        elif ($approved | length) > 0 then "APPROVED" else "" end),
+       approvals_given: ($approved | length), approvals_required: $need,
+       approved_by: $approved, changes_requested_by: $cr,
+       latest: ($latest | map({login: .user.login, type: .user.type, state,
+                               submitted_at, commit_id})),
+       derived: true}'
+}
+
+# pr_facts_review_threads_rest <host> <slug> <pr-number>
+# Review comments grouped by root (`in_reply_to_id == null`) into the node
+# shape pr_facts_review_threads returns: id, path, line, isOutdated (a root
+# with `line == null` is on a superseded diff), origin/latest with
+# author{login,__typename}. REST has NO resolution state anywhere, so every
+# node carries `isResolved: null` and the envelope `resolution_known: false`;
+# the caller decides whether resolution is a merge gate (ruleset
+# threads_required) before spending a GraphQL call to learn it.
+pr_facts_review_threads_rest() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_num="${3:?PR number is required}"
+  local pf_pages
+
+  pf_pages=$(pr_facts_gh api --hostname "$pf_host" --paginate --slurp \
+    "repos/$pf_slug/pulls/$pf_num/comments?per_page=100") || return $?
+  jq -c '
+    def who: {author: (if .user == null then null
+                       else {login: .user.login, __typename: .user.type} end),
+              body, createdAt: .created_at};
+    [ .[][] ] as $c
+    | ($c | map(select(.in_reply_to_id == null)) | sort_by(.id)) as $roots
+    | ($roots | map(. as $r
+        | ([ $c[] | select(.id == $r.id or .in_reply_to_id == $r.id) ]
+           | sort_by([.created_at, .id])) as $thread
+        | {id: ("rest-review-comment:" + ($r.id | tostring)), root_id: $r.id, url: $r.html_url,
+           isResolved: null, isOutdated: ($r.line == null), path: $r.path, line: $r.line,
+           origin: {totalCount: ($thread | length), nodes: [ $thread[0] | who ]},
+           latest: {nodes: [ $thread[-1] | who ]}})) as $nodes
+    | {total: ($nodes | length), fetched: ($nodes | length), paginated_complete: true,
+       resolution_known: false, transport: "rest", nodes: $nodes}' <<<"$pf_pages"
+}
+
+# pr_facts_snapshot_path
+# Path of Detent's board snapshot: $DETENT_BOARD_SNAPSHOT when set, else
+# `detent-board-snapshot.json` beside the global config that
+# `detent --format json config path` names (global.yaml sits in the same
+# directory on every platform). Returns 1 when neither resolves; the file
+# itself may still be absent — callers test readability.
+pr_facts_snapshot_path() {
+  local pf_cfg
+
+  if [ -n "${DETENT_BOARD_SNAPSHOT:-}" ]; then
+    printf '%s\n' "$DETENT_BOARD_SNAPSHOT"
+    return 0
+  fi
+  command -v detent >/dev/null 2>&1 || return 1
+  pf_cfg=$(detent --format json config path 2>/dev/null | jq -r '.path // empty' 2>/dev/null) || return 1
+  [ -n "$pf_cfg" ] || return 1
+  printf '%s\n' "$(dirname "$pf_cfg")/detent-board-snapshot.json"
+}
+
+# pr_facts_board_local <slug> <issue-number> [last-board-change-at]
+# The issue's board row from Detent's snapshot — the daemon's own view of the
+# board, zero API calls. Matches `identifier == "<slug>#<n>"` in pipeline[]
+# (active + observed lanes, carrying pull_request{}) then board_issues[].
+# `fresh` is true when the snapshot's age is within refresh.stale_after_seconds
+# (600 when the file does not say) AND no board change happened after it —
+# pass pr_facts_issue_links' `last_board_change_at` as the third argument to
+# apply that tripwire. Not found or stale → the caller may fall back to the
+# GraphQL pr_facts_board, once. Always prints an object; returns 1 only when
+# the snapshot file is unreadable.
+pr_facts_board_local() {
+  local pf_slug="${1:?slug is required}"
+  local pf_num="${2:?issue number is required}"
+  local pf_changed="${3:-}"
+  local pf_file
+
+  pf_file=$(pr_facts_snapshot_path) || pf_file=""
+  if [ -z "$pf_file" ] || [ ! -r "$pf_file" ]; then
+    printf '{"found":false,"fresh":false,"source":"detent-snapshot","reason":"snapshot unavailable","path":%s}\n' \
+      "$(jq -cn --arg p "$pf_file" '$p')"
+    return 1
+  fi
+  jq -c --arg id "${pf_slug}#${pf_num}" --arg changed "$pf_changed" '
+    (.saved_at // .snapshot.generated_at) as $saved
+    | ($saved | sub("\\.[0-9]+"; "") | fromdateiso8601) as $saved_s
+    | ((now | floor) - $saved_s) as $age
+    | (.snapshot.refresh.stale_after_seconds // 600) as $stale
+    | (($changed | length) > 0
+       and (($changed | sub("\\.[0-9]+"; "") | fromdateiso8601) > $saved_s)) as $moved
+    | ((.snapshot.pipeline // []) | map(select(.identifier == $id)) | first) as $p
+    | ((.snapshot.board_issues // []) | map(select(.identifier == $id)) | first) as $b
+    | ($p // $b) as $hit
+    | {found: ($hit != null),
+       fresh: ($hit != null and $age <= $stale and ($moved | not)),
+       saved_at: $saved, age_seconds: $age, stale_after_seconds: $stale,
+       refresh_status: (.snapshot.refresh.status // null),
+       board_changed_after_snapshot: $moved,
+       matched_in: (if $p != null then "pipeline" elif $b != null then "board_issues" else null end),
+       state: ($hit.state // null), priority_name: ($hit.priority_name // null),
+       labels: ($hit.labels // []), blocked_by: ($hit.blocked_by // []),
+       pull_request: ($hit.pull_request // null), metadata: ($hit.metadata // {}),
+       source: "detent-snapshot"}' "$pf_file"
+}
+
+# pr_facts_snapshot_pr_issue <slug> <pr-number>
+# The issue number whose pipeline row carries pull_request.number == <pr> —
+# Detent's own record of which issue a PR belongs to, so a match is a
+# `linked` source without a GitHub call. Prints nothing when absent.
+pr_facts_snapshot_pr_issue() {
+  local pf_slug="${1:?slug is required}"
+  local pf_pr="${2:?PR number is required}"
+  local pf_file
+
+  pf_file=$(pr_facts_snapshot_path) || return 1
+  [ -r "$pf_file" ] || return 1
+  jq -r --arg prefix "${pf_slug}#" --argjson pr "$pf_pr" '
+    [ .snapshot.pipeline[]? | select(.pull_request.number == $pr)
+      | select(.identifier | startswith($prefix)) | .identifier | sub("^.*#"; "") ]
+    | first // empty' "$pf_file"
+}
+
+# pr_facts_shipped_local <merge-base> <base-tip> [cap=200]
+# Merged PRs on the base branch since the merge-base, from local git — zero
+# API calls, and in MERGE order (first-parent), which `gh pr list` could not
+# give (creation order, no sort flag; michaelhvisser/ai#17). PR number from
+# `(#N)` at the end of the subject (squash) or `Merge pull request #N`;
+# closed issues from close/fix/resolve keywords in the body; files from
+# diff-tree (merge commits: first-parent diff); mergedAt as the committer
+# date in UTC Zulu form. [{number, title, mergedAt, sha, issues[], files[]}]
+# newest first; a commit with no PR number is kept with `number: null`.
+# The caller derives truncation from `git rev-list --count` against the cap.
+pr_facts_shipped_local() {
+  local pf_from="${1:?merge-base is required}"
+  local pf_to="${2:?base tip is required}"
+  local pf_cap="${3:-200}"
+
+  git rev-list --first-parent -n "$pf_cap" "${pf_from}..${pf_to}" \
+    | while IFS= read -r PF_SHA; do
+        [ -n "$PF_SHA" ] || continue
+        PF_WHEN=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ "$PF_SHA")
+        PF_SUBJECT=$(git show -s --format=%s "$PF_SHA")
+        PF_BODY=$(git show -s --format=%b "$PF_SHA")
+        PF_NUM=$(printf '%s\n' "$PF_SUBJECT" | sed -nE 's/.*\(#([0-9]+)\)$/\1/p')
+        [ -n "$PF_NUM" ] || PF_NUM=$(printf '%s\n' "$PF_SUBJECT" | sed -nE 's/^Merge pull request #([0-9]+).*/\1/p')
+        PF_ISSUES=$(printf '%s\n' "$PF_BODY" \
+          | grep -oiE '(^|[^A-Za-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+          | grep -oE '[0-9]+$' | sort -un | jq -cs '.')
+        case "$(git show -s --format=%P "$PF_SHA")" in
+          *' '*) PF_FILES=$(git diff --name-only "${PF_SHA}^1" "$PF_SHA") ;;
+          *)     PF_FILES=$(git diff-tree --no-commit-id --name-only -r --root "$PF_SHA") ;;
+        esac
+        PF_FILES=$(printf '%s\n' "$PF_FILES" | jq -R 'select(length > 0)' | jq -cs '.')
+        jq -cn --argjson num "${PF_NUM:-null}" --arg title "$PF_SUBJECT" --arg when "$PF_WHEN" \
+          --arg sha "$PF_SHA" --argjson issues "${PF_ISSUES:-[]}" --argjson files "${PF_FILES:-[]}" \
+          '{number: $num, title: $title, mergedAt: $when, sha: $sha, issues: $issues, files: $files}'
+      done | jq -s '.'
+}
+
+# pr_facts_closed_issues <host> <slug> <since>
+# Issues closed at or after <since> (Zulu ISO 8601): REST
+# `issues?state=closed&since=` filters on updated_at, so the closed_at window
+# is re-applied here, and rows carrying `pull_request` (REST lists PRs as
+# issues) are dropped. [{number, title, closedAt, labels[{name}]}].
+pr_facts_closed_issues() {
+  local pf_host="${1:?host is required}"
+  local pf_slug="${2:?slug is required}"
+  local pf_since="${3:?since timestamp is required}"
+  local pf_pages
+
+  pf_pages=$(pr_facts_gh api --hostname "$pf_host" --paginate --slurp \
+    "repos/$pf_slug/issues?state=closed&since=$pf_since&per_page=100") || return $?
+  jq -c --arg since "$pf_since" '
+    [ .[][] | select(has("pull_request") | not)
+      | select(.closed_at != null and .closed_at >= $since)
+      | {number, title, closedAt: .closed_at, labels: [ .labels[]? | {name} ]} ]
+    | sort_by(.closedAt) | reverse' <<<"$pf_pages"
 }
 
 # pr_facts_run_dir <scratch-dir> <pr-number> <head-sha>
