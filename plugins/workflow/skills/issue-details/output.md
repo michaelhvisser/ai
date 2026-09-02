@@ -53,9 +53,13 @@ Rules:
   and parse it with any YAML reader.
 - **Everything after the YAML block is one fenced `text` block**, and it holds every
   untrusted string — the issue title and the judgement's prose. Inside the fence GFM
-  interprets nothing: emphasis, HTML comments, links, and `@mentions` are literal. Backticks
-  in a value are replaced (so a value cannot close the fence) and a zero-width space
-  follows every `@` (so the text is not a mention wherever it is copied). The first line
+  interprets nothing: emphasis, HTML comments, links, and `@mentions` are literal. Every
+  value rendered there — the title, the judgement's prose, and the script's own composed
+  notes (`verdict_note`, `effort_note`, the goal label and reason, the recommendation, the
+  priority note) — is treated after composition: newlines collapsed, backticks replaced
+  and `~~~` runs broken (so no value can open or close a fence), and a zero-width space
+  after every `@` (so the text is not a mention wherever it is copied). The YAML values
+  are JSON-encoded strings. The first line
   of the block, `#<n> — <title>`, names the issue the comment belongs to, so a comment
   file can never be mistaken for another issue's.
 - `canonical` and `goal` are quoted strings or a bare `null`.
@@ -128,7 +132,7 @@ with the sanitised judgement and the guards' output.
       "recommendation": null, "priority_note": null,
       "comment": {"action": "create", "marker_id": null, "body_path": "…/comment-3094.md",
                   "add_label": true},
-      "warnings": [], "current_quarter": "q3-2026"
+      "warnings": [], "current_quarter": "q3-2026", "finalize_id": "3f9c2b7a1d0e4c55"
     }
   ],
   "unevaluated": [{"number": 3095, "reason": "batch stopped: rate limit below reserve (core 812, graphql 4000)"},

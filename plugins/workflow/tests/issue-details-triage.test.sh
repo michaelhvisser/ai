@@ -159,10 +159,11 @@ mkjudge() { jq -n --arg c "$1" --arg v "$2" --arg p "$3" --arg e "$4" --argjson 
 mkstate 1 cory false Medium '[12]' ''; mkjudge idea 'likely-duplicate-of #12' High high false 1
 with_script "$run_env; id_finalize_issue 1" >/dev/null
 R="$RUN/result-1.json"
+plain() { jq -r "$1" "$R" | LC_ALL=C tr -d '\342\200\213'; }   # the rendered form carries a zero-width space after every @
 [ "$(jq -r .self_authored "$R")" = false ] || fail V4 "other author marked self"
-case "$(jq -r .recommendation "$R")" in *"@cory"*) : ;; *) fail V4 "recommendation not addressed to the author: $(jq -r .recommendation "$R")" ;; esac
-case "$(jq -r '.recommendation + .priority_note' "$R")" in *close*|*park*) fail V4 "close/park proposed on another author's issue" ;; esac
-case "$(jq -r .priority_note "$R")" in *"@cory"*"left as is"*) : ;; *) fail V4 "priority disagreement not a note to the author" ;; esac
+case "$(plain .recommendation)" in *"@cory"*) : ;; *) fail V4 "recommendation not addressed to the author: $(plain .recommendation)" ;; esac
+case "$(plain '.recommendation + .priority_note')" in *close*|*park*) fail V4 "close/park proposed on another author's issue" ;; esac
+case "$(plain .priority_note)" in *"@cory"*"left as is"*) : ;; *) fail V4 "priority disagreement not a note to the author" ;; esac
 [ "$(jq -r .needs_decision "$R")" = true ] || fail V4 "other author's duplicate must need a decision"
 grep -q 'close' "$RUN/comment-1.md" && fail V4 "the word close reached another author's comment"
 mkstate 1 me true Medium '[12]' ''; mkjudge bug 'already-fixed-by #7' High high false 1
@@ -171,7 +172,7 @@ case "$(jq -r .recommendation "$R")" in "close"*"#7"*) : ;; *) fail V4 "self-aut
 [ "$(jq -r .priority_note "$R")" = null ] && [ "$(jq -r .needs_decision "$R")" = false ] || fail V4 "own fixed issue: no author note, no decision"
 mkstate 1 '' false none '[12]' ''; mkjudge idea 'likely-duplicate-of #12' Low high false 1
 with_script "$run_env; id_finalize_issue 1" >/dev/null
-case "$(jq -r .recommendation "$R")" in *"for @:"*) fail V4 "deleted account rendered as @:" ;; *"account deleted"*) : ;; *) fail V4 "deleted account not named" ;; esac
+case "$(plain .recommendation)" in *"for @:"*) fail V4 "deleted account rendered as @:" ;; *"account deleted"*) : ;; *) fail V4 "deleted account not named" ;; esac
 mkstate 1 me true none '[]' ''; mkjudge question needed none medium false 1; with_script "$run_env; id_finalize_issue 1" >/dev/null
 [ "$(jq -r .needs_decision "$R")" = true ] || fail V4 "a question is a decision"
 mkstate 1 me true none '[]' ''; mkjudge bug needed High high false 1; with_script "$run_env; id_finalize_issue 1" >/dev/null
@@ -358,7 +359,7 @@ e2e() {  # <label> <collect args...>
   jq -e '.schema == 1 and (.generated_at|type=="string") and .host == "github.com" and .repo == "o/r" and .base == "dev" and (.dev_sha|length == 40) and .me == "me"
          and (.goal_registry | .labels == ["goal:q3-2026"] and .issues == 0)
          and (.issues | length == 2) and (.unevaluated == []) and (.warnings|type=="array" and all(.[]; type=="string")) and (.files.run_dir|type=="string")
-         and all(.issues[]; (keys | sort) == (["author","board","canonical","classification","comment","created_at","current_quarter","decision_reason","dedupe","dev_sha","effort","effort_note","effort_stance","evaluated_at","evidence","existing_effort","goal","labels","needs_decision","noise_signal","number","priority","priority_note","recommendation","self_authored","state","title","url","verdict","verdict_note","warnings"] | sort)
+         and all(.issues[]; (keys | sort) == (["author","board","canonical","classification","comment","created_at","current_quarter","decision_reason","dedupe","dev_sha","effort","effort_note","effort_stance","evaluated_at","evidence","existing_effort","finalize_id","goal","labels","needs_decision","noise_signal","number","priority","priority_note","recommendation","self_authored","state","title","url","verdict","verdict_note","warnings"] | sort)
              and (.number|type=="number") and (.title|type=="string") and (.url|type=="string") and (.state|type=="string")
              and (.author|type=="string") and (.self_authored|type=="boolean") and (.created_at|type=="string") and (.labels|type=="array" and all(.[]; type=="string"))
              and (.board | (keys|sort) == ["priority","status"] and (.status|type=="string") and (.priority|type=="string"))
@@ -374,7 +375,7 @@ e2e() {  # <label> <collect args...>
                   and (.fixed_by_unknown|type=="array" and all(.[]; type=="number")) and (.in_flight|type=="array" and all(.[]; type=="number")) and (.shipped_truncated|type=="boolean"))
              and (.evidence|type=="object" and all(.[]; type=="string")) and (.recommendation == null or (.recommendation|type=="string")) and (.priority_note == null or (.priority_note|type=="string"))
              and (.comment | (keys|sort) == ["action","add_label","body_path","marker_id"] and (.action | IN("create","edit","refuse")) and (.marker_id == null or (.marker_id|type=="number")) and (.body_path|type=="string") and (.add_label|type=="boolean"))
-             and (.warnings|type=="array" and all(.[]; type=="string")) and (.dev_sha|length == 40) and (.evaluated_at|type=="string") and (.current_quarter|test("^q[1-4]-[0-9]{4}$")))
+             and (.warnings|type=="array" and all(.[]; type=="string")) and (.dev_sha|length == 40) and (.evaluated_at|type=="string") and (.current_quarter|test("^q[1-4]-[0-9]{4}$")) and (.finalize_id|test("^[0-9a-f]{16}$")))
          and (.issues[] | select(.number == 11) | .self_authored == true and .board.status == "none" and .dedupe.skipped == false and .comment.action == "create")
          and (.issues[] | select(.number == 12) | .self_authored == false and .dedupe.skipped == true and .comment.action == "edit" and .comment.marker_id == 400 and .comment.add_label == true)' \
     "$d/facts.json" >/dev/null || fail "V12/$label" "facts.json does not match schema 1: $(jq -c '.issues[0] | keys' "$d/facts.json")"
@@ -448,7 +449,7 @@ grep -qF "decision: see [proof](https://example.invalid/#4242 (unverified)) and 
 rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
 judge "$d" stale; jfin "first"
 [ -f "$d/result-12.json" ] && [ -f "$d/comment-12.md" ] || fail V13 "first finalize must produce 12's result"
-sleep 1; jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:"park this", evidence:{}}' > "$d/judgement-12.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:"park this", evidence:{}}' > "$d/judgement-12.json"
 jfin "second"
 [ ! -f "$d/result-12.json" ] && [ ! -f "$d/comment-12.md" ] && [ ! -f "$d/prose-12.json" ] || fail V13 "a rejected re-finalize must remove 12's stale artifacts"
 [ -f "$d/result-11.json" ] || fail V13 "11 must still finalize on the second pass"
@@ -456,6 +457,11 @@ jq -e '(.issues | map(.number)) == [11] and (.unevaluated | map(.number)) == [12
 [ "$(grep -c '=== #12 ===' "$d/report.txt")" = 1 ] && grep -q '=== #12 === unevaluated: social rule' "$d/report.txt" || fail V13 "report must show 12 once, as unevaluated: $(grep '#12' "$d/report.txt")"
 : > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V13 "post after re-finalize"
 [ "$(grep -c 'issues/12\|comments/400' "$STUB_LOG")" = 0 ] && grep -q '^#11 posted$' "$d.post.out" || fail V13 "post must write 11 and make zero calls for 12: $(cat "$STUB_LOG")"
+# a result from another finalize generation is refused by post even when nothing else differs
+cp "$d/result-11.json" "$d/result-11.keep"; jq '.finalize_id = "0000000000000000"' "$d/result-11.keep" > "$d/result-11.json"
+: > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post2.out" 2>&1 || fail V13 "post with a foreign generation"
+grep -q '^#11 skipped — result is not from the current finalize' "$d.post2.out" && [ ! -s "$STUB_LOG" ] || fail V13 "a result from another finalize generation must not post: $(cat "$d.post2.out")"
+mv "$d/result-11.keep" "$d/result-11.json"
 # and the reverse: a rejected first pass then a good second pass evaluates the issue (the finalize ledger restarts)
 jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
 jfin "third"
@@ -473,7 +479,40 @@ jfin "missing"
 grep -q '=== #11 === unevaluated: no judgement-11.json' "$d/report.txt" && jq -e '.unevaluated | map(.number) == [11]' "$d/facts.json" >/dev/null || fail V13 "a missing judgement must be unevaluated everywhere"
 : > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V13 "post"
 [ "$(grep -c 'issues/11' "$STUB_LOG")" = 0 ] || fail V13 "an unjudged issue must never be written"
-[ "$FAILS" = 0 ] && pass V13 "judgement boundary: malformed/missing → unevaluated; prose inert in a text block; normalised verb check catches Markdown/Unicode bypasses; re-finalize leaves nothing stale"
+# composed values (verdict_note, effort_note) are sanitised after composition: a multiline verdict carrying a fence line and a mention stays inert
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+jq -n '{classification:"bug", verdict:"bad\n```\n@victim", priority:"High", proposed_effort:"huge\n~~~\n@victim2", evidence:{}}' > "$d/judgement-11.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "multiline notes"
+[ "$(grep -c '^```' "$d/comment-11.md")" = 4 ] && ! grep -qE '^ *(```|~~~)' <(awk '/^```text$/{f=1; next} /^```$/{if(f){f=0}} f' "$d/comment-11.md") || fail V13 "a multiline verdict/effort note must not open or close a fence: $(cat "$d/comment-11.md")"
+! grep -qE '@victim' "$d/comment-11.md" || fail V13 "a live mention leaked through a composed note"
+grep -q "@${ZW}victim" "$d/comment-11.md" && grep -q "@${ZW}victim2" "$d/comment-11.md" || fail V13 "composed notes must carry the sanitised text: $(grep -n victim "$d/comment-11.md")"
+[ "$(jq -r .verdict "$d/result-11.json")" = unclear ] && [ "$(jq -r .effort "$d/result-11.json")" = xhigh ] || fail V13 "the invalid verdict/effort must still be guarded"
+# the boundary-aware verb check: refusals on another author's issue …
+for BAD in 'cl0ose this' 'pa4rk this' 'w0ntfix' 'resolve as not planned' "won't be worked" 'should be closed' 'parking this'; do
+  rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+  jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:{}}' > "$d/judgement-11.json"
+  jq -n --arg b "$BAD" '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:$b, evidence:{}}' > "$d/judgement-12.json"
+  jfin "refuse $BAD"
+  [ ! -f "$d/result-12.json" ] && grep -q "social rule: prose proposes close" "$d/report.txt" || fail V13 "must refuse: $BAD"
+done
+# … and non-refusals: ordinary words that contain the verbs are not proposals
+for OK in 'disclose' 'enclosed' 'parking lot' 'sparkline' 'docs/closed-loop/state.go'; do
+  rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+  jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:{}}' > "$d/judgement-11.json"
+  jq -n --arg b "$OK" '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:$b, evidence:{}}' > "$d/judgement-12.json"
+  jfin "allow $OK"
+  [ -f "$d/result-12.json" ] && ! grep -q "social rule" "$d/report.txt" || fail V13 "must not refuse: $OK"
+done
+# a judgement that is not an object at all: unevaluated with a reason, no crash
+for J in '[]' '"free text"'; do
+  rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+  printf '%s' "$J" > "$d/judgement-11.json"
+  jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+  jfin "non-object $J"
+  [ ! -f "$d/result-11.json" ] && grep -q '=== #11 === unevaluated: judgement-11.json malformed' "$d/report.txt" && jq -e '.unevaluated | map(.number) == [11]' "$d/facts.json" >/dev/null || fail V13 "a non-object judgement ($J) must be unevaluated with a reason"
+done
+[ "$FAILS" = 0 ] && pass V13 "judgement boundary: malformed/missing/non-object → unevaluated; every rendered value inert in the text block; boundary-aware verb check; finalize generation id; re-finalize leaves nothing stale"
 
 if [ "$FAILS" -gt 0 ]; then echo "issue-details-triage: $FAILS failure(s)"; exit 1; fi
 echo "issue-details-triage: OK"

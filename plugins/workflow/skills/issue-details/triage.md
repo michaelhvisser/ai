@@ -169,10 +169,13 @@ about which field it came from.
 
 Two mechanisms make that hold against Markdown and Unicode, not just plain text. The
 verb check runs on a **normalised** form of the raw judgement (`id_normalise`): NFKC-folded
-when `python3` is present, lower-cased, HTML comments removed, everything outside
-`[a-z0-9#]` dropped — so `cl**ose**`, `pa<!-- -->rk`, `won’t fix`, and `w o n t fix` all
-read as the verb they are; the byte-level fallback drops non-ASCII instead of folding it,
-which still defeats punctuation tricks. And the rendered prose is **never interpreted as
+when `python3` is present, lower-cased, HTML comments removed, every non-alphanumeric run
+collapsed to one space — matched with `ID_CLOSE_RE`, a boundary-aware pattern that
+tolerates digits and spaces inside a verb (`cl0ose`, `pa4rk`, `w0ntfix`, `c l o s e`)
+and covers close/closing/closed, park + object, won't fix / won't be worked, not
+planned, should be closed — while `disclose`, `enclosed`, `parking lot`, `sparkline`, and
+`closed-loop` in a path are not proposals. The byte-level fallback drops non-ASCII
+instead of folding it, which still defeats punctuation tricks. And the rendered prose is **never interpreted as
 Markdown**: every untrusted string sits inside one fenced `text` block (`output.md` §1),
 where emphasis, comments, links, and mentions are literal, with backticks replaced and a
 zero-width space after every `@`. A `[proof](url/#4242)` therefore shows its
