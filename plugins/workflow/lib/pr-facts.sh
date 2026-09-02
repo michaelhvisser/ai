@@ -741,9 +741,12 @@ pr_facts_shipped_local() {
         PF_BODY=$(git show -s --format=%b "$PF_SHA")
         PF_NUM=$(printf '%s\n' "$PF_SUBJECT" | sed -nE 's/.*\(#([0-9]+)\)$/\1/p')
         [ -n "$PF_NUM" ] || PF_NUM=$(printf '%s\n' "$PF_SUBJECT" | sed -nE 's/^Merge pull request #([0-9]+).*/\1/p')
+        # grep exits 1 on a body with no closing keyword; under a caller's
+        # `set -e -o pipefail` that would kill the loop, so the empty case is
+        # explicit.
         PF_ISSUES=$(printf '%s\n' "$PF_BODY" \
           | grep -oiE '(^|[^A-Za-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
-          | grep -oE '[0-9]+$' | sort -un | jq -cs '.')
+          | grep -oE '[0-9]+$' | sort -un | jq -cs '.') || PF_ISSUES="[]"
         case "$(git show -s --format=%P "$PF_SHA")" in
           *' '*) PF_FILES=$(git diff --name-only "${PF_SHA}^1" "$PF_SHA") ;;
           *)     PF_FILES=$(git diff-tree --no-commit-id --name-only -r --root "$PF_SHA") ;;
