@@ -15,7 +15,10 @@ Two rules hold throughout, by construction:
   the reserves), persisted to `run.json` so later subcommands reload them.
 - **Every GitHub read goes through `id_gh <file> …`** — `pr_facts_gh` (the lib's retry
   wrapper) writing to a file, never on the left of a pipe, never inside `$( )` (both fork a
-  subshell, where `STOP_BATCH` would die). A terminal rate-limit 403 sets `STOP_BATCH`;
+  subshell, where `STOP_BATCH` would die). The exceptions are named: the two identity
+  probes in `id_preflight` (`gh repo view`, `gh auth status` — the exit code is the fact),
+  and the writes and their confirming GETs in `id_dispatch`, which are bare `gh` on purpose
+  (`execute.md` §4). A terminal rate-limit 403 sets `STOP_BATCH`;
   any failure sets `ISSUE_FAILED` / `ISSUE_ERROR`. GraphQL responses additionally pass
   `id_graphql_ok` — `pr_facts_graphql_ok` plus a `data != null` check — so an `errors[]`
   body is a fetch failure (and a `RATE_LIMITED` type a batch stop), never an empty fact.
@@ -25,9 +28,10 @@ Two rules hold throughout, by construction:
 ## §0 Preflight — `id_preflight`
 
 **Identity first.** `gh repo view --json nameWithOwner` and `--json url` (positional
-repository — `gh repo view` has no `-R`). An issue URL argument sets `URL_HOST`/`URL_SLUG`;
-a mismatch with the checkout's repository is exit 4 — never report on repo A while sitting
-in repo B. Then `gh auth status --hostname "$HOST"` (exit 3), and `ME` from `gh api user`
+repository — `gh repo view` has no `-R`). A host other than `github.com` is exit 3 with the
+supported-context wording — GitHub Enterprise is refused at the boundary, not supported by
+accident. An issue URL argument sets `URL_HOST`/`URL_SLUG`; a mismatch with the checkout's
+repository is exit 4 — never report on repo A while sitting in repo B. Then `gh auth status --hostname "$HOST"` (exit 3), and `ME` from `gh api user`
 — the login the marker lookup and the social rule compare against.
 
 **Reserves**, from the checkout's `detent.yaml` when present

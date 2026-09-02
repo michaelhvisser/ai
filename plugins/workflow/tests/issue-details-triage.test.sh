@@ -12,10 +12,16 @@
 #   V8  rate gates             below reserve / malformed / unreadable stop the batch; search sleeps
 #   V9  merged-PR sweep        window from earliest filing; truncation from pagination; GraphQL errors are failures
 #   V11 noise skips search     zero search calls on noise or --no-dup-search; exactly two otherwise
-#   V12 end to end             collect → judge → finalize → post for two issues, explicit and --since;
-#                              exact gh call sequence; each comment carries its own title; a gate
-#                              failure on the second issue leaves the first written and the second
-#                              unevaluated with no call after the failed gate
+#   V12 end to end         collect → judge → finalize → post for two issues, explicit and --since;
+#                              exact gh call sequence; each comment carries its own title; facts.json
+#                              matches schema 1 (jq -e); a PATCH failure and a label failure each get
+#                              one attempt and one confirming GET; a gate failure on the second issue
+#                              leaves the first written and the second unevaluated with no call after
+#                              the failed gate
+#   V13 judgement boundary prose is validated and sanitised: non-object evidence → unevaluated;
+#                              newlines collapsed, @mentions backticked, unfetched #N marked; a close
+#                              verb on another author's issue → unevaluated; missing judgement →
+#                              unevaluated in report and facts.json
 set -euo pipefail
 PLUGIN_DIR=$(cd "$(dirname "$0")/.." && pwd)
 SCRIPT="$PLUGIN_DIR/scripts/issue-details.sh"
@@ -37,7 +43,7 @@ gh() {
   local n
   case "$*" in
     "repo view --json nameWithOwner"*) printf 'o/r' ;;
-    "repo view --json url"*) printf 'github.com' ;;
+    "repo view --json url"*) printf '%s' "${STUB_HOST:-github.com}" ;;
     "repo view --json defaultBranchRef"*) printf 'main' ;;
     "auth status"*) : ;;
     *" user --jq .login") printf 'me' ;;
@@ -59,14 +65,18 @@ gh() {
     *"graphql"*"projectItems"*)
       n=$(printf '%s' "$*" | tr '\n' ' ' | sed -E 's/.* -F num=([0-9]+).*/\1/'); [ -f "$STUB_DIR/board-$n.json" ] && cat "$STUB_DIR/board-$n.json" || printf '{"data":{"repository":{"issue":{"projectItems":{"nodes":[]}}}}}' ;;
     *"-X POST"*) if [ "${STUB_POST_FAIL:-0}" = 1 ]; then echo "EOF" >&2; return 1; fi; printf '{}' ;;
-    *"-X PATCH"*) printf '{}' ;;
-    *"issue edit "*"--add-label"*) : ;;
+    *"-X PATCH"*) if [ "${STUB_PATCH_FAIL:-0}" = 1 ]; then echo "HTTP 502" >&2; return 1; fi; printf '{}' ;;
+    "api --hostname github.com repos/o/r/issues/comments/"*)
+      n=$(printf '%s' "$*" | sed -E 's#.*/comments/([0-9]+).*#\1#'); [ -f "$STUB_DIR/comment-after-$n.json" ] && cat "$STUB_DIR/comment-after-$n.json" || printf '{"body":"something else"}' ;;
+    *"issue edit "*"--add-label"*) if [ "${STUB_LABEL_FAIL:-0}" = 1 ]; then echo "HTTP 502" >&2; return 1; fi ;;
+    "api --hostname github.com repos/o/r/issues/"*"/labels")
+      n=$(printf '%s' "$*" | sed -E 's#.*/issues/([0-9]+)/labels.*#\1#'); [ -f "$STUB_DIR/labels-after-$n.json" ] && cat "$STUB_DIR/labels-after-$n.json" || printf '[]' ;;
     *"/comments?"*)
       n=$(printf '%s' "$*" | sed -E 's#.*/issues/([0-9]+)/comments.*#\1#')
       if grep -q 'X POST' "$STUB_LOG" && [ -f "$STUB_DIR/comments-after-$n.json" ]; then cat "$STUB_DIR/comments-after-$n.json"
       elif [ -f "$STUB_DIR/comments-$n.json" ]; then cat "$STUB_DIR/comments-$n.json"; else printf '[[]]'; fi ;;
     "search issues"*) printf '[]' ;;
-    "pr list -R o/r --state open --limit 10 --search"*) printf '[]' ;;
+    "pr list -R o/r --state open --limit 10 --search"*) printf '[{"number":90,"title":"x","url":"u","isDraft":false,"closingIssuesReferences":[]}]' ;;   # a fetched candidate, so #90 in prose stays unmarked
     *) echo "stub: unexpected gh $*" >&2; return 1 ;;
   esac
 }
@@ -229,8 +239,20 @@ LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL
 printf '%s' "$C_NONE" > "$STUB_DIR/comments-after-1.json"
 LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_POST_FAIL=1"); [ "$(grep -c 'X POST' <<<"$LOG")" = 1 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'not retried' "$RUN/dispatch.out" || fail V6 "failed POST: never retried, no label: $LOG"
 rm -f "$STUB_DIR/comments-after-1.json"
+# PATCH failure: one attempt, one confirming GET; confirmed when the body landed, else not retried
+printf '{"body":"draft"}' > "$STUB_DIR/comment-after-400.json"
+LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && grep -q 'edited #400 (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous PATCH that landed: one attempt, confirmed: $LOG / $(cat "$RUN/dispatch.out")"
+printf '{"body":"old"}' > "$STUB_DIR/comment-after-400.json"
+LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":true,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'edit failed — not retried' "$RUN/dispatch.out" || fail V6 "failed PATCH: one attempt, no label, not retried: $LOG"
+rm -f "$STUB_DIR/comment-after-400.json"
+# label failure: one attempt, one confirming GET
+printf '[{"name":"triage:needs-decision"}]' > "$STUB_DIR/labels-after-1.json"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && grep -q 'label added (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous label that landed: one attempt, confirmed: $LOG"
+printf '[]' > "$STUB_DIR/labels-after-1.json"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && grep -q 'label add failed — not retried' "$RUN/dispatch.out" || fail V6 "failed label: one attempt, not retried: $LOG"
+rm -f "$STUB_DIR/labels-after-1.json"
 LOG=$(dispatch "$(jq -c '.write_ok=1 | .comment_action="refuse"' <<<"$SNAP_TWO")" '{"needs_decision":true,"state":"OPEN"}'); [ -z "$LOG" ] || fail V6 "refuse must issue no gh call"
-[ "$FAILS" = 0 ] && pass V6 "refresh fails closed on every drift incl. edited non-marker comments; bare POST never retried; label only on decision"
+[ "$FAILS" = 0 ] && pass V6 "refresh fails closed on every drift; POST, PATCH, and label are one attempt each with one confirming GET; label only on decision"
 
 # ---------- V7: arguments and selection ----------
 args_rc() { with_script "RC=0; ( id_main collect --run-dir '$RUN/args' $1 ) >/dev/null 2>&1 || RC=\$?; echo \$RC" 2>/dev/null | tail -1; }
@@ -238,6 +260,8 @@ for BAD in '--since 1oopsd' '--since 0d' '--since 7' '--since' 'abc' '' '3094 --
   [ "$(args_rc "$BAD")" = 2 ] || fail V7 "'$BAD' should exit 2, got $(args_rc "$BAD")"
 done
 reset_stub; mkissue 5 five me '[]' body
+RC=0; with_script "STUB_HOST=ghe.example.com; id_main collect --run-dir '$RUN/ghe' 5" > "$RUN/ghe.out" 2>&1 || RC=$?
+[ "$RC" = 3 ] && grep -q 'outside the supported context' "$RUN/ghe.out" || fail V7 "a GitHub Enterprise host must be refused with exit 3: rc=$RC $(cat "$RUN/ghe.out")"
 with_script "id_main collect --run-dir '$RUN/url' https://github.com/o/r/issues/5" >/dev/null 2>&1 || fail V7 "a lone issue URL should run"
 [ "$(cat "$RUN/url/selected.txt")" = 5 ] || fail V7 "URL did not materialise selected.txt"
 with_script "id_main collect --run-dir '$RUN/nums' 5 5" >/dev/null 2>&1 || fail V7 "explicit numbers should run"
@@ -247,7 +271,7 @@ jq -nc --arg d "$TODAY" '[range(60) | {number: (1000 + .), createdAt: ($d + "T00
 with_script "$run_env; SINCE_ARG=30d; id_select" >/dev/null 2>&1
 [ "$(wc -l < "$RUN/selected.txt" | tr -d ' ')" = 50 ] && [ "$(head -1 "$RUN/selected.txt")" = 1000 ] || fail V7 "since cap must keep the oldest 50: $(wc -l < "$RUN/selected.txt") from $(head -1 "$RUN/selected.txt")"
 grep -q 'evaluating the oldest 50' "$RUN/warnings.txt" || fail V7 "cap warning not recorded"
-[ "$FAILS" = 0 ] && pass V7 "arguments strict; URL and explicit numbers materialise selected.txt; oldest-50 cap with warning"
+[ "$FAILS" = 0 ] && pass V7 "arguments strict; GHE refused; URL and explicit numbers materialise selected.txt; oldest-50 cap with warning"
 
 # ---------- V8: rate gates ----------
 gate() { with_script "$run_env; ${1:-:}; STOP_BATCH=0; RC=0; id_gate t || RC=\$?; echo \"rc=\$RC stop=\$STOP_BATCH reason=\$STOP_REASON\""; }
@@ -329,16 +353,31 @@ e2e() {  # <label> <collect args...>
   grep -q 'engagement: nightly' "$d/comment-12.md" && fail "V12/$label" "issue 11's title leaked into 12's comment"
   [ "$(jq -r .needs_decision "$d/result-11.json")" = false ] && [ "$(jq -r .needs_decision "$d/result-12.json")" = true ] || fail "V12/$label" "needs_decision: 11 false, 12 true"
   [ "$(jq -r .classification "$d/result-12.json")" = noise ] && [ "$(jq -r .verdict "$d/result-12.json")" = unclear ] || fail "V12/$label" "noise must override the judgement"
-  [ "$(jq -r .comment_action "$d/result-11.json")" = create ] && [ "$(jq -r .comment_action "$d/result-12.json")" = edit ] || fail "V12/$label" "11 create, 12 edit"
+  [ "$(jq -r .comment.action "$d/result-11.json")" = create ] && [ "$(jq -r .comment.action "$d/result-12.json")" = edit ] || fail "V12/$label" "11 create, 12 edit"
   grep -q '^  goal      none' "$d/report.txt" && grep -q 'registry: 1 goal label(s), 0 issue(s)' "$d/report.txt" || fail "V12/$label" "report: $(cat "$d/report.txt")"
-  [ "$(jq '.issues | length' "$d/facts.json")" = 2 ] && [ "$(jq '.unevaluated | length' "$d/facts.json")" = 0 ] || fail "V12/$label" "facts.json shape"
+  jq -e '.schema == 1 and (.generated_at|type=="string") and .host == "github.com" and .repo == "o/r" and .base == "dev" and (.dev_sha|length == 40) and .me == "me"
+         and (.goal_registry | .labels == ["goal:q3-2026"] and .issues == 0)
+         and (.issues | length == 2) and (.unevaluated == []) and (.warnings|type=="array") and (.files.run_dir|type=="string")
+         and all(.issues[]; (.number|type=="number") and (.title|type=="string") and (.url|type=="string") and (.state|type=="string")
+             and (.author|type=="string") and (.self_authored|type=="boolean") and (.created_at|type=="string") and (.labels|type=="array")
+             and (.board | (.status|type=="string") and (.priority|type=="string"))
+             and (.existing_effort|type=="string") and (.classification|type=="string") and (.verdict|type=="string")
+             and (.canonical == null or (.canonical|type=="string"))
+             and (.goal | (.source|type=="string") and (.reason|type=="string"))
+             and (.priority|type=="string") and (.effort|type=="string") and (.effort_stance|type=="string") and (.needs_decision|type=="boolean")
+             and (.dedupe | (.terms|type=="string") and (.skipped|type=="boolean") and (.open_issues|type=="array") and (.open_prs|type=="array")
+                  and (.fixed_by|type=="array") and (.fixed_by_unknown|type=="array") and (.in_flight|type=="array") and (.shipped_truncated|type=="boolean"))
+             and (.evidence|type=="object") and (.comment | (.action|type=="string") and (.body_path|type=="string") and (.add_label|type=="boolean"))
+             and (.warnings|type=="array") and (.dev_sha|length == 40) and (.evaluated_at|type=="string"))
+         and (.issues[] | select(.number == 11) | .self_authored == true and .board.status == "none" and .dedupe.skipped == false and .comment.action == "create")
+         and (.issues[] | select(.number == 12) | .self_authored == false and .dedupe.skipped == true and .comment.action == "edit" and .comment.marker_id == 400 and .comment.add_label == true)' \
+    "$d/facts.json" >/dev/null || fail "V12/$label" "facts.json does not match schema 1: $(jq -c '.issues[0] | keys' "$d/facts.json")"
   # zero searches for the noise issue, two for the other
   [ "$(grep -c 'search issues' "$STUB_LOG")" = 1 ] && [ "$(grep -c -- '--search' "$STUB_LOG")" = 1 ] || fail "V12/$label" "noise must not be searched: $(grep -c 'search' "$STUB_LOG") search calls"
-  grep -q 'issues/12/comments\|search issues.*12' "$STUB_LOG" && grep -q '^issue view 12' "$STUB_LOG" || true
   # the gate answered "post"
   : > "$STUB_LOG"
   with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail "V12/$label" "post failed: $(tail -3 "$d.post.out")"
-  local writes; writes=$(grep -E 'X POST|X PATCH|add-label' "$STUB_LOG" | sed -E 's/ -F body=@.*//; s/ --hostname github.com//')
+  local writes; writes=$(grep -E 'X POST|X PATCH|add-label' "$STUB_LOG" | sed -E 's/ -F body=@.*//; s/ --hostname github.com//' || true)
   [ "$writes" = "$(printf 'api -X POST repos/o/r/issues/11/comments\napi -X PATCH repos/o/r/issues/comments/400\nissue edit 12 -R o/r --add-label triage:needs-decision')" ] \
     || fail "V12/$label" "write sequence: $(printf '%s' "$writes" | tr '\n' ';')"
   grep -q '^#11 posted$' "$d.post.out" && grep -q '^#12 edited #400, label added$' "$d.post.out" || fail "V12/$label" "post output: $(cat "$d.post.out")"
@@ -353,11 +392,43 @@ with_script "STUB_RATE_FAIL_AT=6; id_main collect --run-dir '$d' 11 12" > "$d.co
 [ "$(jq -r .evaluated "$d/state-11.json")" = true ] || fail V12/gate "11 must be fully evaluated"
 judge_one() { jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", decision_required:false, evidence:{}}' > "$1/judgement-11.json"; }
 judge_one "$d"; with_script "id_main finalize --run-dir '$d'" >/dev/null 2>&1 || fail V12/gate "finalize"
-[ "$(jq '.unevaluated | length' "$d/facts.json")" = 1 ] && [ "$(jq -r '.unevaluated[0].number' "$d/facts.json")" = 12 ] || fail V12/gate "facts.json must list 12 as unevaluated"
+jq -e '(.issues | length) == 1 and (.unevaluated | length) == 1 and .unevaluated[0].number == 12 and (.unevaluated[0].reason | startswith("batch stopped"))' "$d/facts.json" >/dev/null || fail V12/gate "facts.json must list 12 as unevaluated with its reason: $(jq -c .unevaluated "$d/facts.json")"
 grep -q '=== #12 === unevaluated: batch stopped' "$d/report.txt" || fail V12/gate "report must say 12 was unevaluated: $(grep '#12' "$d/report.txt")"
 : > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V12/gate "post"
 grep -q '^#11 posted$' "$d.post.out" && [ "$(grep -c 'issues/12' "$STUB_LOG")" = 0 ] || fail V12/gate "only 11 may be written: $(cat "$d.post.out")"
 [ "$FAILS" = 0 ] && pass V12 "end to end: explicit and --since; exact write sequence; own titles; gate stop leaves 11 written, 12 unevaluated"
+
+# ---------- V13: the judgement boundary ----------
+d="$RUN/e2e-prose"; rm -rf "$d"; e2e_fixtures
+with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1 || fail V13 "collect"
+jfin() { with_script "id_main finalize --run-dir '$d'" >/dev/null 2>&1 || fail V13 "finalize died: $1"; }
+jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:"free text"}' > "$d/judgement-11.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "non-object evidence"
+[ ! -f "$d/result-11.json" ] && grep -q '=== #11 === unevaluated: judgement-11.json malformed' "$d/report.txt" || fail V13 "non-object evidence must land in unevaluated: $(grep '#11' "$d/report.txt")"
+jq -e '.unevaluated | map(.number) == [11]' "$d/facts.json" >/dev/null || fail V13 "facts.json must list the malformed judgement: $(jq -c .unevaluated "$d/facts.json")"
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", decision_required:true,
+        decision_reason:"line one\nline two — ask @cory and see #4242", evidence:{classification:"expected-by: docs\r\nsee @michaelhvisser", priority:"bug, no workaround"}}' > "$d/judgement-11.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "sanitise"
+grep -q 'line one line two — ask `@cory` and see #4242 (unverified)' "$d/comment-11.md" || fail V13 "decision_reason not sanitised: $(grep -- '- decision' "$d/comment-11.md")"
+grep -q 'expected-by: docs see `@michaelhvisser`' "$d/comment-11.md" || fail V13 "evidence not sanitised: $(grep -- '- classification' "$d/comment-11.md")"
+! grep -qE '(^|[^`])@(cory|michaelhvisser)' "$d/comment-11.md" || fail V13 "a bare @mention reached the comment"
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+jq -n '{classification:"bug", verdict:"needed", priority:"High", proposed_effort:"xhigh", evidence:{classification:"we should close this once #90 lands"}}' > "$d/judgement-11.json"
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", decision_reason:"park this", evidence:{}}' > "$d/judgement-12.json"
+jfin "close verb"
+[ -f "$d/result-11.json" ] && grep -q 'once #90 lands' "$d/comment-11.md" && [ "$(jq -c .dedupe.open_prs "$d/result-11.json")" = '[{"number":90,"title":"x"}]' ] || fail V13 "a close verb on your own issue is allowed, and a fetched #90 stays unmarked: $(grep -- '- classification' "$d/comment-11.md")"
+[ ! -f "$d/result-12.json" ] && grep -q "social rule: prose proposes close on another author's issue" "$d/report.txt" || fail V13 "close/park prose on another author's issue must be refused: $(grep '#12' "$d/report.txt")"
+jq -e '.unevaluated[0].number == 12 and (.unevaluated[0].reason | startswith("social rule"))' "$d/facts.json" >/dev/null || fail V13 "facts.json must carry the social-rule refusal"
+rm -rf "$d"; e2e_fixtures; with_script "id_main collect --run-dir '$d' 11 12" >/dev/null 2>&1
+jq -n '{classification:"idea", verdict:"needed", priority:"Low", proposed_effort:"medium", evidence:{}}' > "$d/judgement-12.json"
+jfin "missing"
+grep -q '=== #11 === unevaluated: no judgement-11.json' "$d/report.txt" && jq -e '.unevaluated | map(.number) == [11]' "$d/facts.json" >/dev/null || fail V13 "a missing judgement must be unevaluated everywhere"
+: > "$STUB_LOG"; with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail V13 "post"
+[ "$(grep -c 'issues/11' "$STUB_LOG")" = 0 ] || fail V13 "an unjudged issue must never be written"
+[ "$FAILS" = 0 ] && pass V13 "judgement boundary: malformed/missing → unevaluated; prose single-line, @mentions backticked, unfetched #N marked; close verb refused on another author's issue"
 
 if [ "$FAILS" -gt 0 ]; then echo "issue-details-triage: $FAILS failure(s)"; exit 1; fi
 echo "issue-details-triage: OK"

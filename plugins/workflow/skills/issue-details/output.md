@@ -86,8 +86,8 @@ ASCII-safe.
 
 `finalize` writes this object to `$RUN_DIR/facts.json` on every run; with `--json` the
 skill prints that file to stdout and nothing else. `issues[]` entries are the
-`result-<n>.json` files — the state (`facts.md` §1) merged with the judgement and the
-guards' output.
+`result-<n>.json` files, in exactly this nested shape — the state (`facts.md` §1) merged
+with the sanitised judgement and the guards' output.
 
 ```json
 {
@@ -105,22 +105,25 @@ guards' output.
       "author": "michaelhvisser", "self_authored": true,
       "created_at": "2026-09-02T00:13:07Z", "labels": [],
       "board": {"status": "Todo", "priority": "none"},
-      "existing_effort": null,
+      "existing_effort": "",
+      "noise_signal": "",
       "classification": "bug",
-      "verdict": "needed", "canonical": null,
+      "verdict": "needed", "canonical": null, "verdict_note": "",
       "goal": {"label": null, "source": "none", "via": null, "reason": "goal registry empty"},
-      "priority": "High", "effort": "xhigh", "effort_stance": "propose",
+      "priority": "High", "effort": "xhigh", "effort_stance": "propose", "effort_note": "",
       "needs_decision": true, "decision_reason": "…",
-      "dedupe": {"terms": "engagement history lookback", "open_issues": [], "open_prs": [],
-                 "fixed_by": [], "in_flight": [], "shipped_truncated": false},
+      "dedupe": {"terms": "engagement history lookback", "skipped": false,
+                 "open_issues": [{"number": 3043, "title": "…"}], "open_prs": [],
+                 "fixed_by": [], "fixed_by_unknown": [], "in_flight": [], "shipped_truncated": false},
       "evidence": {"classification": "…", "goal": "…", "priority": "…", "effort": "…"},
       "recommendation": null, "priority_note": null,
       "comment": {"action": "create", "marker_id": null, "body_path": "…/comment-3094.md",
                   "add_label": true},
-      "warnings": []
+      "warnings": [], "current_quarter": "q3-2026"
     }
   ],
-  "unevaluated": [{"number": 3095, "reason": "batch stopped: rate limit below reserve (core 812, graphql 4000)"}],
+  "unevaluated": [{"number": 3095, "reason": "batch stopped: rate limit below reserve (core 812, graphql 4000)"},
+                  {"number": 3096, "reason": "judgement-3096.json malformed — …"}],
   "warnings": [],
   "files": {"run_dir": "…/issue-details/run/20260902T020000Z-a1b2c3"}
 }
@@ -130,8 +133,10 @@ Closed vocabularies a consumer may branch on: `classification`, `verdict`, `prio
 `effort`, `effort_stance ∈ {propose, agree, disagree}`, `goal.source ∈ {own-label,
 reference, none}`, `comment.action ∈ {create, edit, refuse, none}` (`refuse` when more
 than one owned marker comment exists — `facts.md` §1d).
-`unevaluated[]` is `[{number, reason}]` for every selected issue that did not complete
-(`facts.md` §1); an issue is either fully in `issues[]` or listed there, never half-done.
+`unevaluated[]` is `[{number, reason}]` for every selected issue that did not complete —
+a fetch or gate failure in `collect`, or a missing, malformed, or social-rule-refused
+judgement in `finalize`; an issue is either fully in `issues[]` or listed there, never
+half-done. The test asserts this shape with `jq -e` (V12).
 
 ## §4 Exit codes
 

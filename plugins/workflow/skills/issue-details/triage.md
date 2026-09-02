@@ -153,6 +153,20 @@ A `noise` issue always lands here (its verdict is `unclear`), which is deliberat
 version closes nothing, so even mechanical noise is a human's click, and the label is how
 it reaches the board view.
 
+## §8 The prose boundary
+
+The judgement's free-text fields (`evidence.*`, `decision_reason`) are the only model
+prose that reaches a public comment, so `finalize` treats them as untrusted input:
+`evidence` must be an object of strings and `decision_reason` a string or null, else the
+issue is `unevaluated` with the reason; each value is collapsed to one line; `@mentions`
+are wrapped in backticks so nobody is pinged by a triage comment; a `#N` is kept only when
+N is in the fetched candidate set (`candidates_open`, `candidates_shipped`,
+`fixed_by_unknown`, `in_flight`, `goal_refs` — the same rule as `canonical`), else it
+renders `#N (unverified)`; and on another author's issue any close / park / wontfix verb
+in the prose refuses the whole issue (`social rule: prose proposes close on another
+author's issue`), because the social rule in §5 is about what the author reads, not
+about which field it came from.
+
 ## §7 Still-needed hook — not in this version
 
 The design's Phase-1 still-needed check (pinned `git show`/`git grep` reads at `$DEV_SHA`,

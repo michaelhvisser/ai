@@ -35,9 +35,11 @@ Three commands, and only these, each repo-qualified, each reachable **only** fro
 
 | Write | Command | When |
 |---|---|---|
-| create | `gh api --hostname "$HOST" -X POST "repos/$SLUG/issues/$n/comments" -F body=@comment-<n>.md` — **bare `gh`, no retry** | `comment_action: create` |
-| edit in place | `pr_facts_gh api -X PATCH "repos/$SLUG/issues/comments/<marker_id>" -F body=@comment-<n>.md` | `comment_action: edit` |
-| label | `pr_facts_gh issue edit <n> -R "$SLUG" --add-label "triage:needs-decision"` | the comment write succeeded **and** `needs_decision: true` |
+| create | `gh api --hostname "$HOST" -X POST "repos/$SLUG/issues/$n/comments" -F body=@comment-<n>.md` | `comment_action: create` |
+| edit in place | `gh api --hostname "$HOST" -X PATCH "repos/$SLUG/issues/comments/<marker_id>" -F body=@comment-<n>.md` | `comment_action: edit` |
+| label | `gh issue edit <n> -R "$SLUG" --add-label "triage:needs-decision"` | the comment write succeeded **and** `needs_decision: true` |
+
+All three are **bare `gh`, one attempt each, never retried** (§4).
 
 `-F body=@<path>` reads the value from the file (`gh api --help`: "use @<path> … to read
 value from file"). The label is added, never removed: clearing `triage:needs-decision` is
@@ -80,14 +82,18 @@ The only place a write command appears in executable form. Reads `write_ok`,
 file. Exactly one comment write, then the label only on success and only when a decision
 is required.
 
-**The create is a bare `gh api -X POST`, never the retry wrapper.** `pr_facts_gh` retries
-5xx and connection resets, and a POST that GitHub accepted but whose response died in
-transit would be posted again — the one-comment contract broken by the safety net. On any
-failure the dispatcher instead refetches the comment list once and looks for its own
-marker: found means the POST landed and is reported as `posted (confirmed after an
-ambiguous response)` (the next run edits it); not found means the create failed and is
-**not retried** — the user re-runs. `PATCH` and `--add-label` are idempotent and keep the
-wrapper.
+**Every write is bare `gh`, never the retry wrapper.** `pr_facts_gh` retries 5xx and
+connection resets, and a write that GitHub accepted but whose response died in transit
+would be sent again — the "exactly one command" contract broken by the safety net, and
+for the POST a second comment. Each write gets **one attempt**; on an ambiguous failure
+the dispatcher issues **one confirming GET** and reports what it finds, never a second
+write:
+
+| write | confirming read | confirmed | not confirmed |
+|---|---|---|---|
+| `POST` | the comment list — an owned marker present | `posted (confirmed after an ambiguous response)`; the next run edits it | `comment create failed — not retried`; the user re-runs |
+| `PATCH` | the comment by id — its body equals the draft | `edited #<id> (confirmed …)` | `comment edit failed — not retried; re-run` |
+| `--add-label` | the issue's labels — `triage:needs-decision` present | `label added (confirmed …)` | `label add failed — not retried` |
 
 Per issue it prints `#<n> posted`, `#<n> edited #<id>`, `, label added` / `, label add
 failed` when it applied, or `#<n> skipped — <note>`. A skipped issue does not abort the

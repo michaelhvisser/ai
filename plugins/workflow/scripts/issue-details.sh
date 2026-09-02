@@ -113,6 +113,9 @@ id_preflight() {
   local f
   SLUG=$(gh repo view --json nameWithOwner --jq .nameWithOwner) || { echo "issue-details: cannot resolve the repository" >&2; exit 4; }
   HOST=$(gh repo view --json url --jq '.url | sub("^https?://";"") | split("/")[0]')
+  if [ "$HOST" != "github.com" ]; then
+    echo "issue-details: $HOST is outside the supported context — same-repository work on github.com only; GitHub Enterprise hosts are refused at the boundary rather than supported by accident (AGENTS.md §Supported context)" >&2; exit 3
+  fi
   if [ -n "${URL_SLUG:-}" ] && { [ "$URL_SLUG" != "$SLUG" ] || [ "$URL_HOST" != "$HOST" ]; }; then
     echo "issue-details: URL names ${URL_HOST}/${URL_SLUG} but the checkout is ${HOST}/${SLUG}" >&2; exit 4
   fi
@@ -403,10 +406,14 @@ id_finalize_issue() {
   local n="$1" st jd
   st=$(id_state_path "$n"); jd="$RUN_DIR/judgement-$n.json"
   [ "$(jq -r .evaluated "$st")" = true ] || return 0
-  [ -f "$jd" ] || { id_warn "#$n: no judgement-$n.json — the orchestrator has not judged this issue"; return 0; }
-  jq -e '(.classification|type=="string") and (.verdict|type=="string") and (.priority|type=="string") and (.proposed_effort|type=="string")' "$jd" >/dev/null 2>&1 \
-    || { id_warn "#$n: judgement-$n.json malformed"; return 0; }
-  local cls verdict prio peff decreq noise author me self bp
+  if [ ! -f "$jd" ]; then id_unevaluated "$n" "no judgement-$n.json — the orchestrator has not judged this issue"; return 0; fi
+  if ! jq -e '(.classification|type=="string") and (.verdict|type=="string") and (.priority|type=="string") and (.proposed_effort|type=="string")
+              and ((.evidence // {}) | type == "object" and all(.[]; type == "string"))
+              and ((.decision_reason // null) | type == "string" or type == "null")
+              and ((.decision_required // false) | type == "boolean")' "$jd" >/dev/null 2>&1; then
+    id_unevaluated "$n" "judgement-$n.json malformed — classification/verdict/priority/proposed_effort must be strings, evidence an object of strings, decision_reason a string or null"; return 0
+  fi
+  local cls verdict prio peff decreq noise author self bp
   cls=$(jq -r .classification "$jd"); verdict=$(jq -r .verdict "$jd"); prio=$(jq -r .priority "$jd"); peff=$(jq -r .proposed_effort "$jd")
   decreq=$(jq -r '.decision_required // false' "$jd")
   noise=$(jq -r '.noise_signal // ""' "$st"); author=$(jq -r '.author // ""' "$st"); self=$(jq -r '.self_authored' "$st"); bp=$(jq -r '.board_priority // "none"' "$st")
@@ -414,6 +421,19 @@ id_finalize_issue() {
   if [ "$(jq -r .dedupe_skipped "$st")" = 1 ] && [ "$verdict" != unclear ] && [ -z "$noise" ]; then verdict=unclear; fi
   case "$cls" in bug|goal|idea|question|noise) ;; *) cls=question ;; esac
   case "$prio" in Urgent|High|Medium|Low|none) ;; *) prio=none ;; esac
+  # Prose from the judgement is untrusted: one line each, @mentions neutralised in
+  # backticks, #N kept only when N is in the fetched candidate set, else marked.
+  local allowed
+  allowed=$(jq -c '[(.candidates_open // [])[], (.candidates_shipped // [])[], (.fixed_by_unknown // [])[], (.in_flight // [])[], (.goal_refs // [])[]] | unique' "$st")
+  jq -c --argjson allowed "$allowed" '
+    def clean: gsub("[\r\n]+"; " ") | gsub("[[:space:]]+"; " ") | gsub("(?<u>@[A-Za-z0-9][A-Za-z0-9-]*)"; "`\(.u)`")
+               | gsub("#(?<n>[0-9]+)"; (.n | tonumber) as $k | if ($allowed | index($k)) != null then "#\($k)" else "#\($k) (unverified)" end);
+    {evidence: ((.evidence // {}) | with_entries(.value |= clean)), decision_reason: ((.decision_reason // null) | if . == null then null else clean end)}' \
+    "$jd" > "$RUN_DIR/prose-$n.json"
+  if [ "$self" != true ] && jq -r '[.evidence[], (.decision_reason // "")] | join(" ")' "$RUN_DIR/prose-$n.json" \
+       | grep -qiE "(^|[^a-z])(close|closes|closed|closing|park|parked|parking|wontfix|won't fix|not planned)([^a-z]|$)"; then
+    id_unevaluated "$n" "social rule: prose proposes close on another author's issue"; return 0
+  fi
   local vg canon vnote eg effort stance enote
   vg=$(id_verdict_guard "$verdict" "$(jq -c '.candidates_open // []' "$st")" "$(jq -c '.candidates_shipped // []' "$st")")
   verdict="${vg%%|*}"; canon=$(printf '%s' "$vg" | cut -d'|' -f2); vnote="${vg##*|}"
@@ -430,7 +450,7 @@ id_finalize_issue() {
         l=$(awk -F'\t' -v r="$ref" '$1 == r {print $2; exit}' "$RUN_DIR/goal-registry.tsv")
         if [ -n "$l" ]; then
           if [ "$goal" = null ]; then goal="$l"; gsrc=reference; gvia="$ref"
-          elif [ "$l" != "$goal" ]; then goal=null; gsrc=none; greason="two goal epics referenced: #$gvia ($goal) and #$ref ($l)"; decreq=true; break; fi
+          elif [ "$l" != "$goal" ]; then greason="two goal epics referenced: #$gvia ($goal) and #$ref ($l)"; goal=null; gsrc=none; gvia=""; decreq=true; break; fi
         fi
       done
       [ "$gsrc" != none ] || [ -n "$greason" ] || greason="$(if [ "$(jq '.goal_refs | length' "$st")" = 0 ]; then echo "no part-of/epic reference"; else echo "referenced issues carry no goal:* label"; fi)"
@@ -454,12 +474,20 @@ id_finalize_issue() {
   local now; now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   jq -c --arg cls "$cls" --arg verdict "$verdict" --arg canon "$canon" --arg vnote "$vnote" --arg goal "$goal" --arg gsrc "$gsrc" --arg gvia "$gvia" --arg greason "$greason" \
      --arg prio "$prio" --arg effort "$effort" --arg stance "$stance" --arg enote "$enote" --arg rec "$rec" --arg pnote "$pnote" --argjson nd "$nd" \
-     --arg sha "$BASE_SHA" --arg now "$now" --arg cur "$cur" --slurpfile j "$jd" \
-     '. + {classification:$cls, verdict:$verdict, canonical:(if $canon == "null" then null else $canon end), verdict_note:$vnote,
-           goal:{label:(if $goal == "null" then null else $goal end), source:$gsrc, via:(if $gvia == "" then null else ($gvia|tonumber) end), reason:$greason},
-           priority:$prio, effort:$effort, effort_stance:$stance, effort_note:$enote, needs_decision:$nd,
-           recommendation:(if $rec == "" then null else $rec end), priority_note:(if $pnote == "" then null else $pnote end),
-           evidence:($j[0].evidence // {}), decision_reason:($j[0].decision_reason // null), dev_sha:$sha, evaluated_at:$now, current_quarter:$cur}' \
+     --arg sha "$BASE_SHA" --arg now "$now" --arg cur "$cur" --arg body "$RUN_DIR/comment-$n.md" \
+     --arg trunc "$(cat "$RUN_DIR/shipped-truncated.txt" 2>/dev/null || echo false)" --slurpfile pr "$RUN_DIR/prose-$n.json" \
+     '{number, title, url, state, author, self_authored, created_at, labels, existing_effort,
+       board: {status: (.board_status // "none"), priority: (.board_priority // "none")},
+       noise_signal, classification: $cls, verdict: $verdict, canonical: (if $canon == "null" then null else $canon end), verdict_note: $vnote,
+       goal: {label: (if $goal == "null" then null else $goal end), source: $gsrc, via: (if $gvia == "" then null else ($gvia|tonumber) end), reason: $greason},
+       priority: $prio, effort: $effort, effort_stance: $stance, effort_note: $enote, needs_decision: $nd,
+       decision_reason: $pr[0].decision_reason, evidence: $pr[0].evidence,
+       dedupe: {terms: (.terms // ""), skipped: ((.dedupe_skipped // 0) == 1), open_issues: (.dup_issues // []), open_prs: (.dup_prs // []),
+                fixed_by: (.candidates_shipped // []), fixed_by_unknown: (.fixed_by_unknown // []), in_flight: (.in_flight // []), shipped_truncated: ($trunc == "true")},
+       recommendation: (if $rec == "" then null else $rec end), priority_note: (if $pnote == "" then null else $pnote end),
+       comment: {action: .comment_action, marker_id: .marker_id, body_path: $body, add_label: $nd},
+       warnings: ([ $vnote, $enote ] | map(select(. != ""))),
+       dev_sha: $sha, evaluated_at: $now, current_quarter: $cur}' \
      "$st" > "$RUN_DIR/result-$n.json"
   id_render_comment "$n"
 }
@@ -474,14 +502,13 @@ id_render_comment() {
       "$(jq -r '.goal.label // "null" | if . == "null" then "null" else "\"" + . + "\"" end' "$r")" "$(jq -r .priority "$r")" "$(jq -r .effort "$r")" \
       "$(jq -r .needs_decision "$r")" "$(jq -r .dev_sha "$r")" "$(jq -r .evaluated_at "$r")"
     printf -- '- classification: %s — %s\n' "$(jq -r .classification "$r")" "$(jq -r '(.noise_signal // "") as $s | if $s != "" then $s else (.evidence.classification // "") end' "$r")"
-    printf -- '- dedupe: %s\n' "$(jq -r 'if .dedupe_skipped == 1 then (if (.noise_signal // "") != "" then "not run (noise)" else "not run (skipped, or title too generic)" end)
-      else "searched `\(.terms)` → \(.dup_issues | length) open issues, \(.dup_prs | length) open PRs" end
-      + "; merged into base since filing naming this issue: " + (if (.candidates_shipped | length) == 0 then "none" else (.candidates_shipped | map("#\(.)") | join(", ")) end)
+    printf -- '- dedupe: %s\n' "$(jq -r '.dedupe | (if .skipped then "not run" else "searched `\(.terms)` → \(.open_issues | length) open issues, \(.open_prs | length) open PRs" end)
+      + "; merged into base since filing naming this issue: " + (if (.fixed_by | length) == 0 then "none" else (.fixed_by | map("#\(.)") | join(", ")) end)
       + (if (.fixed_by_unknown | length) > 0 then " (unknown: " + (.fixed_by_unknown | map("#\(.)") | join(", ")) + " — closing list truncated)" else "" end)
       + "; in flight: " + (if (.in_flight | length) == 0 then "none" else (.in_flight | map("#\(.)") | join(", ")) end)' "$r")"
     [ -z "$(jq -r .verdict_note "$r")" ] || printf '  %s\n' "$(jq -r .verdict_note "$r")"
     printf -- '- goal: %s — %s\n' "$(jq -r '.goal.label // "none"' "$r")" "$(jq -r '.goal | if .source == "own-label" then "own label" elif .source == "reference" then "via #\(.via) (proposed: stamp the label)" else .reason end' "$r")"
-    printf -- '- priority: %s — %s; board: %s / %s\n' "$(jq -r .priority "$r")" "$(jq -r '.evidence.priority // ""' "$r")" "$(jq -r '.board_status // "none"' "$r")" "$(jq -r '.board_priority // "none"' "$r")"
+    printf -- '- priority: %s — %s; board: %s / %s\n' "$(jq -r .priority "$r")" "$(jq -r '.evidence.priority // ""' "$r")" "$(jq -r '.board.status' "$r")" "$(jq -r '.board.priority' "$r")"
     [ -z "$(jq -r '.priority_note // ""' "$r")" ] || printf '  %s\n' "$(jq -r .priority_note "$r")"
     printf -- '- effort: %s — %s\n' "$(jq -r .effort "$r")" "$(jq -r 'if .effort_stance == "propose" then "proposed (no detent-agent block on the issue)" elif .effort_stance == "agree" then "agrees with the issue'"'"'s block" else "the issue'"'"'s block says \(.existing_effort); left as is" end + (if (.evidence.effort // "") != "" then "; " + .evidence.effort else "" end)' "$r")"
     [ -z "$(jq -r .effort_note "$r")" ] || printf '  %s\n' "$(jq -r .effort_note "$r")"
@@ -489,8 +516,6 @@ id_render_comment() {
     printf -- '- still-needed: not checked (v1)\n'
     [ -z "$(jq -r '.recommendation // ""' "$r")" ] || printf '%s\n' "$(jq -r .recommendation "$r")"
   } > "$out"
-  local tmp="$RUN_DIR/result-$n.json.tmp.$$"
-  jq -c --arg p "$out" '.comment = {action: .comment_action, marker_id: .marker_id, body_path: $p, add_label: .needs_decision}' "$r" > "$tmp" && mv "$tmp" "$r"
 }
 
 id_finalize() {
@@ -509,9 +534,9 @@ id_render_report() {
       if [ ! -f "$r" ]; then printf '=== #%s === unevaluated: %s\n\n' "$n" "$(awk -F'\t' -v n="$n" '$1 == n {print $2; exit}' "$RUN_DIR/unevaluated.tsv")"; continue; fi
       jq -r --arg slug "$SLUG" '
         "=== #\(.number) · \(.title) ===\n" +
-        "\($slug) · by \(.author // "(deleted)")\(if .self_authored then ", you" else "" end) · \(.state) · board \(.board_status // "none")/\(.board_priority // "none") · created \(.created_at[0:10])\n" +
+        "\($slug) · by \(.author // "(deleted)")\(if .self_authored then ", you" else "" end) · \(.state) · board \(.board.status)/\(.board.priority) · created \(.created_at[0:10])\n" +
         "  class     \(.classification | . + "               " | .[0:15]) \((.noise_signal // "") as $s | if $s != "" then $s else (.evidence.classification // "") end)\n" +
-        "  verdict   \(.verdict | . + "               " | .[0:15]) \(if .dedupe_skipped == 1 then "dedupe not run" else "`\(.terms)` → \(.dup_issues|length) open issues, \(.dup_prs|length) open PRs" end) · shipped naming it: \(if (.candidates_shipped|length)==0 then "none" else (.candidates_shipped|map("#\(.)")|join(", ")) end) · in flight: \(if (.in_flight|length)==0 then "none" else (.in_flight|map("#\(.)")|join(", ")) end)\n" +
+        "  verdict   \(.verdict | . + "               " | .[0:15]) \(.dedupe | if .skipped then "dedupe not run" else "`\(.terms)` → \(.open_issues|length) open issues, \(.open_prs|length) open PRs" end) · shipped naming it: \(.dedupe.fixed_by | if length==0 then "none" else map("#\(.)")|join(", ") end) · in flight: \(.dedupe.in_flight | if length==0 then "none" else map("#\(.)")|join(", ") end)\n" +
         "  goal      \((.goal.label // "none") | . + "               " | .[0:15]) \(.goal | if .source == "own-label" then "own label" elif .source == "reference" then "via #\(.via)" else .reason end)\n" +
         "  priority  \(.priority | . + "               " | .[0:15]) \(.evidence.priority // "")\(if .priority_note then "  (" + .priority_note + ")" else "" end)\n" +
         "  effort    \("\(.effort) (\(.effort_stance))" | . + "               " | .[0:15]) \(if .existing_effort != "" then "issue block: \(.existing_effort)" else "no detent-agent block on the issue" end)\n" +
@@ -589,12 +614,19 @@ id_dispatch() {
           wrote="posted (confirmed after an ambiguous response)"
         else note="comment create failed — not retried (a POST is not idempotent); re-run, which edits it if it landed"; fi ;;
       edit)
-        if pr_facts_gh api --hostname "$HOST" -X PATCH "repos/$SLUG/issues/comments/$mid" -F body=@"$body" >/dev/null 2>&1; then wrote="edited #$mid"
-        else note="comment edit failed"; fi ;;
+        if gh api --hostname "$HOST" -X PATCH "repos/$SLUG/issues/comments/$mid" -F body=@"$body" > "$rf.patch" 2>/dev/null; then wrote="edited #$mid"
+        elif gh api --hostname "$HOST" "repos/$SLUG/issues/comments/$mid" > "$rf.patched" 2>/dev/null \
+             && jq -e --rawfile want "$body" '.body == ($want | rtrimstr("\n"))' "$rf.patched" >/dev/null 2>&1; then
+          wrote="edited #$mid (confirmed after an ambiguous response)"
+        else note="comment edit failed — not retried; re-run"; fi ;;
       *) note="no write action for this issue ($action)" ;;
     esac
     if [ -n "$wrote" ] && [ "$nd" = true ]; then
-      if pr_facts_gh issue edit "$n" -R "$SLUG" --add-label "triage:needs-decision" >/dev/null 2>&1; then wrote="$wrote, label added"; else wrote="$wrote, label add failed"; fi
+      if gh issue edit "$n" -R "$SLUG" --add-label "triage:needs-decision" > "$rf.label" 2>/dev/null; then wrote="$wrote, label added"
+      elif gh api --hostname "$HOST" "repos/$SLUG/issues/$n/labels" > "$rf.labels" 2>/dev/null \
+           && jq -e 'map(.name) | index("triage:needs-decision") != null' "$rf.labels" >/dev/null 2>&1; then
+        wrote="$wrote, label added (confirmed after an ambiguous response)"
+      else wrote="$wrote, label add failed — not retried"; fi
     fi
   fi
   if [ -n "$wrote" ]; then printf '#%s %s\n' "$n" "$wrote"; else printf '#%s skipped — %s\n' "$n" "${note:-no write}"; fi
@@ -606,7 +638,7 @@ id_post() {
     [ -n "$n" ] || continue
     [ -f "$RUN_DIR/result-$n.json" ] || continue
     if [ "$(jq -r .state "$RUN_DIR/result-$n.json")" != OPEN ]; then printf '#%s skipped — issue is %s\n' "$n" "$(jq -r .state "$RUN_DIR/result-$n.json")"; continue; fi
-    case "$(jq -r .comment_action "$RUN_DIR/result-$n.json")" in create|edit) ;; *) printf '#%s skipped — %s\n' "$n" "$(jq -r .comment_action "$RUN_DIR/result-$n.json")"; continue ;; esac
+    case "$(jq -r .comment.action "$RUN_DIR/result-$n.json")" in create|edit) ;; *) printf '#%s skipped — %s\n' "$n" "$(jq -r .comment.action "$RUN_DIR/result-$n.json")"; continue ;; esac
     id_refresh "$n" || true
     id_dispatch "$n"
   done < "$RUN_DIR/selected.txt"
