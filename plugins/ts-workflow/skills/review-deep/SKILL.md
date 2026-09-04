@@ -116,7 +116,7 @@ and remote head SHAs; a push failure is an incomplete review, never success.
 
 ## Step 1: Detect Scope & Base Branch
 
-If `PR_ARG` is set, use it directly. Otherwise, auto-detect from the current branch using three strategies in order — fall through when each returns empty.
+If `PR_ARG` is set, use it directly. Otherwise, auto-detect from the current branch using two strategies in order — fall through when the first returns empty.
 
 **Strategy 1 — current branch:**
 
@@ -124,24 +124,27 @@ If `PR_ARG` is set, use it directly. Otherwise, auto-detect from the current bra
 PR_JSON=$(gh pr view --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences --jq '.' 2>/dev/null)
 ```
 
-**Strategy 2 — match HEAD commit against open PRs:**
+**Strategy 2 — match HEAD commit against PRs with one REST read:**
+
+`gh pr list --search` goes through the search API (30 requests/minute
+secondary limit) and `gh pr list`/`gh pr view` spend GraphQL, which Detent and
+every other tool on the same token already share. One core-pool REST read
+resolves the same thing. `{owner}/{repo}` is filled in by `gh` from the git
+remote without an API call.
 
 ```bash
 if [ -z "$PR_JSON" ]; then
   HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
-  PR_NUM=$(gh pr list --search "$HEAD_SHA" --state open --json number --jq '.[0].number' 2>/dev/null)
-  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
-    PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences 2>/dev/null)
-  fi
-fi
-```
-
-**Strategy 3 — match HEAD against any (open/closed/merged) PRs:**
-
-```bash
-if [ -z "$PR_JSON" ]; then
-  HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
-  PR_NUM=$(gh pr list --search "$HEAD_SHA" --state all --limit 5 --json number --jq '.[0].number' 2>/dev/null)
+  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
+  # Prefer an open PR whose head is this branch, then any open PR that
+  # contains the commit, then any PR (closed/merged) that contains it.
+  PR_NUM=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/pulls?per_page=100" 2>/dev/null \
+    | jq -r --arg branch "$CURRENT_BRANCH" '
+        [.[][]] as $all
+        | ( [$all[] | select(.state == "open" and .head.ref == $branch)]
+          + [$all[] | select(.state == "open")]
+          + $all )
+        | map(.number) | first // empty')
   if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
     PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences 2>/dev/null)
   fi

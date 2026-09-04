@@ -7,9 +7,11 @@ This document details the full context gathering procedure for deep review.
 ### Fetch PR Metadata
 
 ```bash
-OWNER=$(gh repo view --json owner --jq '.owner.login')
-REPO=$(gh repo view --json name --jq '.name')
-REPO_FULL="$OWNER/$REPO"
+# Owner and name come from the git remote; `gh repo view` would spend two
+# GraphQL calls on the shared token for the same answer.
+REPO_FULL=$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://git@[^/]+/)##; s#\.git$##')
+OWNER=${REPO_FULL%%/*}
+REPO=${REPO_FULL##*/}
 
 PR_FULL=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,closingIssuesReferences,comments,reviews --jq '.' 2>/dev/null)
 ```
