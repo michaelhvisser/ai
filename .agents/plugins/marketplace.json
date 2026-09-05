@@ -1,0 +1,32 @@
+{
+  "name": "michaelhvisser-ai",
+  "interface": {
+    "displayName": "Michaelhvisser Ai"
+  },
+  "plugins": [
+    {
+      "name": "workflow",
+      "source": {
+        "source": "local",
+        "path": "./plugins/workflow"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development"
+    },
+    {
+      "name": "ts-workflow",
+      "source": {
+        "source": "local",
+        "path": "./plugins/ts-workflow"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development"
+    }
+  ]
+}
