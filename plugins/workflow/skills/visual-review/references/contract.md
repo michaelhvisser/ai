@@ -19,6 +19,8 @@ Required top-level fields:
 
 Each asset requires `id`, `path`, `kind`, `label`, `observed`, `inspected`, `width`, `height`, and `source`. `kind` is `before`, `after`, `detail` or `video`. Width/height describe the intrinsic media pixels. PNG dimensions and all supported media signatures are checked by the builder; verify other media dimensions through browser tooling. Supported images: PNG, JPEG and WebP. Videos: MP4 and WebM, with `duration` in seconds. Individual files must be nonempty and at most 250 MB. Use browser-playable codecs; no transcoding is provided.
 
+Every asset must appear in at least one change's `asset_ids`; orphan evidence cannot be reviewed or approved in the viewer.
+
 `source` requires `commit`, `url` (HTTP/S), `provenance`, `state`, `role`, `theme`, `conditions`, and `viewport: {width, height}`. Distinguish verified preview, live local capture and archived test baseline. Every non-before asset must match `head_sha`. Use a new manifest for changed code; do not relabel old screenshots. `inspected` is explicitly boolean and `observed` describes what was visually verified, including defects. The builder adds `sha256`; a provided digest is verified, never overwritten to hide changed bytes.
 
 An optional `parent_id` identifies an uncropped image at the same commit. Supply `crop: {x, y, width, height}` in that parent's intrinsic pixels; the rectangle must be inside the parent. Record screenshot scale correctly when converting browser CSS coordinates. Crop nesting is not supported.
@@ -54,7 +56,7 @@ The CLI `feedback` command validates against the original manifest and original 
 }
 ```
 
-`status` is `addressed` or `unresolved`. An addressed item requires new evidence IDs. The builder validates both manifests, feedback identity and all response mappings. It includes original manifest/feedback and agent responses in `previous-review.json`; original media stays in the original package. The viewer labels these as agent responses, not resolved human decisions.
+`status` is `addressed` or `unresolved`. Every evidence ID on an addressed item must identify inspected `after`, `detail`, or `video` evidence captured from the new manifest's current head. The builder validates both manifests, feedback identity and all response mappings. It includes original manifest/feedback and agent responses in `previous-review.json`; original media stays in the original package. The viewer labels these as agent responses, not resolved human decisions.
 
 ## Package and host adapter
 

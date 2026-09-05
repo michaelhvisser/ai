@@ -14,12 +14,12 @@ function safeFile(root, relative) {
   return p;
 }
 function mediaType(p) {
-  return ({'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.webm':'video/webm','.mp4':'video/mp4','.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json'})[path.extname(p)] || 'application/octet-stream';
+  return ({'.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.webm':'video/webm','.mp4':'video/mp4','.js':'text/javascript','.css':'text/css','.html':'text/html','.json':'application/json'})[path.extname(p).toLowerCase()] || 'application/octet-stream';
 }
 function verifyMedia(p, a) {
   const bytes = fs.readFileSync(p);
   if (!bytes.length || bytes.length > 250 * 1024 * 1024) throw Error('Media exceeds 250 MB or is empty');
-  const ext = path.extname(p);
+  const ext = path.extname(p).toLowerCase();
   const valid = ext === '.png' ? bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')) :
     ['.jpg','.jpeg'].includes(ext) ? bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 :
     ext === '.webp' ? bytes.toString('ascii',0,4) === 'RIFF' && bytes.toString('ascii',8,12) === 'WEBP' :
