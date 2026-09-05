@@ -12,8 +12,8 @@
     {
       "name": "workflow",
       "source": "./plugins/workflow",
-      "description": "Language-agnostic PR and review workflow skills — PR situation reports with approvable execution plans, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
-      "version": "0.6.0",
+      "description": "Language-agnostic PR and review workflow skills — PR situation reports with approvable execution plans, issue triage evaluations, adversarial cross-model review, Codex-driven ship loops, commits, PRs, worktrees",
+      "version": "0.8.0",
       "keywords": [
         "workflow",
         "github",

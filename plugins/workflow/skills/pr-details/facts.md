@@ -4,6 +4,17 @@ Every recipe here is read-only and was executed against a live repository before
 down. Every `gh` call goes through `pr_facts_gh` (the retry wrapper) and is host- and
 repo-explicit: there are no bare `gh api` calls.
 
+**Transport rule: REST core and local reads; GraphQL only inside the two named fallbacks.**
+`gh pr view`, `gh pr list`, `gh pr checks`, `gh pr diff`, `gh issue view`, `gh issue list`,
+`gh repo view` and every `gh project` verb are GraphQL under the hood, and GraphQL carries a
+secondary limit (points per minute, concurrency — shared by the Detent fleet and every review
+session on the same token) that `rate_limit` never reports (§0b). A normal run therefore
+issues **zero** GraphQL queries: identity comes from the git remote, the PR and issue records
+from `repos/…` REST, the board from Detent's local snapshot, and the shipped sweep from local
+git. GraphQL is reached only from §2c (thread resolution, when REST found ≥1 root thread) and
+§2f (board, when the issue is absent from or stale in the snapshot), each guarded so a refusal
+degrades to a stated unknown rather than a failed run.
+
 ---
 
 ## §0 Phase 0 — Preflight
@@ -26,14 +37,18 @@ case "$PR_ARG" in
     PR_ARG=$(printf '%s' "$PR_ARG" | sed -E 's#.*/pull/([0-9]+).*#\1#') ;;
 esac
 if [ -z "$SLUG" ]; then
-  SLUG=$(gh repo view --json nameWithOwner --jq .nameWithOwner) || exit 4
-  HOST=$(gh repo view --json url --jq '.url | sub("^https?://";"") | split("/")[0]')
+  # Zero API calls: host and slug parsed from the origin remote (https, ssh://
+  # and git@host:owner/name forms). `gh repo view` is GraphQL and is not used.
+  IDENTITY=$(pr_facts_repo_identity origin) \
+    || { echo "pr-details: origin remote missing or not owner/name" >&2; exit 4; }
+  HOST=$(jq -r .host <<<"$IDENTITY")
+  SLUG=$(jq -r .slug <<<"$IDENTITY")
 fi
 OWNER="${SLUG%%/*}"; NAME="${SLUG##*/}"
 ```
 
-`gh repo view` takes the repository as a **positional** argument — it has no `-R` flag
-(verified: `unknown shorthand flag: 'R'`). Every *other* command in this skill does take `-R`.
+Verified: `git@github.com:getparable/parable.git` and `https://github.com/getparable/parable`
+both resolve to `{"host":"github.com","slug":"getparable/parable"}`.
 
 **Mismatch rule.** If a URL resolved a `SLUG` or `HOST` different from the current checkout's,
 stop with exit 4 and print both. Never silently report on repo A while the user is sitting in
@@ -47,24 +62,27 @@ gh auth status --hostname "$HOST" >/dev/null 2>&1 \
   || { echo "pr-details: not authenticated for $HOST" >&2; exit 3; }
 ```
 
-Then the minimal PR record the rest of Phase 0 depends on:
+Then the PR record the rest of the run depends on — one REST `pulls/{n}` call, normalised by
+`pr_facts_pr_record` to the `gh pr view --json` field names, so this is also the §1a record
+(`pr.json`); nothing fetches it twice:
 
 ```bash
-pr_facts_gh pr view "$PR_ARG" -R "$SLUG" \
-  --json number,baseRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state \
-  > "$RUN_TMP/pr-min.json" || exit 4
-PR_NUM=$(jq -r .number                    "$RUN_TMP/pr-min.json")
-BASE=$(jq -r .baseRefName                 "$RUN_TMP/pr-min.json")
-HEAD_SHA=$(jq -r .headRefOid              "$RUN_TMP/pr-min.json")
-HEAD_REPO=$(jq -r .headRepositoryOwner.login "$RUN_TMP/pr-min.json")  # owner, for compare's owner:ref
+pr_facts_pr_record "$HOST" "$SLUG" "$PR_ARG" > "$RUN_TMP/pr.json" || exit 4
+PR_NUM=$(jq -r .number                    "$RUN_TMP/pr.json")
+BASE=$(jq -r .baseRefName                 "$RUN_TMP/pr.json")
+HEAD_SHA=$(jq -r .headRefOid              "$RUN_TMP/pr.json")
+HEAD_REPO=$(jq -r .headRepositoryOwner.login "$RUN_TMP/pr.json")  # owner, for compare's owner:ref
 # The FULL head slug, owner/name — remote-URL matching needs it, because the
 # owner login alone is ambiguous (renamed forks, several repos per owner).
-HEAD_SLUG=$(jq -r '.headRepositoryOwner.login + "/" + .headRepository.name' "$RUN_TMP/pr-min.json")
-IS_FORK=$(jq -r .isCrossRepository        "$RUN_TMP/pr-min.json")
+HEAD_SLUG=$(jq -r '.headRepositoryOwner.login + "/" + .headRepository.name' "$RUN_TMP/pr.json")
+IS_FORK=$(jq -r .isCrossRepository        "$RUN_TMP/pr.json")
 ```
 
-With no `PR_ARG` at all, resolve from the branch first (`github_current_pr`), then from the
-head SHA (`gh pr list -R "$SLUG" --search "$HEAD_SHA"`). No resolution → exit 4.
+`PR_ARG` must be a number here. A branch-name argument resolves through `github_current_pr`
+with that branch and its tip SHA (`git rev-parse <branch>`), which is REST
+`commits/{sha}/pulls`. With no `PR_ARG` at all, resolve from the current branch the same way.
+No resolution → exit 4. There is no `gh pr list --search` fallback: it is GraphQL, and a head
+SHA that `commits/{sha}/pulls` does not know is not on any open PR.
 
 Only now are the run directory (§0e), the git pins (§0c), and the ruleset lookup (§0d)
 well-defined.
@@ -104,6 +122,15 @@ does not decide that for them.
 `search` bucket does not guarantee a search will succeed. Budget duplicate search against
 **both** buckets, and note in the report that the 30/min search bucket is small enough that
 back-to-back runs can trip it on its own.
+
+**The gate cannot see GraphQL's secondary limit.** `rate_limit` reports the hourly point
+budget only. GraphQL also enforces a per-minute point rate and a concurrency cap, and a
+breach returns `API rate limit already exceeded` while `rate_limit` still shows thousands
+remaining — observed on 2026-09-02 with 4805 of 5000 GraphQL points left. The limit is
+shared across every process on the token (the Detent fleet polls the board through it), so
+no reserve this skill picks can protect a run. That is why the design target is **zero
+GraphQL calls on a normal run**: the gate guards the buckets it can read, and the two GraphQL
+fallbacks (§2c, §2f) each tolerate a refusal by degrading to a stated unknown.
 
 ### §0c Pin the git objects
 
@@ -246,41 +273,66 @@ gets manufactured out of an error.
 
 ### §1a Full PR record
 
-One `gh pr view`, repo-explicit:
+The §0a record **is** the full record — `pr_facts_pr_record` returns every field the report
+reads, so copy it into the run directory and fetch the file list beside it:
 
 ```bash
-pr_facts_gh pr view "$PR_NUM" -R "$SLUG" --json number,title,body,url,state,isDraft,author,\
-createdAt,updatedAt,baseRefName,headRefName,headRefOid,headRepositoryOwner,isCrossRepository,\
-mergeable,mergeStateStatus,reviewDecision,reviewRequests,reviews,labels,closingIssuesReferences,\
-statusCheckRollup,projectItems,autoMergeRequest,additions,deletions,changedFiles,files,comments,\
-commits > "$RUN_DIR/pr.json"
+cp "$RUN_TMP/pr.json" "$RUN_DIR/pr.json"
+pr_facts_pr_files "$HOST" "$SLUG" "$PR_NUM" > "$RUN_DIR/files.json"
 ```
 
-Shapes: `mergeable ∈ MERGEABLE|CONFLICTING|UNKNOWN`;
-`mergeStateStatus ∈ CLEAN|BEHIND|BLOCKED|DIRTY|UNSTABLE|HAS_HOOKS|UNKNOWN|DRAFT`;
-`reviewDecision ∈ ""|APPROVED|CHANGES_REQUESTED|REVIEW_REQUIRED` (**empty string**, not null,
-when no review is required); `statusCheckRollup[]` mixes
-`CheckRun{name,status,conclusion,workflowName}` and `StatusContext{context,state}` — Vercel is
-a legacy status (`state:"SUCCESS"`, `conclusion:null`).
+Shapes (REST, normalised): `state ∈ OPEN|CLOSED|MERGED` (REST reports `closed` plus
+`merged_at`; the helper folds that to `MERGED`); `mergeable ∈ MERGEABLE|CONFLICTING|UNKNOWN`
+(REST `true|false|null`); `mergeStateStatus ∈ CLEAN|BEHIND|BLOCKED|DIRTY|UNSTABLE|HAS_HOOKS|
+UNKNOWN|DRAFT` (REST `mergeable_state`, upper-cased); `labels[{name}]`; `autoMergeRequest`
+(`null` or the auto-merge object); `reviewRequests[{__typename, login|name}]`; `additions`,
+`deletions`, `changedFiles`, `commits` (a count); `transport: "rest"`. Verified on
+getparable/parable PR 3053 (`OPEN`, `MERGEABLE`, `BLOCKED`) and PR 2899 (`MERGED`).
 
-**The rollup carries no app id.** Verified: neither `statusCheckRollup` nor
-`github_check_snapshot` exposes one, so the `(context, integration_id)` match cannot be made
-from either. Use `pr_facts_check_matrix` (§2a), which reads `check-runs` and the combined
-status directly and preserves `app.id`.
+Fields the old GraphQL record carried that REST does not, and where each now comes from:
+`reviewDecision` and `reviews` → §2b (`pr_facts_pr_reviews` + `pr_facts_review_decision`);
+`closingIssuesReferences` and `projectItems` → §1b and §2f (timeline cross-references, the
+Detent snapshot); `statusCheckRollup` → §2a (`pr_facts_check_matrix`, which was already the
+authority because the rollup carries no app id); `comments` → §2g; `files` → `files.json`.
 
-`files` is capped by `gh`. Compare `(.files | length)` against `.changedFiles`; when they
-differ, take the authoritative list from `gh pr diff --name-only` and set
-`files_truncated: true`.
+`files.json` is `[{path, status, additions, deletions, previous_filename}]`, paginated at 100,
+so there is no `gh`-side cap and no `files_truncated` case: `(length)` equals `.changedFiles`
+by construction (verified: 10/10 on PR 3053). `files_truncated` stays in the schema as a
+constant `false` for consumers that read it.
 
 ### §1b Linked issues
 
-When `closingIssuesReferences` is empty, fall back in order: the keyword regex
-`(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#(\d+)` over the PR body and commit messages;
-then bare `#(\d+)` in the body; then the Detent branch convention `_(\d+)-[0-9a-f]{12}$`.
-Record `source: sidebar|body-keyword|body-mention|branch-name`. Only `sidebar` and
-`body-keyword` count as *linked*; the rest are *candidate*, and the report says so.
+REST has no `closingIssuesReferences`. Gather candidates from three zero-GraphQL sources,
+then confirm the body ones against the issue's timeline:
 
-Fetch each with `gh issue view "$N" -R "$SLUG" --json number,title,body,state,labels,url`.
+1. **Body keyword** — `(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\s+#(\d+)` over the PR body
+   and commit messages. Confirmed by a `cross-referenced` timeline event from this PR →
+   `source: body-keyword`, **linked**. Unconfirmed (the event has not been written yet, or the
+   number is a typo) → `candidate`.
+2. **Detent's own authority** — the branch convention `_(\d+)-[0-9a-f]{12}$` on `headRefName`,
+   or a snapshot pipeline row whose `pull_request.number` is this PR
+   (`pr_facts_snapshot_pr_issue "$SLUG" "$PR_NUM"`). Either → `source: branch-name` or
+   `source: detent-snapshot`, **linked**: the daemon created the branch for exactly that issue.
+3. **Bare mention** — `#(\d+)` anywhere else in the body → `source: body-mention`,
+   `candidate`.
+
+```bash
+pr_facts_issue "$HOST" "$SLUG" "$N" > "$RUN_DIR/issue-$N.json"
+LINKS=$(pr_facts_issue_links "$HOST" "$SLUG" "$N" "$PR_NUM")
+CROSS_REF=$(jq -r .cross_referenced_by_pr <<<"$LINKS")      # true → body-keyword confirmed
+BOARD_CHANGED_AT=$(jq -r '.last_board_change_at // empty' <<<"$LINKS")  # feeds §2f freshness
+```
+
+`pr_facts_issue` returns the `gh issue view --json` shape (`state ∈ OPEN|CLOSED`,
+`labels[{name}]`, `url`) plus `isPullRequest`, because REST serves PRs from the same endpoint
+and a candidate number can be one. Verified: issue #1763 ↔ PR 3053 and issue #2889 ↔ PR 2899
+both report `cross_referenced_by_pr: true`.
+
+**Sidebar-only links are not visible on REST.** A link made only through the PR's
+"Development" panel writes no `cross-referenced` event and no `connected` event that this
+endpoint returns (verified: #2889 auto-closed from `Fixes #2889` in the body and the timeline
+still shows only the cross-reference). Such a PR reaches this skill with no linked issue unless
+Detent's branch or snapshot names one, and the report says so rather than guessing.
 
 ### §1c Duplicate discovery
 
@@ -303,74 +355,90 @@ pr_facts_gh search issues --repo "$SLUG" --state closed --limit 5 "$Q" \
 pr_facts_gh search prs --repo "$SLUG" --state open --limit 10 "$Q" \
   --json number,title,isDraft,state,updatedAt,url,author
 
-# Hydrate only the PR candidates that survive scoring — one gh pr view each, capped at 5.
-pr_facts_gh pr view "$CAND" -R "$SLUG" --json number,headRefName,headRefOid,statusCheckRollup,projectItems
+# Hydrate only the PR candidates that survive scoring — one REST pulls/{n} each, capped at 5.
+pr_facts_pr_record "$HOST" "$SLUG" "$CAND" | jq -c '{number, headRefName, headRefOid, state, isDraft}'
 ```
 
-*Signal 2 — shared file paths.* `gh` has no `--argjson` flag and `--jq` takes exactly one
-expression, so this must pipe into standalone `jq`; `pr_facts_shared_files` does that and
-already drops lockfiles, `**/_generated/**`, and snapshots:
+A candidate's CI comes from `pr_facts_check_matrix` on its `headRefOid` when the comparison
+needs it, and its board row from the snapshot (signal 3) — never from `projectItems`.
+
+*Signal 2 — shared file paths.* `pr_facts_shared_files` is REST only: one
+`pulls?state=open&per_page=50` call, then `pulls/{n}/files` for each other open PR (≤ 51 core
+calls, verified: 25 open PRs on getparable/parable → 26 calls, one overlap found). It drops
+lockfiles, `**/_generated/**`, and snapshots before comparing:
 
 ```bash
-MINE=$(jq -c '[.files[].path]' "$RUN_DIR/pr.json")
-pr_facts_shared_files "$HOST" "$SLUG" "$PR_NUM" "$MINE"
+MINE=$(jq -c '[.[].path]' "$RUN_DIR/files.json")
+SHARED=$(pr_facts_shared_files "$HOST" "$SLUG" "$PR_NUM" "$MINE")
+SHARED_TRUNCATED=$(jq -r .truncated <<<"$SHARED")      # true when the open-PR page hit 50
+jq -c '.prs' <<<"$SHARED"                               # [{number,title,headRefName,shared[]}]
 ```
 
-Overlap on ≥2 semantic files, or on any file that is >50% of this PR's diff → candidate. The
-50-PR cap is recorded as `truncated: true`.
+Overlap on ≥2 semantic files, or on any file that is >50% of this PR's diff → candidate.
+`truncated: true` (50 open PRs fetched — older ones unexamined) becomes a `warnings[]` line.
 
 *Signal 3 — labels and board neighbourhood.* Open issues sharing a non-generic label (skip
 `bug`, `enhancement`, `detent:*`, `slack-triage`), max 3 label queries, then each candidate's
-board Status via `pr_facts_board`. Two active board items for one problem is the duplicate
-case this skill exists to catch.
+board Status from **the snapshot only** — `pr_facts_board_local "$SLUG" "$CAND"` — with
+`board_status: "unknown"` when the candidate is absent from it. Never spend GraphQL on a
+candidate: the §2f fallback exists for the linked issue whose lane decides the plan, and a
+duplicate check with an unknown lane is still a duplicate check. Two active board items for
+one problem is the duplicate case this skill exists to catch.
 
 ### §1d Diff
 
-`pr_facts_gh pr diff "$PR_NUM" -R "$SLUG"` → the SHA-keyed cache. `DIFF_LINES=$(wc -l)`. Over
-4000 lines → `HUGE_DIFF=true`, and Phase 4 receives a per-file stat plus full hunks for the top
-10 files with an explicit `DIFF TRUNCATED: n of m files shown` marker in the prompt.
+`pr_facts_pr_diff "$HOST" "$SLUG" "$PR_NUM"` (REST `pulls/{n}` with the
+`application/vnd.github.diff` media type — `gh pr diff` resolves the PR through GraphQL) → the
+SHA-keyed cache. `DIFF_LINES=$(wc -l)` (verified: 483 lines on PR 3053). Over 4000 lines →
+`HUGE_DIFF=true`, and Phase 4 receives a per-file stat plus full hunks for the top 10 files
+with an explicit `DIFF TRUNCATED: n of m files shown` marker in the prompt.
 
 ### §1e Supersession sweep — recently shipped and backlog
 
 Answers the half of "should this PR be closed instead of finished" that §1c's
 similarity scoring misses: what **shipped** since this PR's merge-base, and what the
 **backlog** plans for the same area. Skipped with `--no-dup-search` (same question, same
-budget decision). Both commands are list endpoints — they charge the GraphQL bucket but not
-the 30/min search bucket. Verified live, including the UTC normalization: `mergedAt` is
-Zulu-form ISO 8601, and a `git` date printed with a local offset breaks the lexical
-comparison, so the window boundary is forced to UTC.
+budget decision). The shipped half runs from **local git** with zero API calls; the
+closed-issue half is one paginated REST list. Neither touches GraphQL or the 30/min search
+bucket. Verified live, including the UTC normalization: REST `closed_at` is Zulu-form ISO
+8601, and a `git` date printed with a local offset breaks the lexical comparison, so the
+window boundary is forced to UTC.
 
-*Recently shipped PRs*, with the issues they closed and their file lists:
+*Recently shipped PRs*, with the issues they closed and their file lists. Squash merges land
+on the base branch as first-parent commits carrying `(#N)` in the subject and the closing
+keywords in the body, so the range `MERGE_BASE..BASE_TIP` **is** the window, in merge order —
+which `gh pr list` could never give (it lists by creation date with no sort flag, so an old
+PR merged recently fell outside its 30-row cap; michaelhvisser/ai#17):
 
 ```bash
 SINCE=$(TZ=UTC git show -s --format=%cd \
   --date=format-local:%Y-%m-%dT%H:%M:%SZ "$MERGE_BASE")
-pr_facts_gh pr list -R "$SLUG" --base "$BASE" --state merged --limit 30 \
-  --json number,title,mergedAt,files,closingIssuesReferences \
-  > "$RUN_DIR/shipped-raw.json"
-jq -c --arg since "$SINCE" '[.[] | select(.mergedAt >= $since)
-    | {number, title, mergedAt,
-       issues: [.closingIssuesReferences[].number],
-       files: [.files[].path]}]' \
-  "$RUN_DIR/shipped-raw.json" > "$RUN_DIR/shipped.json"
-# 30 is a cap, newest-first. When the cap was hit AND no returned PR predates
-# the window, the cap — not the window — ended the sweep: older shipped PRs
-# may exist unseen. If the oldest returned PR predates SINCE, the window is
-# fully covered and the cap is irrelevant.
+SHIPPED_CAP="${SHIPPED_CAP:-200}"
+pr_facts_shipped_local "$MERGE_BASE" "$BASE_TIP" "$SHIPPED_CAP" > "$RUN_DIR/shipped.json"
+# The range bounds the window exactly; only the cap can cut it short. Truncation
+# is therefore a count, not a guess from the sample's timestamps.
+SHIPPED_TOTAL=$(git rev-list --count --first-parent "${MERGE_BASE}..${BASE_TIP}")
 SHIPPED_TRUNCATED=false
-if [ "$(jq length "$RUN_DIR/shipped-raw.json")" -eq 30 ] \
-   && [ "$(jq length "$RUN_DIR/shipped.json")" -eq 30 ]; then
+if [ "$SHIPPED_TOTAL" -gt "$SHIPPED_CAP" ]; then
   SHIPPED_TRUNCATED=true
 fi
 ```
 
+`shipped.json` is `[{number, title, mergedAt, sha, issues[], files[]}]`, newest first;
+`mergedAt` is the committer date in UTC (`format-local` under `TZ=UTC`). A first-parent
+commit with no PR number in its subject (a direct push) is kept with `number: null` so its
+files still count toward overlap. Merge commits diff against their first parent. Verified on
+getparable/parable `dev`: 12 first-parent commits → 12 rows, PR 2899 carrying `issues:
+[2889]`. An issue closed only through the sidebar has no keyword in the squash body and shows
+up in the closed-issue sweep below instead (verified: #2343, closed by PR 2887 the same
+second, appears there and not in `issues[]`).
+
 `SHIPPED_TRUNCATED=true` mirrors signal 2's cap handling: it produces a `warnings[]` line
-("shipped sweep capped at 30 merged PRs inside the window — older shipped work
+("shipped sweep capped at 200 merged commits inside the window — older shipped work
 unexamined"), and the researcher brief says so, so an `unclear`-leaning verdict is never
 laundered into confidence by a sweep that silently stopped early. This block is executed
-against scripted repos and fixtures by
-`plugins/workflow/tests/pr-details-supersession-sweep.test.sh` — the doc is the code under
-test; edit both together.
+against scripted repos by `plugins/workflow/tests/pr-details-supersession-sweep.test.sh` —
+the doc is the code under test; edit both together.
 
 Score file overlap with the same rules as signal 2 (drop lockfiles, `**/_generated/**`,
 snapshots). A shipped PR overlapping this one's files, or closing an issue whose title
@@ -382,10 +450,13 @@ along as the "recently shipped issues" the researcher weighs.
 with no merged PR):
 
 ```bash
-pr_facts_gh issue list -R "$SLUG" --state closed --limit 30 \
-  --json number,title,closedAt,labels \
-  | jq -c --arg since "$SINCE" '[.[] | select(.closedAt >= $since)]'
+pr_facts_closed_issues "$HOST" "$SLUG" "$SINCE" > "$RUN_DIR/closed-issues.json"
 ```
+
+REST `issues?state=closed&since=` filters on `updated_at` and lists PRs as issues, so the
+helper re-applies `closed_at >= SINCE` and drops rows carrying `pull_request`; output is
+`[{number, title, closedAt, labels[{name}]}]`, paginated (verified: 13 issues in a 14-hour
+window on getparable/parable).
 
 *Backlog direction.* The open-issue candidates from §1c signals 1 and 3 already carry board
 status; the question here is different — not "is this a duplicate" but "does **planned**
@@ -438,12 +509,27 @@ failures are `partial-red` and never block.
 
 ### §2b Reviews
 
-From `pr.json`: `reviewDecision`, plus `reviews[]` reduced to the latest state per author.
-Fall back to `github_pr_reviews`. **Bot login suffixes differ between transports** — REST
-returns `chatgpt-codex-connector[bot]`, GraphQL returns `chatgpt-codex-connector` (both
-verified on the same PR) — so always match with `startswith`. Record `APPROVALS_GIVEN`
-(distinct latest-`APPROVED` authors, excluding the PR author) and CHANGES_REQUESTED authors
-split human vs bot.
+REST has no `reviewDecision`; it is **derived**, the way GitHub derives it, from the review
+list and the ruleset:
+
+```bash
+REVIEWS=$(pr_facts_pr_reviews "$HOST" "$SLUG" "$PR_NUM")
+DECISION=$(pr_facts_review_decision "$REVIEWS" "$RULES" "$(jq -r .author.login "$RUN_DIR/pr.json")")
+REVIEW_DECISION=$(jq -r .reviewDecision <<<"$DECISION")
+APPROVALS_GIVEN=$(jq -r .approvals_given <<<"$DECISION")
+```
+
+The derivation: keep the latest non-`COMMENTED` review per author, PR author excluded (a
+`DISMISSED` review supersedes that author's earlier approval); any latest
+`CHANGES_REQUESTED` → `CHANGES_REQUESTED`; fewer distinct latest-`APPROVED` authors than the
+ruleset's `approvals_required` → `REVIEW_REQUIRED`; at least one approval → `APPROVED`;
+otherwise `""` — the same empty-string convention `gh pr view` used when nothing is required.
+`APPROVALS_GIVEN` is that distinct-approver count. The object also carries
+`changes_requested_by[]` and `latest[]` (login, type, state, commit) for the human/bot split.
+**Bot login suffixes differ between transports** — REST returns
+`chatgpt-codex-connector[bot]`, GraphQL returns `chatgpt-codex-connector` (both verified on
+the same PR) — so always match with `startswith`. Verified on PR 3053: zero reviews,
+`approvals_required: 0` → `""`.
 
 Note that a Codex connector verdict may arrive as an **issue comment** rather than a formal
 review — on one verified PR the reviews array was empty while the connector's verdict sat in
@@ -451,18 +537,50 @@ the comment stream. Read both.
 
 ### §2c Review threads
 
+REST first, always; GraphQL only when there is a thread whose resolution matters:
+
 ```bash
-THREADS=$(pr_facts_review_threads "$HOST" "$OWNER" "$NAME" "$PR_NUM")
-[ "$(jq -r .paginated_complete <<<"$THREADS")" = "true" ] || FACTS_INCOMPLETE=1
+THREADS=$(pr_facts_review_threads_rest "$HOST" "$SLUG" "$PR_NUM")
+THREADS_REQ=$(jq -r .threads_required <<<"$RULES")
+RESOLUTION_KNOWN=false
+if [ "$(jq -r .total <<<"$THREADS")" -gt 0 ]; then
+  # The one fact REST lacks is isResolved. Spend the GraphQL call only now,
+  # and keep the REST result when it is refused or partial.
+  if GQL=$(pr_facts_review_threads "$HOST" "$OWNER" "$NAME" "$PR_NUM") \
+     && [ "$(jq -r .paginated_complete <<<"$GQL")" = "true" ]; then
+    THREADS="$GQL"; RESOLUTION_KNOWN=true
+  fi
+fi
+if [ "$RESOLUTION_KNOWN" = false ] && [ "$THREADS_REQ" = true ] \
+   && [ "$(jq -r .total <<<"$THREADS")" -gt 0 ]; then
+  FACTS_INCOMPLETE=1      # resolution is a merge gate here and cannot be read
+fi
 ```
 
-The helper passes **no cursor** on the first page (`-F after=null`; `gh` converts the literal
-to JSON null — `-f after=""` sends an empty string, which is not a valid cursor), and fetches
-comments as `first:1` (origin) plus `last:1` (latest) rather than `first:50`, because only the
-origin author and the latest author are needed and `first:50` silently reports the wrong "last
-commenter" on any thread past 50 comments. Verified live: one PR in this repo has **79**
-review threads, so pagination is not hypothetical. **Every** paginated collection follows this
-shape — threads, timeline items, project items, project fields, labels, comments, commits.
+`pr_facts_review_threads_rest` groups `pulls/{n}/comments` by root (`in_reply_to_id ==
+null`) into the same node shape (`id`, `path`, `line`, `origin`, `latest`, `isOutdated` from
+a root whose `line` is null) with `isResolved: null` on every node and `resolution_known:
+false` on the envelope — REST carries no resolution state anywhere. Verified on PR 2899: REST
+2 comments → 1 root thread, origin `chatgpt-codex-connector[bot]`, latest by the PR author
+starting `Fixed in`; GraphQL reports that same thread resolved.
+
+**Counting when resolution is unknown.** A root thread counts as **open** unless its latest
+comment is by the PR author or carries a skill marker (`Fixed in`, `Addressed in`,
+`Dismissed (`) — those are the replies this workflow leaves when it resolves. The report
+prints the count as `≤ n (resolution unknown)` and `status.threads.resolution_known: false`
+with a `warnings[]` line. `FACTS_INCOMPLETE` is set **only when the ruleset's
+`threads_required` is true**, because only then is resolution a merge gate; on a repo like
+getparable/parable (`threads_required: false`) the upper bound feeds rows 12–14 as-is and
+the plan says so. A PR with zero root threads never touches GraphQL.
+
+The GraphQL helper passes **no cursor** on the first page (`-F after=null`; `gh` converts
+the literal to JSON null — `-f after=""` sends an empty string, which is not a valid
+cursor), and fetches comments as `first:1` (origin) plus `last:1` (latest) rather than
+`first:50`, because only the origin author and the latest author are needed and `first:50`
+silently reports the wrong "last commenter" on any thread past 50 comments. Verified live:
+one PR in this repo has **79** review threads, so pagination is not hypothetical. **Every**
+paginated collection follows this shape — threads, timeline items, project items, project
+fields, labels, comments, commits.
 
 Author classification: `origin` decides the thread's origin class, `latest` decides who spoke
 last. Classify per
@@ -482,8 +600,10 @@ a click, not code.
 
 ### §2d Mergeability
 
-`mergeable` / `mergeStateStatus` from `pr.json`; if `UNKNOWN`, re-poll after 3s and again
-after 10s, then set `FACTS_INCOMPLETE`. Behind-count:
+`mergeable` / `mergeStateStatus` from `pr.json`; if `UNKNOWN`, re-fetch with
+`pr_facts_pr_record` after 3s and again after 10s (GitHub computes mergeability lazily on the
+first read), then set `FACTS_INCOMPLETE`. A merged or closed PR reads `UNKNOWN` permanently
+(verified on PR 2899) — rows 1–2 fire before this matters. Behind-count:
 
 ```bash
 pr_facts_compare "$HOST" "$SLUG" "$BASE" "$HEAD_SHA"     # {status, ahead_by, behind_by}
@@ -499,19 +619,50 @@ Surface only: `git rev-parse HEAD` vs `HEAD_SHA`, `git status --porcelain`,
 
 ### §2f Board state — from the issue, not the PR
 
-Detent's board item is the **issue**:
+Detent's board item is the **issue**, and Detent already holds the board locally: the daemon
+writes `detent-board-snapshot.json` beside its `global.yaml` every poll (path from
+`detent --format json config path`, override with `DETENT_BOARD_SNAPSHOT`). Read that first —
+zero auth, zero API — and reach GitHub's Projects v2 GraphQL only when the snapshot cannot
+answer:
 
 ```bash
-pr_facts_board "$HOST" "$OWNER" "$NAME" issue       "$ISSUE_NUM"
-pr_facts_board "$HOST" "$OWNER" "$NAME" pullRequest "$PR_NUM"
+BOARD=$(pr_facts_board_local "$SLUG" "$ISSUE_NUM" "$BOARD_CHANGED_AT")
+BOARD_SOURCE="detent-snapshot"
+if [ "$(jq -r .fresh <<<"$BOARD")" != "true" ]; then
+  # Absent (not in an active or observed lane, or another project's issue) or
+  # stale (older than refresh.stale_after_seconds, or a board change after
+  # saved_at). One GraphQL call, and a refusal is an unknown, not a crash.
+  if GQL=$(pr_facts_board "$HOST" "$OWNER" "$NAME" issue "$ISSUE_NUM"); then
+    BOARD="$GQL"; BOARD_SOURCE="graphql"
+  else
+    BOARD_SOURCE="none"; BOARD_STATUS="unknown"; FACTS_INCOMPLETE=1
+  fi
+fi
 ```
 
-Select the item whose `project_id` equals `detent.yaml`'s `tracker.project_slug`; if that is
-unknown and exactly one item exists, use it; if several, set `BOARD_AMBIGUOUS=true` (row 6).
-No linked issue → `BOARD_STATUS=none`. The PR's *own* board row is read separately and, when
-it differs, printed once as an ignored line. Verified on this repo: issue #92 reads
-`Human Review` while its PR #161's row reads `Backlog` — reading the PR row as the issue's
-state would misroute the entire promotion ladder.
+Snapshot rows: `identifier` is `owner/repo#N`; `pipeline[]` covers the active and observed
+lanes and carries `pull_request{number, branch_name, state, mergeable_state, head_sha,
+ci_status}`; `board_issues[]` covers every lane the daemon has seen (Backlog included on the
+verified snapshot; coverage follows the daemon's configured states, so absence means "ask
+GraphQL", never "no board row"). `pr_facts_board_local` returns `{found, fresh, saved_at,
+age_seconds, stale_after_seconds, state, priority_name, labels, blocked_by, pull_request,
+matched_in, source}`; `state` **is** `BOARD_STATUS`. `fresh` requires age ≤
+`refresh.stale_after_seconds` (600 when the file does not say; the verified daemon writes
+4786) **and** no `project_v2_item_status_changed` event after `saved_at` (§1b's
+`BOARD_CHANGED_AT` — REST carries no status name on that event, so it is only a tripwire).
+Verified: issue #1763 → `Human Review`, `matched_in: pipeline`, `fresh: true` at age 20 s.
+
+When the GraphQL path runs: select the item whose `project_id` equals `detent.yaml`'s
+`tracker.project_slug`; if that is unknown and exactly one item exists, use it; if several,
+set `BOARD_AMBIGUOUS=true` (row 6). No linked issue → `BOARD_STATUS=none`. **The PR's own
+board row is no longer read** — it was only ever printed as an ignored line, and the snapshot
+keys on the issue by construction. (History: on the reference repo issue #92 read `Human
+Review` while its PR #161's row read `Backlog`; reading the PR row as the issue's state would
+misroute the entire promotion ladder, which is why the issue row was always the fact.)
+Record `board.source ∈ detent-snapshot|graphql|none` and `board.snapshot_age_s` in the output
+(`output.md` §2); a stale snapshot that GraphQL could not refresh produces the `warnings[]`
+line "board from stale snapshot (<age> s)" and keeps the snapshot's state as the best
+available reading with `FACTS_INCOMPLETE` set.
 
 ### §2g Prior-skill evidence
 

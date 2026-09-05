@@ -60,8 +60,12 @@ for, chosen from the contract, not hard-coded:
   `Merging` at 1 on the reference repo — when the lane is full, say so and stop instead of
   queueing a second item).
 
-`pr_facts_board` already returned `item_id`, `project_id`, and the project **number** for the
-issue's item; the Status field and option ids come from one lookup (verified live):
+**This is the one place a normal run touches GraphQL, and only past the gate.** The report
+read the board from Detent's snapshot (`facts.md` §2f), which carries no `item_id` or
+`project_id`, and Projects v2 has no REST surface — so on this selection, and only now, call
+`pr_facts_board "$HOST" "$OWNER" "$NAME" issue "$ISSUE_NUM"` once for the issue's `item_id`,
+`project_id`, and project **number**, then take the Status field and option ids from one
+lookup (verified live):
 
 ```bash
 gh project field-list "$PROJ_NUM" --owner "$OWNER" --format json \
@@ -70,10 +74,14 @@ gh project item-edit --id "$ITEM_ID" --project-id "$PROJECT_ID" \
   --field-id "$FIELD_ID" --single-select-option-id "$OPT_ID"
 ```
 
-After the move, verify it took (`pr_facts_board` again), print the lane and the daemon's
-expected pickup, and stop — the plan now belongs to the daemon. Never also execute steps
-locally after a handoff; two executors on one PR is the conflict Detent's lane caps exist to
-prevent.
+If that read is refused (the secondary limit — `API rate limit already exceeded`), say so,
+print the two commands above with the values still missing marked, and stop; do not retry in
+a loop and do not fall back to executing locally on the user's behalf.
+
+After the move, verify it took (the daemon's next snapshot, or `pr_facts_board` once more
+when the snapshot has not refreshed), print the lane and the daemon's expected pickup, and
+stop — the plan now belongs to the daemon. Never also execute steps locally after a handoff;
+two executors on one PR is the conflict Detent's lane caps exist to prevent.
 
 ## §4 Local execution
 
@@ -109,10 +117,14 @@ repeat:
 ```
 
 The re-derivation is what makes interleaved `wait-ci` safe: every push projects CI to
-pending, the loop watches it (`gh pr checks <n> -R <host>/<slug> --watch`, repo-qualified,
-after polling the registration window — a freshly pushed head briefly reports *no checks*),
-and a red landing routes to `address-review`, which is in the approved vocabulary whenever
-the plan contained any push-projecting step.
+pending, the loop watches it with `github_watch_pr_checks <n> <expected-head-sha>` from
+`lib/github-rest.sh` — a REST poll of `check-runs` and the combined status that waits out
+the registration window (a freshly pushed head briefly reports *no checks*), requires two
+stable polls, and returns `4` when the head moved underneath it (`gh pr checks --watch` is
+GraphQL and is not used) — and a red landing (`return 1`) routes to `address-review`, which
+is in the approved vocabulary whenever the plan contained any push-projecting step. The
+helper reads `{owner}/{repo}` from the bound checkout, which §4 already requires to be the
+base repository.
 
 **Every sibling dispatch passes the full PR URL, never a bare number.** Siblings resolve
 their repository from the ambient checkout (`codex-ship` via `gh repo view`,
@@ -142,7 +154,7 @@ the orchestrator:
 | id | executed as |
 |---|---|
 | `rebase` | the §6 recipe verbatim: fetch base, rebase, push with the lease pinned to the observed head SHA; a lease rejection or a conflict stops the loop (conflicts hand to `/workflow:resolve-conflicts` with the user, never auto-resolved). When no configured remote points at the head repository — the usual case for a fork checked out via `refs/pull/*` — the step is not executable: stop with the recipe |
-| `wait-ci` | watch checks to completion, registration window first |
+| `wait-ci` | `github_watch_pr_checks <n> <head-sha>` — REST check-runs poll to completion, registration window first; exit `1` red → `address-review`, `4` head shift → re-derive |
 | `complete-gate` | run the contract gate (`gate.run`) at the head commit from the bound checkout; on green, post the evidence the contract names — workpad update, review comment, label. A red gate run routes to the fix step, not to a retry |
 | `finish-draft` | `gh pr ready <n> -R <host>/<slug>` |
 | `fix-plan` | **never blanket-authorized** — the §2 approval covers executing toward the spec, and this step rewrites the spec, which is a different decision. Show the issue's current Plan section beside Phase 4's proposed replacement (from `$RUN_DIR/plan-*.md`) and write it to the issue only on an explicit per-step yes (a second missing-intent gate, `lib/decision-gates.md`); note the edit on the issue when applied. No concrete proposed text this run, or no answer (any non-interactive continuation) → stop with the report; the orchestrator never authors a plan itself |

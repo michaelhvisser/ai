@@ -64,30 +64,42 @@ Rules:
 - ASCII-safe except `✓` and `✗`.
 - Rows 25–29 append the verdict qualifier:
   `1 → hand to Detent (Merging)  [row 25]  ready pending: local gate (pnpm lint && pnpm test && pnpm build)`.
-- Warning lines (unavailable plan model, truncated file list, advisory ruleset, `h` is an upper
-  bound, degraded screenshots) go to **stderr**, never into this block.
+- When thread resolution is unknown (`facts.md` §2c) the `Threads` line reads
+  `≤ <n> unresolved (resolution unknown) (<h> human · <c> codex · <b> other)`, and the
+  `Board` line names its source when it is not the snapshot:
+  `#<issue> <status> (graphql)` or `#<issue> unknown (board unreadable)`.
+- Warning lines (unavailable plan model, advisory ruleset, `h` is an upper bound, thread
+  resolution unknown, board from stale snapshot, capped sweeps, degraded screenshots) go to
+  **stderr**, never into this block.
 
-## §2 `--json` schema, version 3
+## §2 `--json` schema, version 4
 
 Stdout carries this object and nothing else. The same object is written to
 `$RUN_DIR/facts.json` on every run, `--json` or not; the local-execution loop re-reads its
-`plan_check` verdicts (`execute.md` §4). Version 3 removes `page` (there is no report page),
-widens `duplicates[].kind` with the supersession sweep (`shipped-pr`, `closed-issue`,
-`backlog-issue` — `facts.md` §1e), and adds `no-longer-needed` to the still-needed verdict
-vocabulary; everything else a version-2 consumer read is unchanged.
+`plan_check` verdicts (`execute.md` §4). Version 4 is the REST-first transport: it adds
+`pr.transport` (always `"rest"`), `status.threads.resolution_known` (false when the GraphQL
+resolution read did not run or was refused — `facts.md` §2c), `issues[].board.source`
+(`detent-snapshot|graphql|none`) and `issues[].board.snapshot_age_s` (null unless the
+snapshot answered), widens `issues[].source` with `detent-snapshot`, and adds two
+`warnings[]` lines — "thread resolution unknown …" and "board from stale snapshot …".
+`pr.files_truncated` is now a constant `false` (REST paginates the file list). Version 3
+removed `page`, widened `duplicates[].kind` with the supersession sweep (`shipped-pr`,
+`closed-issue`, `backlog-issue` — `facts.md` §1e), and added `no-longer-needed` to the
+still-needed verdict vocabulary; everything a version-3 consumer read is unchanged.
 
 ```json
 {
-  "schema": 3,
+  "schema": 4,
   "generated_at": "2026-08-20T12:00:00Z",
   "host": "github.com",
   "repo": "threefold-solutions/client-portals",
   "pr": {"number":161,"title":"…","url":"…","state":"OPEN","is_draft":false,"is_fork":false,
          "base":"dev","base_tip":"<sha>","head_ref":"…","head_sha":"…","merge_base":"<sha>",
          "author":"michaelhvisser","additions":727,"deletions":68,"changed_files":9,
-         "files":["…"],"files_truncated":false,"diff_lines":979},
-  "issues": [{"number":92,"title":"…","state":"OPEN","source":"sidebar","labels":["detent:mac-mini-1"],
-              "board":{"project_id":"PVT_…","status":"Human Review","priority":null,"ambiguous":false}}],
+         "files":["…"],"files_truncated":false,"diff_lines":979,"transport":"rest"},
+  "issues": [{"number":92,"title":"…","state":"OPEN","source":"body-keyword","labels":["detent:mac-mini-1"],
+              "board":{"project_id":"client-portals","status":"Human Review","priority":null,"ambiguous":false,
+                       "source":"detent-snapshot","snapshot_age_s":20}}],
   "status": {
     "ci": {"state":"green",
            "required":[{"context":"Lint, typecheck, test","integration_id":15368,"state":"pass"},
@@ -97,7 +109,7 @@ vocabulary; everything else a version-2 consumer read is unchanged.
     "review_decision":"", "approvals_given":0,
     "changes_requested_by":{"human":[],"bot":[]},
     "threads": {"total":0,"unresolved":{"human":0,"codex":0,"other_bot":0,"needs_resolve_only":0},
-                "resolved":0,"paginated_complete":true,
+                "resolved":0,"paginated_complete":true,"resolution_known":true,
                 "items":[{"path":"…","line":1,"origin":"codex-bot","last_by":"human/codex-ship",
                           "resolved":true,"age_h":12}]},
     "mergeable":"MERGEABLE","merge_state":"BEHIND","behind_by":4,"ahead_by":1,
@@ -149,10 +161,10 @@ vocabulary; everything else a version-2 consumer read is unchanged.
      "cost":"local, minutes"},
     {"pos":2,"id":"wait-ci","row":17,"projected":true,
      "command":"wait for CI on the new head","why":"the rebase resets every at-head fact",
-     "local":"gh pr checks 161 -R github.com/threefold-solutions/client-portals --watch","cost":"wall time only"},
+     "local":"source lib/github-rest.sh && github_watch_pr_checks 161 <new-head-sha>  (REST check-runs poll; gh pr checks --watch is GraphQL)","cost":"wall time only"},
     {"pos":3,"id":"antagonist-review","row":19,"projected":true,
      "command":"/workflow:antagonist-review https://github.com/threefold-solutions/client-portals/pull/161","why":"no review evidence can survive the rebase; diff 979 ≥ 150",
-     "local":"review gh pr diff 161 yourself, or run the language plugin's review-deep",
+     "local":"review the diff yourself (gh api -H 'Accept: application/vnd.github.diff' repos/threefold-solutions/client-portals/pulls/161), or run the language plugin's review-deep",
      "cost":"tokens: high · wall: 10–30 min"}],
   "ready": {"verifiable":false,
             "conjuncts":[{"id":"C1","grade":"verified","state":"true","text":"required checks pass"},
@@ -164,7 +176,8 @@ vocabulary; everything else a version-2 consumer read is unchanged.
                 "then":["/workflow:pr-details 161"],"pending":[],
                 "notes":[]},
   "facts_incomplete": false,
-  "warnings": [],
+  "warnings": ["thread resolution unknown — GraphQL refused; 1 root thread counted as open (upper bound); threads not required by the dev ruleset",
+               "board from stale snapshot (5120 s) — GraphQL refused; state Human Review is the last daemon reading"],
   "files": {"run_dir":"…/run/161-e04cd91db728-83c00c","cache_dir":"…/cache/<head_sha>",
             "diff":"diff.patch","plan_fable":"plan-fable.md"}
 }
@@ -186,6 +199,14 @@ a weaker secondary suggestion lives in `then[]` or `notes[]`.
 with the `command`, `local`, and `cost` render fields added; entries with `projected: true`
 are path, not fact (`next-step.md` §5). A version-1 consumer that only reads `next_step`
 loses nothing.
+
+The two version-4 `warnings[]` lines are fixed-prefix so a consumer can match them:
+`thread resolution unknown — …` accompanies `status.threads.resolution_known: false` and a
+non-zero thread count; `board from stale snapshot (<age> s) — …` accompanies
+`issues[].board.source: "detent-snapshot"` with `facts_incomplete: true` (the snapshot was
+stale and GraphQL could not refresh it). An issue absent from the snapshot whose GraphQL read
+also failed carries `board.source: "none"` and `board.status: "unknown"` with no warning line
+— `next_step.id` is already `facts-incomplete` and says so.
 
 ## §3 Exit codes
 
