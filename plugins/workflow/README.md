@@ -21,6 +21,7 @@ Add the marketplace, then install the plugin:
 
 | Claude Code invocation | Description |
 |------------------------|-------------|
+| `/workflow:visual-review [PR or worktree] [feedback.json]` | Build a local UI review package with inspected screenshots, change coverage, zoom, pins/rectangles, optional video timestamps, and capture-bound feedback export/import; no hosting or workflow approval |
 | `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists (checked against recently shipped and backlog work, so a superseded PR is named for closing), whether its plan is right, which review skill is still needed at this head — and the ordered execution plan to merge-readiness, approvable at the closing prompt for local execution or a Detent handoff, with a by-hand recipe per step and preview-deploy screenshots for UI changes |
 | `/workflow:antagonist-review [PR]` | Cross-model adversarial review with quorum tie-breaks: a strong finder model finds defects, the local Codex CLI attacks every one, a third model breaks ties, and a human settles only what the models genuinely cannot — then Codex fixes the confirmed set and the loop re-reviews until clean |
 | `/workflow:codex-ship [PR]` | Triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop), corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value |
@@ -31,9 +32,9 @@ Add the marketplace, then install the plugin:
 | `/workflow:remove-worktree` | Interactively select and remove a git worktree |
 | `/workflow:prune-worktree` | Batch cleanup of all completed issue and PR-review worktrees |
 
-`commit`, `create-pr`, `worktree`, `pr-details`, and `resolve-conflicts` are also
+`commit`, `create-pr`, `worktree`, `pr-details`, `visual-review`, and `resolve-conflicts` are also
 reachable in Codex as `$workflow:commit`, `$workflow:create-pr`,
-`$workflow:worktree <action>`, `$workflow:pr-details`, and
+`$workflow:worktree <action>`, `$workflow:pr-details`, `$workflow:visual-review`, and
 `$workflow:resolve-conflicts`. Codex requires the qualified plugin name; bare
 skill names are not resolver aliases.
 
