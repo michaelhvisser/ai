@@ -9,11 +9,25 @@ This document details the full context gathering procedure for deep review.
 ```bash
 # Owner and name come from the git remote; `gh repo view` would spend two
 # GraphQL calls on the shared token for the same answer.
-REPO_FULL=$(git remote get-url origin 2>/dev/null | sed -E 's#^(https?://[^/]+/|git@[^:]+:|ssh://git@[^/]+/)##; s#\.git$##')
+REMOTE_URL=$(git remote get-url origin 2>/dev/null) || {
+  echo "review-deep: origin remote is required to resolve the review repository" >&2
+  exit 1
+}
+case "$REMOTE_URL" in
+  https://github.com/*) REPO_FULL=${REMOTE_URL#https://github.com/} ;;
+  git@github.com:*) REPO_FULL=${REMOTE_URL#git@github.com:} ;;
+  ssh://git@github.com/*) REPO_FULL=${REMOTE_URL#ssh://git@github.com/} ;;
+  *) echo "review-deep: origin must be a github.com repository" >&2; exit 1 ;;
+esac
+REPO_FULL=${REPO_FULL%.git}
+if ! printf '%s\n' "$REPO_FULL" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$'; then
+  echo "review-deep: origin must identify exactly owner/repo" >&2
+  exit 1
+fi
 OWNER=${REPO_FULL%%/*}
 REPO=${REPO_FULL##*/}
 
-PR_FULL=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,closingIssuesReferences,comments,reviews --jq '.' 2>/dev/null)
+PR_FULL=$(gh pr view "$PR_NUM" --repo "github.com/$REPO_FULL" --json number,title,body,state,baseRefName,closingIssuesReferences,comments,reviews --jq '.') || exit 1
 ```
 
 Display a brief summary:

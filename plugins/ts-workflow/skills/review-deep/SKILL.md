@@ -138,15 +138,18 @@ if [ -z "$PR_JSON" ]; then
   CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
   # Prefer an open PR whose head is this branch, then any open PR that
   # contains the commit, then any PR (closed/merged) that contains it.
-  PR_NUM=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/pulls?per_page=100" 2>/dev/null \
-    | jq -r --arg branch "$CURRENT_BRANCH" '
+  PR_PAGES=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/pulls?per_page=100") || {
+    echo "review-deep: failed to resolve PRs for HEAD; stop instead of assuming a branch-only review" >&2
+    exit 1
+  }
+  PR_NUM=$(printf '%s\n' "$PR_PAGES" | jq -r --arg branch "$CURRENT_BRANCH" '
         [.[][]] as $all
         | ( [$all[] | select(.state == "open" and .head.ref == $branch)]
           + [$all[] | select(.state == "open")]
           + $all )
-        | map(.number) | first // empty')
+        | map(.number) | first // empty') || exit 1
   if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
-    PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences 2>/dev/null)
+    PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences) || exit 1
   fi
 fi
 ```
