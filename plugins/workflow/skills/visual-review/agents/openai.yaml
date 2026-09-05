@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual Review"
+  short_description: "Capture UI changes and exchange annotated feedback"
+  default_prompt: "Use $visual-review to prepare a local visual review package for this UI PR."
