@@ -18,7 +18,11 @@ cat > "$TEST_DIR/bin/claude" <<'MOCK'
 set -eu
 cli=$(basename "$0")
 printf '%s %s\n' "$cli" "$*" >> "$INSTALL_TEST_LOG"
-if [[ "$*" == 'plugin add --help' ]]; then exit 0; fi
+if [[ "$*" == 'plugin add --help' ]]; then
+    [[ "$INSTALL_TEST_STATE" != old-codex ]] || exit 2
+    exit 0
+fi
+if [[ "$INSTALL_TEST_STATE" == list-fail && "$*" == 'plugin list --json' ]]; then exit 18; fi
 if [[ "$*" == 'plugin marketplace list --json' ]]; then
     if [[ "$INSTALL_TEST_STATE" == existing ]]; then
         if [[ "$cli" == codex ]]; then echo '{"marketplaces":[{"name":"michaelhvisser-ai"}]}'
@@ -30,12 +34,16 @@ elif [[ "$*" == 'plugin list --json' ]]; then
         if [[ "$cli" == codex ]]; then
             echo '{"installed":[{"pluginId":"workflow@michaelhvisser-ai","enabled":false},{"pluginId":"ts-workflow@michaelhvisser-ai"}]}'
         else
-            echo '[{"id":"workflow@michaelhvisser-ai","scope":"user"},{"id":"ts-workflow@michaelhvisser-ai","scope":"user"},{"id":"slack-triage@michaelhvisser-ai","scope":"user"}]'
+            echo '[{"id":"workflow@michaelhvisser-ai","scope":"user","enabled":false},{"id":"ts-workflow@michaelhvisser-ai","scope":"user"},{"id":"slack-triage@michaelhvisser-ai","scope":"user"}]'
         fi
     elif [[ "$cli" == codex ]]; then echo '{"installed":[]}'
     else echo '[]'; fi
 elif [[ "$INSTALL_TEST_STATE" == fail && "$1 $2 $3" == 'plugin marketplace add' ]]; then
     exit 17
+elif [[ "$INSTALL_TEST_STATE" == plugin-fail && "$2 $3" == 'install workflow@michaelhvisser-ai' ]]; then
+    exit 19
+elif [[ "$INSTALL_TEST_STATE" == plugin-fail && "$2 $3" == 'add workflow@michaelhvisser-ai' ]]; then
+    exit 19
 fi
 MOCK
 cp "$TEST_DIR/bin/claude" "$TEST_DIR/bin/codex"
@@ -76,6 +84,19 @@ if grep -E 'plugin (install|add [^-])' "$INSTALL_TEST_LOG"; then exit 1; fi
 : > "$INSTALL_TEST_LOG"
 if INSTALL_TEST_STATE=fetch-fail run_installer --with-gopher-ai; then echo 'Ignored fetch failure'; exit 1; fi
 assert_no_mutations
+: > "$INSTALL_TEST_LOG"
+if INSTALL_TEST_STATE=old-codex run_installer --platform both; then echo 'Accepted unsupported Codex'; exit 1; fi
+assert_no_mutations
+for PLATFORM in claude codex; do
+    : > "$INSTALL_TEST_LOG"
+    if INSTALL_TEST_STATE=list-fail run_installer --platform "$PLATFORM"; then echo 'Ignored list failure'; exit 1; fi
+    assert_no_mutations
+    : > "$INSTALL_TEST_LOG"
+    if INSTALL_TEST_STATE=plugin-fail run_installer --platform "$PLATFORM"; then echo 'Ignored plugin failure'; exit 1; fi
+    if grep -E 'plugin (install|add) (ts-workflow|slack-triage)@' "$INSTALL_TEST_LOG"; then
+        echo 'Continued after failed plugin installation'; exit 1
+    fi
+done
 : > "$INSTALL_TEST_LOG"
 run_installer --platform codex
 if grep '^claude ' "$INSTALL_TEST_LOG"; then exit 1; fi
