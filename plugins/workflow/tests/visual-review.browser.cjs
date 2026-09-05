@@ -1,0 +1,74 @@
+// Optional real-browser suite. Pass the installed Playwright module path as argv[2].
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const os=require('node:os');
+const {pathToFileURL}=require('node:url');
+const {chromium}=require(process.argv[2]||'playwright');
+const {build,serve}=require('../skills/visual-review/scripts/review.cjs');
+test('local viewer: actual browser pin/rectangle, draft recovery, feedback round trip, rework, mobile and file URL',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'visual-review-browser-'));
+  const browser=await chromium.launch({channel:'chrome',headless:true});
+  const servers=[];
+  t.after(async()=>{await browser.close();await Promise.all(servers.map(s=>new Promise(r=>s.close(r))));fs.rmSync(root,{recursive:true,force:true});});
+  const source=path.join(root,'source');fs.mkdirSync(path.join(source,'media'),{recursive:true});
+  const page=await browser.newPage({viewport:{width:1300,height:900}});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.setContent('<html><body style="margin:0;background:#f4f4f4"><button style="margin:20px">Save changes</button></body></html>');
+  await page.screenshot({path:path.join(source,'media/after.png')});
+  const m={schema_version:1,capture_id:'round-1',title:'<script>window.injected=true</script>',repository:'test/review',pr:1,head_sha:'a'.repeat(40),base_sha:'b'.repeat(40),captured_at:new Date().toISOString(),summary:'Browser fixture',coverage_notes:'Fixture only',changed_files:['button.html','layout.css'],assets:[{id:'after',kind:'after',path:'media/after.png',label:'Save button',observed:'Fixture button',inspected:true,width:1300,height:900,source:{commit:'a'.repeat(40),url:'http://localhost/',provenance:'browser test fixture',state:'default',role:'fixture',theme:'light',conditions:'fixed content',viewport:{width:1300,height:900}}}],changes:[{id:'button',title:'Save label',description:'Fixture text change',files:['button.html'],status:'captured',asset_ids:['after']},{id:'layout',title:'Button layout',description:'Fixture layout change sharing evidence',files:['layout.css'],status:'captured',asset_ids:['after']}]};
+  fs.copyFileSync(path.join(source,'media/after.png'),path.join(source,'media/detail.png'));
+  m.assets.push({...m.assets[0],id:'detail',kind:'detail',path:'media/detail.png',label:'Button detail'});m.changes[0].asset_ids.push('detail');
+  const input=path.join(source,'manifest.json');fs.writeFileSync(input,JSON.stringify(m));
+  const report=path.join(root,'report');build(input,report);
+  const server=serve(report);servers.push(server);await new Promise(r=>server.once('listening',r));const url=`http://127.0.0.1:${server.address().port}`;
+  await page.goto(url);await page.locator('.evidence-card').first().waitFor();
+  const headerSizes=await page.locator('.header-actions > *').evaluateAll(nodes=>nodes.map(n=>({height:n.getBoundingClientRect().height,width:n.getBoundingClientRect().width})));assert.equal(headerSizes[0].height,headerSizes[1].height);assert.equal(headerSizes[0].width,headerSizes[1].width);
+  assert.equal(await page.locator('#title').textContent(),m.title);assert.equal(await page.evaluate(()=>window.injected),undefined);
+  await page.locator('#author').fill('Test reviewer');
+  await page.locator('.evidence-card').first().click();assert.equal(await page.locator('#lightbox').evaluate(n=>n.open),true);
+  assert.equal(await page.locator('.markup-toolbar button').evaluateAll(nodes=>new Set(nodes.map(n=>n.getBoundingClientRect().height)).size),1);
+  await page.locator('#zoom').click();assert.equal(await page.locator('#zoom').textContent(),'Fit image');await page.locator('#zoom').click();
+  await page.locator('#stage img').click({position:{x:30,y:20}});await page.locator('#comment').fill('Increase spacing');await page.locator('button[type=submit]').click();
+  assert.equal(await page.locator('.mark.pin').count(),1);
+  await page.locator('#close-zoom').click();await page.locator('#changes button').nth(1).click();await page.locator('.evidence-card').first().click();assert.equal(await page.locator('.mark').count(),0);assert.equal(await page.locator('#annotations li').count(),0);await page.locator('#close-zoom').click();await page.locator('#changes button').first().click();await page.locator('.evidence-card').first().click();assert.equal(await page.locator('.mark.pin').count(),1);
+  for(const id of ['asset','kind','x','y','width','height'])assert.equal(await page.locator('#'+id).isVisible(),false);
+  await page.locator('[data-markup-tool=rectangle]').click();
+  const region=await page.locator('#stage img').boundingBox();await page.mouse.move(region.x+region.width*.1,region.y+region.height*.1);await page.mouse.down();await page.mouse.move(region.x+region.width*.3,region.y+region.height*.4);await page.mouse.up();
+  await page.locator('#comment').fill('Align this region');await page.locator('button[type=submit]').click();assert.equal(await page.locator('.mark.rectangle').count(),1);
+  for(const kind of ['ellipse','arrow','pen','text']){
+    await page.locator(`[data-markup-tool=${kind}]`).click();
+    const cursor=await page.locator('#stage').evaluate(n=>getComputedStyle(n).cursor);if(kind==='text')assert.equal(cursor,'text');else assert.match(cursor,/data:image\/svg\+xml/);
+    const box=await page.locator('#stage img').boundingBox();
+    await page.mouse.move(box.x+box.width*.2,box.y+box.height*.2);await page.mouse.down();await page.mouse.move(box.x+box.width*.4,box.y+box.height*.4,{steps:8});await page.mouse.up();
+    if(kind==='text'){assert.equal(await page.locator('.selected-pin').count(),0);assert.equal(await page.locator('.drawing text').textContent(),'Type your text…');}
+    await page.locator('#comment').fill(`Review ${kind}`);
+    if(kind==='text')assert.equal(await page.locator('.drawing text').textContent(),'Review text');
+    await page.locator('button[type=submit]').click();assert.match(await page.locator('#modal-notice').textContent(),/Annotation added/);
+  }
+  assert.equal(await page.locator('#annotations li').count(),6);
+  assert.equal(await page.locator('.drawing').count(),3);
+  await page.locator('#undo').click();assert.equal(await page.locator('#annotations li').count(),5);
+  await page.locator('#redo').click();assert.equal(await page.locator('#annotations li').count(),6);
+  await page.locator('#modal-approval input').check();await page.locator('#close-zoom').click();assert.equal(await page.locator('.evidence-item').first().locator('input').isChecked(),true);
+  await page.locator('.evidence-card').nth(1).click();assert.equal(await page.locator('#modal-title').textContent(),'Button detail');assert.equal(await page.locator('#annotations li').count(),0);
+  assert.equal(await page.locator('#recommendation option[value="recommend-approval"]').evaluate(n=>n.disabled),true);await page.locator('#modal-approval input').check();assert.equal(await page.locator('#recommendation option[value="recommend-approval"]').evaluate(n=>n.disabled),false);
+  await page.locator('#close-zoom').click();await page.locator('.evidence-card').first().click();assert.equal(await page.locator('#annotations li').count(),6);
+  await page.locator('#comment').fill('Unsent draft');await page.reload();await page.locator('.evidence-card').first().click();assert.equal(await page.locator('#comment').inputValue(),'Unsent draft');
+  await page.locator('#close-zoom').click();await page.locator('#export').click();assert.match(await page.locator('#notice').textContent(),/unsent/);
+  await page.locator('.evidence-card').first().click();await page.locator('#comment').fill('');await page.locator('#close-zoom').click();
+  await page.locator('#recommendation').selectOption('request-changes');
+  const download=page.waitForEvent('download');await page.locator('#export').click();const file=path.join(root,'feedback.json');await(await download).saveAs(file);
+  const feedback=JSON.parse(fs.readFileSync(file));assert.equal(feedback.annotations.length,6);assert.equal(feedback.annotations[0].author,'Test reviewer');assert.equal(feedback.asset_approvals.length,2);assert.equal(feedback.asset_approvals[0].author,'Test reviewer');
+  await page.locator('#import').setInputFiles(file);await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('imported'));assert.equal(await page.locator('#annotations li').count(),6);
+  const wrong={...feedback,capture_id:'wrong'};const wrongFile=path.join(root,'wrong.json');fs.writeFileSync(wrongFile,JSON.stringify(wrong));await page.locator('#import').setInputFiles(wrongFile);await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('does not belong'));assert.equal(await page.locator('#annotations li').count(),6);
+  for(const width of [1440,1280,1024,768,390]){await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,`No page overflow at ${width}px`);}
+  await page.goto(pathToFileURL(path.join(report,'index.html')).href);await page.locator('.evidence-card').first().click();await page.locator('#stage img').waitFor();await page.locator('#close-zoom').click();assert.equal(await page.locator('#change-title').textContent(),'Save label');
+  m.capture_id='round-2';fs.writeFileSync(input,JSON.stringify(m));
+  const responses={schema_version:1,capture_id:m.capture_id,feedback_capture_id:'round-1',items:feedback.annotations.map(a=>({annotation_id:a.id,status:'addressed',explanation:'Automated test response; application fixture unchanged',asset_ids:['after']}))};
+  const responseFile=path.join(root,'responses.json');fs.writeFileSync(responseFile,JSON.stringify(responses));const report2=path.join(root,'report2');build(input,report2,path.join(report,'manifest.json'),file,responseFile);
+  await page.goto(pathToFileURL(path.join(report2,'index.html')).href);await page.getByRole('heading',{name:'Previous round'}).waitFor();assert.equal(await page.getByText('Increase spacing',{exact:true}).count(),1);
+  await page.locator('#import').setInputFiles(file);await page.waitForFunction(()=>document.querySelector('#notice').textContent.includes('does not belong'));
+  assert.deepEqual(errors,[]);
+});
