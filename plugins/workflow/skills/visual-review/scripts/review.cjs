@@ -85,15 +85,34 @@ function serve(root, port=0) {
   server.listen(Number(port),'127.0.0.1',()=>console.log(`Visual review: http://127.0.0.1:${server.address().port}`));
   return server;
 }
+const UI_EXTENSIONS = new Set(['tsx','jsx','vue','svelte','astro','html','htm','css','scss','sass','less','styl','templ','tmpl','gohtml','hbs','mustache','ejs','pug','erb','haml','twig','mjml','mdx','svg','png','jpg','jpeg','gif','webp','ico','woff','woff2','ttf','otf','swift','kt','dart','xaml','storyboard','xib']);
+const UI_SEGMENTS = new Set(['frontend','web','ui','client','components','pages','views','templates','layouts','public','static','styles','emails','email','i18n','locales','messages','mobile','ios','android','storybook','stories']);
+// Classify changed paths: a file renders a user-facing surface when its extension or
+// any directory segment is a UI marker. Backend, SQL, migrations, docs, config and
+// tests are "other". Data-only backend changes are deliberately "other" here.
+function uiScan(listFile) {
+  const files = fs.readFileSync(listFile, 'utf8').split(/\r?\n/).map(f => f.trim()).filter(Boolean);
+  const ui = [], other = [];
+  for (const f of files) {
+    const lower = f.toLowerCase(), base = lower.slice(lower.lastIndexOf('/') + 1);
+    const segments = lower.split('/').slice(0, -1);
+    const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
+    const story = /\.stories\.[jt]sx?$/.test(base);
+    const isUI = UI_EXTENSIONS.has(ext) || story || base.endsWith('.blade.php') || segments.some(seg => UI_SEGMENTS.has(seg));
+    (isUI ? ui : other).push(f);
+  }
+  return { verdict: ui.length ? 'ui-changes' : 'no-ui-changes', changed: files.length, ui, other };
+}
 if(require.main===module){
   try {
     const [cmd,...args]=process.argv.slice(2);
-    if(cmd==='build'&&[2,5].includes(args.length)) console.log(JSON.stringify(build(...args),null,2));
+    if(cmd==='ui-scan'&&args.length===1) console.log(JSON.stringify(uiScan(args[0]),null,2));
+    else if(cmd==='build'&&[2,5].includes(args.length)) console.log(JSON.stringify(build(...args),null,2));
     else if(cmd==='validate'&&args.length===1) {const m=load(args[0]);console.log(`Valid capture ${m.capture_id}: ${m.changes.length} changes, ${m.assets.length} assets`);}
     else if(cmd==='feedback'&&args.length===2) console.log(JSON.stringify(schema.feedback(json(args[1]),load(args[0])),null,2));
     else if(cmd==='serve'&&args.length>=1&&args.length<=2) serve(...args);
-    else if(cmd==='--help') console.log('review.cjs build <manifest.json> <new-output-dir> [<original-manifest.json> <feedback.json> <responses.json>]\nreview.cjs validate <manifest.json>\nreview.cjs feedback <original-manifest.json> <feedback.json>\nreview.cjs serve <package-dir> [port=0]');
+    else if(cmd==='--help') console.log('review.cjs ui-scan <changed-files.txt>\nreview.cjs build <manifest.json> <new-output-dir> [<original-manifest.json> <feedback.json> <responses.json>]\nreview.cjs validate <manifest.json>\nreview.cjs feedback <original-manifest.json> <feedback.json>\nreview.cjs serve <package-dir> [port=0]');
     else throw Error('Invalid arguments; use --help');
   }catch(e){console.error(e.message);process.exitCode=1;}
 }
-module.exports={build,load,serve,verifyMedia,safeFile};
+module.exports={build,load,serve,verifyMedia,safeFile,uiScan};

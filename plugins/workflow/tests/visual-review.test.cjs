@@ -4,7 +4,7 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const {spawnSync}=require('node:child_process');
-const {build,load,serve}=require('../skills/visual-review/scripts/review.cjs');
+const {build,load,serve,uiScan}=require('../skills/visual-review/scripts/review.cjs');
 const schema=require('../skills/visual-review/assets/schema.js');
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'visual-review-test-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
@@ -36,16 +36,37 @@ test('every addressed response asset must be inspected current-result evidence',
 test('documented build, feedback and rework recipes execute under bash and zsh',t=>{
   const skillRoot=path.resolve(__dirname,'../skills/visual-review');
   const blocks=[...fs.readFileSync(path.join(skillRoot,'SKILL.md'),'utf8').matchAll(/```bash\n([\s\S]*?)\n```/g)].map(m=>m[1]);
+  const block=marker=>{const found=blocks.filter(b=>b.includes(marker));assert.equal(found.length,1,`expected exactly one recipe block containing ${marker}`);return found[0];};
+  const buildBlock=block('review.cjs" validate'),feedbackBlock=block('review.cjs" feedback'),reworkBlock=block('"$VISUAL_REVIEW_RESPONSES"');
   for(const shell of ['bash','zsh']){
     const x=fixture(t),out=path.join(x.root,'original'),env={...process.env,VISUAL_REVIEW_ROOT:skillRoot,VISUAL_REVIEW_MANIFEST:x.input,VISUAL_REVIEW_OUTPUT:out};
     const run=block=>{const r=spawnSync(shell,['-c',block],{env,encoding:'utf8',timeout:30000});assert.equal(r.status,0,r.stderr||r.error?.message);};
-    run(blocks[0]);env.VISUAL_REVIEW_ORIGINAL_MANIFEST=path.join(out,'manifest.json');
-    env.VISUAL_REVIEW_FEEDBACK=path.join(x.root,'feedback.json');const f=feedback(x.m);fs.writeFileSync(env.VISUAL_REVIEW_FEEDBACK,JSON.stringify(f));run(blocks[2]);
+    run(buildBlock);env.VISUAL_REVIEW_ORIGINAL_MANIFEST=path.join(out,'manifest.json');
+    env.VISUAL_REVIEW_FEEDBACK=path.join(x.root,'feedback.json');const f=feedback(x.m);fs.writeFileSync(env.VISUAL_REVIEW_FEEDBACK,JSON.stringify(f));run(feedbackBlock);
     x.m.capture_id='round-2';x.write();env.VISUAL_REVIEW_OUTPUT=path.join(x.root,'rework');env.VISUAL_REVIEW_RESPONSES=path.join(x.root,'responses.json');
-    fs.writeFileSync(env.VISUAL_REVIEW_RESPONSES,JSON.stringify({schema_version:1,capture_id:'round-2',feedback_capture_id:f.capture_id,items:[{annotation_id:'a-1',status:'addressed',explanation:'Test evidence',asset_ids:['after']}]}));run(blocks[3]);
+    fs.writeFileSync(env.VISUAL_REVIEW_RESPONSES,JSON.stringify({schema_version:1,capture_id:'round-2',feedback_capture_id:f.capture_id,items:[{annotation_id:'a-1',status:'addressed',explanation:'Test evidence',asset_ids:['after']}]}));run(reworkBlock);
   }
 });
 test('media cannot escape source through paths or symlinks',t=>{const f=fixture(t);f.m.assets[0].path='media/../../secret.png';assert.throws(()=>schema.manifest(f.m),/safe relative/);f.m.assets[0].path='media/link.png';fs.symlinkSync(__filename,path.join(f.root,'media/link.png'));f.write();assert.throws(()=>load(f.input),/escapes/);});
 test('head provenance, media magic and dimensions are verified',t=>{const f=fixture(t);f.m.assets[0].source.commit=f.m.base_sha;assert.throws(()=>schema.manifest(f.m),/match head/);f.m.assets[0].source.commit=f.m.head_sha;f.m.assets[0].width=2;f.write();assert.throws(()=>load(f.input),/dimensions/);f.m.assets[0].width=1;f.write();fs.writeFileSync(path.join(f.root,'media/after.png'),'<script>bad()</script>');assert.throws(()=>load(f.input),/signature/);});
 test('uppercase media extensions validate and serve with the matching content type',async t=>{const f=fixture(t);fs.renameSync(path.join(f.root,'media/after.png'),path.join(f.root,'media/after.PNG'));f.m.assets[0].path='media/after.PNG';f.write();const out=path.join(f.root,'report');build(f.input,out);const server=serve(out);await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));const response=await fetch(`http://127.0.0.1:${server.address().port}/media/after.PNG`);assert.equal(response.status,200);assert.equal(response.headers.get('content-type'),'image/png');});
 test('server binds loopback, serves media ranges, excludes unrelated files and writes',async t=>{const f=fixture(t),out=path.join(f.root,'report');build(f.input,out);fs.writeFileSync(path.join(out,'secret.txt'),'secret');const server=serve(out);await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));const base=`http://127.0.0.1:${server.address().port}`;assert.equal((await fetch(base)).status,200);assert.equal((await fetch(base+'/secret.txt')).status,404);assert.equal((await fetch(base,{method:'POST'})).status,405);const r=await fetch(base+'/media/after.png',{headers:{Range:'bytes=0-7'}});assert.equal(r.status,206);assert.equal((await r.arrayBuffer()).byteLength,8);});
+test('ui-scan flags rendered surfaces by extension or directory and calls a backend-only list no-ui-changes',t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'visual-review-scan-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const list=path.join(root,'files.txt');
+  fs.writeFileSync(list,['apps/api/domain/peoplefilter/behavioral.go','apps/api/domain/storage/migrations/20260903065239_add.sql','apps/api/domain/storage/generated/models.go','docs/architecture/DESIGN.md','apps/api/x_test.go','',''].join('\n'));
+  const backend=uiScan(list);assert.equal(backend.verdict,'no-ui-changes');assert.equal(backend.changed,5);assert.deepEqual(backend.ui,[]);
+  fs.writeFileSync(list,['apps/frontend/src/lib/format.ts','apps/api/internal/email/templates/digest.html','packages/design/tokens.css','apps/mobile/lib/screens/home.dart','src/Button.stories.tsx','resources/views/welcome.blade.php','apps/api/x.go'].join('\n'));
+  const mixed=uiScan(list);assert.equal(mixed.verdict,'ui-changes');assert.deepEqual(mixed.other,['apps/api/x.go']);assert.equal(mixed.ui.length,6);
+});
+test('documented ui-scan gate recipe executes under bash and zsh and prints the verdict',t=>{
+  const skillRoot=path.resolve(__dirname,'../skills/visual-review');
+  const blocks=[...fs.readFileSync(path.join(skillRoot,'SKILL.md'),'utf8').matchAll(/```bash\n([\s\S]*?)\n```/g)].map(m=>m[1]).filter(b=>b.includes('ui-scan'));
+  assert.equal(blocks.length,1);
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'visual-review-gate-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const list=path.join(root,'files.txt');fs.writeFileSync(list,'apps/api/main.go\n');
+  for(const shell of ['bash','zsh']){
+    const r=spawnSync(shell,['-c',blocks[0]],{env:{...process.env,VISUAL_REVIEW_ROOT:skillRoot,VISUAL_REVIEW_CHANGED_FILES:list},encoding:'utf8',timeout:30000});
+    assert.equal(r.status,0,r.stderr||r.error?.message);assert.equal(JSON.parse(r.stdout).verdict,'no-ui-changes');
+  }
+});
