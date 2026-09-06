@@ -85,10 +85,12 @@ function serve(root, port=0) {
   server.listen(Number(port),'127.0.0.1',()=>console.log(`Visual review: http://127.0.0.1:${server.address().port}`));
   return server;
 }
-const UI_EXTENSIONS = new Set(['tsx','jsx','vue','svelte','astro','html','htm','css','scss','sass','less','styl','templ','tmpl','gohtml','hbs','mustache','ejs','pug','erb','haml','twig','mjml','mdx','svg','png','jpg','jpeg','gif','webp','ico','woff','woff2','ttf','otf','swift','kt','dart','xaml','storyboard','xib']);
-const UI_SEGMENTS = new Set(['frontend','web','ui','client','components','pages','views','templates','layouts','public','static','styles','emails','email','i18n','locales','messages','mobile','ios','android','storybook','stories']);
+const UI_EXTENSIONS = new Set(['tsx','jsx','vue','svelte','astro','html','htm','css','scss','sass','less','styl','templ','tmpl','gohtml','hbs','mustache','ejs','pug','erb','haml','twig','mjml','mdx','svg','png','jpg','jpeg','gif','webp','ico','woff','woff2','ttf','otf','xaml','storyboard','xib']);
+const UI_SEGMENTS = new Set(['frontend','web','ui','client','components','pages','views','templates','layouts','public','static','styles','emails','email','i18n','locales','messages','mobile','ios','android','screens','widgets','scenes','storybook','stories']);
 // Classify changed paths: a file renders a user-facing surface when its extension or
-// any directory segment is a UI marker. Backend, SQL, migrations, docs, config and
+// any directory segment is a UI marker. Whole-language extensions (kt, swift, dart)
+// are deliberately absent: a JVM or Vapor service is not UI, so those files count only
+// through a mobile/UI directory segment. Backend, SQL, migrations, docs, config and
 // tests are "other". Data-only backend changes are deliberately "other" here.
 function uiScan(listFile) {
   const files = fs.readFileSync(listFile, 'utf8').split(/\r?\n/).map(f => f.trim()).filter(Boolean);

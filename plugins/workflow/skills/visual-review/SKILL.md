@@ -17,7 +17,7 @@ Resolve the PR and its complete changed-file list first. Write the paths one per
 node "$VISUAL_REVIEW_ROOT/scripts/review.cjs" ui-scan "$VISUAL_REVIEW_CHANGED_FILES"
 ```
 
-The scan marks a file `ui` when its extension or a directory segment names a rendered surface (component, template, stylesheet, image, font, email, mobile screen, locale copy); everything else is `other`. Override an `other` file to `ui` only by naming the rendered surface it changes, for example a public docs-site page. Never override the other way: a backend change that alters which data an existing screen shows (a filter query, a score, a projection) is not a UI change for this skill and does not earn a capture.
+The scan marks a file `ui` when its extension or a directory segment names a rendered surface (component, template, stylesheet, image, font, email, locale copy, or a mobile screen directory; a Kotlin, Swift or Dart file outside such a directory is a service, not UI); everything else is `other`. Override an `other` file to `ui` only by naming the rendered surface it changes, for example a public docs-site page. Never override the other way: a backend change that alters which data an existing screen shows (a filter query, a score, a projection) is not a UI change for this skill and does not earn a capture.
 
 When the verdict is `no-ui-changes`, stop here. Build nothing, capture nothing, ask nothing. Reply with one line in this shape and end the turn:
 
