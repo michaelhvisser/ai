@@ -17,7 +17,7 @@ Resolve the PR and its complete changed-file list first. Write the paths one per
 node "$VISUAL_REVIEW_ROOT/scripts/review.cjs" ui-scan "$VISUAL_REVIEW_CHANGED_FILES"
 ```
 
-The scan marks a file `ui` when its extension or a directory segment names a rendered surface (component, template, stylesheet, image, font, email, locale copy, or a mobile screen directory; a Kotlin, Swift or Dart file outside such a directory is a service, not UI); everything else is `other`. Override an `other` file to `ui` only by naming the rendered surface it changes, for example a public docs-site page. Never override the other way: a backend change that alters which data an existing screen shows (a filter query, a score, a projection) is not a UI change for this skill and does not earn a capture.
+The scan marks a file `ui` when its extension or a directory segment names a rendered surface (component, template, stylesheet, image, font, email, locale copy, or a mobile screen directory; a Kotlin, Swift or Dart file outside such a directory is a service, not UI); test and fixture paths and everything else are `other`. The scan is a default, not a verdict: reclassify a file in either direction only with a one-line reason you will print. Promote `other` to `ui` by naming the rendered surface it changes, for example a public docs-site page. Demote `ui` to `other` only for a file that renders nothing, for example a backend package whose directory name merely matches (`internal/views/store.go`), a protocol or generated-client file, or a parser fixture. A backend change that alters which data an existing screen shows (a filter query, a score, a projection) is never promoted: it is not a UI change for this skill and does not earn a capture. The verdict is `no-ui-changes` when no `ui` file remains after reclassification.
 
 When the verdict is `no-ui-changes`, stop here. Build nothing, capture nothing, ask nothing. Reply with one line in this shape and end the turn:
 
@@ -25,7 +25,7 @@ When the verdict is `no-ui-changes`, stop here. Build nothing, capture nothing, 
 No UI changes in <owner/repo>#<pr> at <sha7>: <n> changed files, all <areas>; visual review not needed.
 ```
 
-Add at most one more sentence when the diff changes data an existing screen shows, naming the surface so the reader can route it to a data or code review instead.
+Append the reclassification reasons, if any, in one sentence. Add at most one more sentence when the diff changes data an existing screen shows, naming the surface so the reader can route it to a data or code review instead.
 
 Completion: the verdict is stated. `ui-changes` continues to step 1; `no-ui-changes` ends the skill with the one-line reply.
 

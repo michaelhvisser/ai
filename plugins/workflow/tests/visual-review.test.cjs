@@ -54,8 +54,8 @@ test('server binds loopback, serves media ranges, excludes unrelated files and w
 test('ui-scan flags rendered surfaces by extension or directory and calls a backend-only list no-ui-changes',t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'visual-review-scan-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const list=path.join(root,'files.txt');
-  fs.writeFileSync(list,['apps/api/domain/peoplefilter/behavioral.go','apps/api/domain/storage/migrations/20260903065239_add.sql','apps/api/domain/storage/generated/models.go','docs/architecture/DESIGN.md','apps/api/x_test.go','services/payments/src/main/kotlin/PaymentService.kt','server/Sources/App/Controllers/UserController.swift','backend/bin/server.dart','',''].join('\n'));
-  const backend=uiScan(list);assert.equal(backend.verdict,'no-ui-changes');assert.equal(backend.changed,8);assert.deepEqual(backend.ui,[]);
+  fs.writeFileSync(list,['apps/api/domain/peoplefilter/behavioral.go','apps/api/domain/storage/migrations/20260903065239_add.sql','apps/api/domain/storage/generated/models.go','docs/architecture/DESIGN.md','apps/api/x_test.go','services/payments/src/main/kotlin/PaymentService.kt','server/Sources/App/Controllers/UserController.swift','backend/bin/server.dart','internal/client/github.go','server/messages/events.proto','tests/fixtures/sample.css','apps/frontend/src/Button.test.tsx','apps/frontend/src/__snapshots__/Button.tsx.snap','parser/testdata/page.html','',''].join('\n'));
+  const backend=uiScan(list);assert.equal(backend.verdict,'no-ui-changes');assert.equal(backend.changed,14);assert.deepEqual(backend.ui,[]);
   fs.writeFileSync(list,['apps/frontend/src/lib/format.ts','apps/api/internal/email/templates/digest.html','packages/design/tokens.css','apps/mobile/lib/screens/home.dart','android/app/src/main/java/com/x/MainActivity.kt','ios/App/Scenes/Home.swift','App/Main.storyboard','src/Button.stories.tsx','resources/views/welcome.blade.php','apps/api/x.go'].join('\n'));
   const mixed=uiScan(list);assert.equal(mixed.verdict,'ui-changes');assert.deepEqual(mixed.other,['apps/api/x.go']);assert.equal(mixed.ui.length,9);
 });

@@ -86,9 +86,14 @@ function serve(root, port=0) {
   return server;
 }
 const UI_EXTENSIONS = new Set(['tsx','jsx','vue','svelte','astro','html','htm','css','scss','sass','less','styl','templ','tmpl','gohtml','hbs','mustache','ejs','pug','erb','haml','twig','mjml','mdx','svg','png','jpg','jpeg','gif','webp','ico','woff','woff2','ttf','otf','xaml','storyboard','xib']);
-const UI_SEGMENTS = new Set(['frontend','web','ui','client','components','pages','views','templates','layouts','public','static','styles','emails','email','i18n','locales','messages','mobile','ios','android','screens','widgets','scenes','storybook','stories']);
+const UI_SEGMENTS = new Set(['frontend','web','ui','components','pages','views','templates','layouts','public','static','styles','emails','email','i18n','locales','mobile','ios','android','screens','widgets','scenes','storybook','stories']);
+// Test and fixture context never renders: a CSS parser fixture or a component test is
+// not a user-facing surface even when its extension or directory says UI.
+const TEST_SEGMENTS = new Set(['test','tests','testdata','fixtures','fixture','__tests__','__snapshots__','spec','specs','mocks','__mocks__']);
+const TEST_FILE = /(^|[._-])(test|tests|spec)\.[a-z0-9]+$|_test\.[a-z0-9]+$/;
 // Classify changed paths: a file renders a user-facing surface when its extension or
-// any directory segment is a UI marker. Whole-language extensions (kt, swift, dart)
+// any directory segment is a UI marker, outside test/fixture context. Generic segments
+// such as client or messages are deliberately absent. Whole-language extensions (kt, swift, dart)
 // are deliberately absent: a JVM or Vapor service is not UI, so those files count only
 // through a mobile/UI directory segment. Backend, SQL, migrations, docs, config and
 // tests are "other". Data-only backend changes are deliberately "other" here.
@@ -100,7 +105,8 @@ function uiScan(listFile) {
     const segments = lower.split('/').slice(0, -1);
     const ext = base.includes('.') ? base.slice(base.lastIndexOf('.') + 1) : '';
     const story = /\.stories\.[jt]sx?$/.test(base);
-    const isUI = UI_EXTENSIONS.has(ext) || story || base.endsWith('.blade.php') || segments.some(seg => UI_SEGMENTS.has(seg));
+    const testContext = segments.some(seg => TEST_SEGMENTS.has(seg)) || TEST_FILE.test(base);
+    const isUI = !testContext && (UI_EXTENSIONS.has(ext) || story || base.endsWith('.blade.php') || segments.some(seg => UI_SEGMENTS.has(seg)));
     (isUI ? ui : other).push(f);
   }
   return { verdict: ui.length ? 'ui-changes' : 'no-ui-changes', changed: files.length, ui, other };
