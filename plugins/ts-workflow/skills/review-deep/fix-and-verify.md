@@ -29,7 +29,7 @@ Evaluate the finding:
 Auto-skip (record skip reason) when:
 - **Priority 3 AND confidence < 0.5**: Nit-level noise, not worth fixing
 - **Finding is invalid**: The code is correct as written; the review was wrong
-- **Finding is pre-existing**: Not introduced by this diff (should have been caught in review, but double-check)
+- **Finding is pre-existing**: Not introduced by this diff (should have been caught in review)
 - **Finding is intentional**: Documented exception or justified trade-off
 
 For skipped findings, record: finding number, title, skip reason.
@@ -58,19 +58,19 @@ A fix is **not testable** if it's purely cosmetic:
 
 ---
 
-## Parallel Fix Dispatch
+## Same-Context Fix Processing
 
-When there are **3 or more findings targeting different files**, use parallel dispatch for faster resolution:
-
-### 1. Group Findings by File
-
-Findings in the same file must be handled by one subagent (sequential within file).
-
-### 2. Group by Shared Test Files
+Address all findings in the current context, in priority order, regardless of
+finding count or how many files they touch. Do not delegate fresh-context
+reviewers or implementation workers automatically; a sub-agent loads a second
+context and can double the session's token cost. Group related findings and
+shared test files as needed, then track total FIXED, SKIPPED (with reasons),
+owned files, and test results before verification.
 
 Two source files can resolve to the same test file — most often when a shared
 `__tests__/` sibling directory or a single suite covers a whole module. Resolve
-each source file's candidate test paths first:
+each source file's candidate test paths before editing so one test file is
+edited coherently rather than patched twice:
 
 ```bash
 # Candidate test files for a given source file
@@ -84,34 +84,6 @@ test_targets() {
      2>/dev/null
 }
 ```
-
-Source files whose candidate test paths overlap must land in the same group to
-avoid write conflicts on the shared test file.
-
-### 3. Dispatch Subagents
-
-For each file group, delegate a fresh-context implementation worker through the
-active surface, selecting sonnet when the surface supports model choice, with:
-
-- "You are fixing review findings in `{FILE_PATH}`. Working directory: `{PROJECT_ROOT}`."
-- All findings for that file (title, body, line range, priority, category, confidence)
-- "For each finding: read the file, evaluate validity, fix if valid (skip if not), generate test if testable. Report: STATUS (fixed/skipped), FILES_CHANGED, TEST_RESULTS, SKIPPED findings with reasons."
-
-Dispatch all groups in parallel using `run_in_background: true`.
-
-### 4. Collect Results
-
-After all subagents complete, aggregate:
-- Total FIXED count
-- Total SKIPPED count with reasons
-- All files changed
-- All test results
-
-Proceed to verification with combined results.
-
-**Fall back to sequential processing** when:
-- Fewer than 3 findings
-- All findings target the same file
 
 ---
 
@@ -203,7 +175,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
 # Sets PM/PMX/IS_MONOREPO and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+source "<PLUGIN_ROOT>/lib/detect-pm.sh"
 pm_detect "$REPO_ROOT"
 
 echo "=== Build ==="
@@ -379,7 +351,7 @@ COMMIT_MESSAGE="fix: address review-deep findings
 - <tests added for testable fixes, if any>"
 
 POST_FIX_RESULT=$(
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/review-deep-post-fix.sh" \
+  bash "<PLUGIN_ROOT>/scripts/review-deep-post-fix.sh" \
     "${ACTION_ARGS[@]}" \
     --message "$COMMIT_MESSAGE" \
     -- "${OWNED_FILES[@]}"

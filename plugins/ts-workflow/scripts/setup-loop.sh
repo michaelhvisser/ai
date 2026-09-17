@@ -19,6 +19,11 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../lib/loop-state.sh"
 
+new_loop_instance_id() {
+  local created_at="$1"
+  printf '%s-%s-%s%s\n' "$created_at" "$$" "$RANDOM" "$RANDOM"
+}
+
 SAFE_LOOP_NAME=$(printf '%s\n' "$LOOP_NAME" | sed 's/[^a-zA-Z0-9_-]/-/g')
 OWNER_STATE_DIR=$(loop_state_directory)
 mkdir -p "$OWNER_STATE_DIR"
@@ -60,24 +65,8 @@ release_setup_lock() {
 }
 trap release_setup_lock EXIT
 
-# Finished states are leftovers whose owning session's stop hook never removed
-# them (a foreign session cannot). Setup is only reached for a fresh start, so
-# clear them here instead of letting them hold the singleton lane forever.
-TERMINAL_STATE_FILES=$(find_terminal_loops "$OWNER_STATE_DIR")
-if [ -n "$TERMINAL_STATE_FILES" ]; then
-  while IFS= read -r finished_state; do
-    [ -n "$finished_state" ] || continue
-    finished_loop=$(jq -r '.loop_name // "unknown"' "$finished_state" 2>/dev/null || echo "unknown")
-    finished_result=$(jq -r '.workflow_result // ""' "$finished_state" 2>/dev/null || true)
-    printf "Discarding finished loop state '%s' (%s): %s\n" \
-      "$finished_loop" "$finished_result" "$finished_state"
-    loop_log "setup-loop: discarding finished loop state: file=$finished_state loop=$finished_loop result=$finished_result"
-    rm -f "$finished_state"
-  done <<< "$TERMINAL_STATE_FILES"
-fi
-
-STATE_FILES=$(find_active_loops "$OWNER_STATE_DIR")
-ACTIVE_COUNT=$(count_active_loops "$OWNER_STATE_DIR")
+STATE_FILES=$(find_active_loops "$OWNER_STATE_DIR" "$STATE_FILE" false)
+ACTIVE_COUNT=$(count_active_loops "$OWNER_STATE_DIR" "$STATE_FILE" false)
 if [ -f "$STATE_FILE" ]; then
   if [ "$ACTIVE_COUNT" -ne 1 ]; then
     printf 'Error: loop re-entry is ambiguous because multiple active states exist:\n%s\n' \
@@ -103,6 +92,13 @@ if [ -f "$STATE_FILE" ]; then
       "$LOOP_NAME" >&2
     exit 1
   fi
+  STORED_SESSION_ID=$(jq -r '.session_id // empty' "$STATE_FILE")
+  STORED_LOOP_INSTANCE_ID=$(jq -r '.loop_instance_id // empty' "$STATE_FILE")
+  if [ -z "$STORED_SESSION_ID" ] && [ -z "$STORED_LOOP_INSTANCE_ID" ]; then
+    printf "Error: cannot safely re-enter legacy ownerless loop '%s'; cancel it and restart.\n" \
+      "$LOOP_NAME" >&2
+    exit 1
+  fi
   printf "Loop already active: %s\n" "$LOOP_NAME"
   exit 0
 fi
@@ -113,19 +109,11 @@ if [ "$ACTIVE_COUNT" -ne 0 ]; then
   exit 1
 fi
 
-SESSION_ID=""
-if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-  SESSION_ID="$CLAUDE_CODE_SESSION_ID"
-elif [ -n "${CODEX_COMPANION_SESSION_ID:-}" ]; then
-  SESSION_ID="$CODEX_COMPANION_SESSION_ID"
-elif [ -n "${CLAUDE_SESSION_ID:-}" ]; then
-  SESSION_ID="$CLAUDE_SESSION_ID"
-elif [ -d ".claude" ]; then
-  LATEST_TRANSCRIPT=$(find .claude -maxdepth 1 -name '*.jsonl' 2>/dev/null | LC_ALL=C sort | tail -n 1 || true)
-  if [ -n "$LATEST_TRANSCRIPT" ]; then
-    SESSION_ID=$(basename "$LATEST_TRANSCRIPT" .jsonl)
-  fi
-fi
+SESSION_ID="${CLAUDE_SESSION_ID:-}"
+WORKTREE_PATH=$(resolve_loop_worktree_root)
+SESSION_WORKTREE_PATH="$WORKTREE_PATH"
+STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+LOOP_INSTANCE_ID=$(new_loop_instance_id "$STARTED_AT")
 
 MAX_ITER_JSON="null"
 if [ -n "$MAX_ITERATIONS" ]; then
@@ -157,8 +145,11 @@ jq -n \
   --arg completion_promise "$COMPLETION_PROMISE" \
   --argjson terminal_promises "$TERMINAL_PROMISES_JSON" \
   --arg phase "$INITIAL_PHASE" \
-  --arg started_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --arg started_at "$STARTED_AT" \
+  --arg loop_instance_id "$LOOP_INSTANCE_ID" \
   --arg session_id "$SESSION_ID" \
+  --arg session_worktree_path "$SESSION_WORKTREE_PATH" \
+  --arg worktree_path "$WORKTREE_PATH" \
   --argjson phase_messages "$PHASE_MSGS_JSON" \
   '{
     schema_version: $schema_version,
@@ -171,12 +162,15 @@ jq -n \
     phase: $phase,
     bot_review_baseline: "",
     started_at: $started_at,
+    loop_instance_id: $loop_instance_id,
     session_id: $session_id,
+    session_worktree_path: $session_worktree_path,
+    worktree_path: $worktree_path,
     awaiting_driver_input: false,
     driver_input_reason: "",
     phase_messages: $phase_messages,
     components: {}
   }' > "$TMP_FILE" && mv "$TMP_FILE" "$STATE_FILE"
 
-printf 'Loop initialized: %s\n' "$LOOP_NAME"
+printf 'Loop initialized: %s [%s]\n' "$LOOP_NAME" "$LOOP_INSTANCE_ID"
 printf 'Output <done>%s</done> when all completion criteria are met.\n' "$COMPLETION_PROMISE"

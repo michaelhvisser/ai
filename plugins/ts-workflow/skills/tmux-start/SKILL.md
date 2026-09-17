@@ -7,19 +7,33 @@ disable-model-invocation: true
 
 # Start Issue in tmux Window
 
+## Plugin Resource Resolution
+
+`<PLUGIN_ROOT>` is notation. Replace it with a concrete absolute plugin root before every resource read or command:
+
+- **Codex:** Start from the directory containing the absolute selected `SKILL.md` path, then ascend two directories (`skills/<name>` -> plugin root).
+- **Claude Code:** Bind it to the injected `${CLAUDE_PLUGIN_ROOT}` value.
+
 Before requesting decisions, read
-`${CLAUDE_PLUGIN_ROOT}/lib/driver-interaction.md` and follow its
+`<PLUGIN_ROOT>/lib/driver-interaction.md` and follow its
 cross-platform capability-binding rules.
 
-Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving target or
+Read `<PLUGIN_ROOT>/lib/decision-gates.md` before resolving target or
 secret-copy intent.
+
+Bind the invocation arguments as `SKILL_ARGS` for `$ts-workflow:tmux-start` by
+reading `<PLUGIN_ROOT>/lib/skill-arguments.md` with this Claude Code compatibility payload:
+<claude-skill-arguments>
+$ARGUMENTS
+</claude-skill-arguments>
 
 ## Empty Arguments
 
-If `$ARGUMENTS` is empty or not provided, explain:
+If `SKILL_ARGS` is empty or not provided, explain:
 
-This skill creates or reuses a worktree, opens a new tmux window, launches
-Claude Code, and sends `/ts-workflow:start-issue` automatically.
+This skill creates or reuses a worktree, opens a new tmux window, launches the
+active assistant surface, and sends its qualified `start-issue` invocation
+automatically.
 
 **Claude Code:** `/ts-workflow:tmux-start <issue-number>`.
 
@@ -37,12 +51,12 @@ and stop before creating a worktree or tmux window.
 ## Clear Worktree State
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-state.sh" clear 2>/dev/null || true
+/bin/bash "<PLUGIN_ROOT>/scripts/worktree-state.sh" clear 2>/dev/null || true
 ```
 
 ## Issue Number
 
-Use `$ARGUMENTS` as the issue number. The script validates that it is numeric
+Use `SKILL_ARGS` as the issue number. The script validates that it is numeric
 and that the issue exists.
 
 ## Environment Files
@@ -52,7 +66,7 @@ worktree:
 
 ```bash
 SOURCE_DIR="$(pwd)"
-"${CLAUDE_PLUGIN_ROOT}/scripts/worktree-create.sh" env-files --source-dir "$SOURCE_DIR"
+/bin/bash "<PLUGIN_ROOT>/scripts/worktree-create.sh" env-files --source-dir "$SOURCE_DIR"
 ```
 
 If the output starts with `ENV_FILES_FOUND=true`, follow the shared
@@ -62,22 +76,35 @@ or tmux creation when structured input is unavailable.
 
 ## Start tmux Workflow
 
+Bind `SURFACE` from the active assistant before invoking the script. Claude
+Code binds `claude`; Codex binds `codex`. Do not infer the surface from
+installed executables or environment variables.
+
+```bash
+SURFACE="<claude-or-codex>"
+```
+
 If copying environment files was explicitly authorized:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/tmux-start.sh" "$ARGUMENTS" --copy-env
+/bin/bash "<PLUGIN_ROOT>/scripts/tmux-start.sh" "$SKILL_ARGS" --surface "$SURFACE" --copy-env
 ```
 
 Otherwise:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/tmux-start.sh" "$ARGUMENTS" --no-copy-env
+/bin/bash "<PLUGIN_ROOT>/scripts/tmux-start.sh" "$SKILL_ARGS" --surface "$SURFACE" --no-copy-env
 ```
 
 The script validates prerequisites, creates or reuses the standard issue
 worktree, registers worktree state, opens or switches to the issue tmux window,
-launches Claude Code, waits for a prompt or stable launch marker, and sends
-`/ts-workflow:start-issue <issue-number>`.
+launches the bound assistant, waits for a Claude or Codex prompt or stable
+launch marker, and sends `/ts-workflow:start-issue <issue-number>` for Claude
+or `$ts-workflow:start-issue <issue-number>` for Codex. Direct script callers
+that omit `--surface` retain the Claude default.
 
-Set `TS_WORKFLOW_TMUX_CLAUDE_CMD` before invocation to override the default
-Claude launch command (`claude --dangerously-skip-permissions`).
+Set `TS_WORKFLOW_TMUX_ASSISTANT_CMD` or pass `--assistant-cmd` to override the
+launch command for either surface. The neutral override takes precedence over
+`TS_WORKFLOW_TMUX_CLAUDE_CMD` and `--claude-cmd`, which remain supported for
+Claude compatibility. Defaults are `claude --dangerously-skip-permissions`
+and `codex --dangerously-bypass-approvals-and-sandbox`.

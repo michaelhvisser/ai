@@ -6,338 +6,110 @@ argument-hint: "[PR-number|--issue <N>] [--post] [--scope <hint>] [--no-fix] [--
 
 # Deep Review: Full-Context Code Review + Fix
 
-Performs a thorough code review with full PR/issue context, then fixes all actionable findings.
-Combines the depth of spec review, quality review, and TypeScript/JavaScript-specific analysis in a single pass.
-
-Before requesting decisions or delegating work, read
-`${CLAUDE_PLUGIN_ROOT}/lib/driver-interaction.md` and follow its
-cross-platform capability-binding rules.
-
-Read `${CLAUDE_PLUGIN_ROOT}/lib/decision-gates.md` before resolving review
-coverage or post-review actions.
-
-## Step 0: Parse Arguments
-
-Parse `$ARGUMENTS` to extract:
-
-- Bare numeric value: PR number (e.g., `$ts-workflow:review-deep 42`)
-- `--issue <N>`: Use specific issue as context (no PR required)
-- `--post`: Auto-post findings to PR as a comment (skip asking)
-- `--scope <hint>`: Focus area for the review (e.g., "async error handling", "server/client boundaries")
-- `--no-fix`: Review only; do not edit files
-- `--no-commit`: Apply fixes but leave review-owned changes uncommitted
-- `--push`: Push the resulting local HEAD, including for a branch-only run
-- `--no-push`: Never push; return the local and remote head state
-- Remaining text after flags: treated as scope hint
-
-Store as `PR_ARG`, `ISSUE_ARG`, `AUTO_POST` (default: `false`), `SCOPE_HINT`,
-`FIX_CHANGES` (default: `true`), `COMMIT_CHANGES` (default: `true`), and
-`PUSH_CHANGES` (default: `auto`).
-
-```bash
-PR_ARG=""
-ISSUE_ARG=""
-AUTO_POST=false
-SCOPE_HINT=""
-FIX_CHANGES=true
-COMMIT_CHANGES=true
-PUSH_CHANGES=auto
-ARGS="$ARGUMENTS"
-
-while [ -n "$ARGS" ]; do
-  case "$ARGS" in
-    --issue\ *)
-      ARGS="${ARGS#--issue }"
-      ISSUE_ARG="${ARGS%% *}"
-      ARGS="${ARGS#"$ISSUE_ARG"}"
-      ARGS="${ARGS# }"
-      ;;
-    --post*)
-      AUTO_POST=true
-      ARGS="${ARGS#--post}"
-      ARGS="${ARGS# }"
-      ;;
-    --scope\ *)
-      ARGS="${ARGS#--scope }"
-      SCOPE_HINT="$ARGS"
-      ARGS=""
-      ;;
-    --no-fix*)
-      FIX_CHANGES=false
-      ARGS="${ARGS#--no-fix}"
-      ARGS="${ARGS# }"
-      ;;
-    --no-commit*)
-      COMMIT_CHANGES=false
-      ARGS="${ARGS#--no-commit}"
-      ARGS="${ARGS# }"
-      ;;
-    --no-push*)
-      PUSH_CHANGES=false
-      ARGS="${ARGS#--no-push}"
-      ARGS="${ARGS# }"
-      ;;
-    --push*)
-      PUSH_CHANGES=true
-      ARGS="${ARGS#--push}"
-      ARGS="${ARGS# }"
-      ;;
-    [0-9]*)
-      PR_ARG="${ARGS%% *}"
-      ARGS="${ARGS#"$PR_ARG"}"
-      ARGS="${ARGS# }"
-      ;;
-    *)
-      SCOPE_HINT="$ARGS"
-      ARGS=""
-      ;;
-  esac
-done
-
-echo "PR_ARG=$PR_ARG ISSUE_ARG=$ISSUE_ARG AUTO_POST=$AUTO_POST SCOPE_HINT=$SCOPE_HINT FIX_CHANGES=$FIX_CHANGES COMMIT_CHANGES=$COMMIT_CHANGES PUSH_CHANGES=$PUSH_CHANGES"
-```
-
-### Action Contract
-
-Fix, commit, and push are separately controllable:
-
-| Configuration | Post-review state |
-|---------------|-------------------|
-| Default with a detected PR and fixes | Fix, commit, and push; local and PR remote heads must match |
-| Default without a PR | Fix and commit locally; do not push |
-| `--no-fix` | Review only; do not create a review commit or auto-push |
-| `--no-commit` | Leave review-owned fixes in the working tree; auto-push is disabled |
-| `--no-push` | Commit review-owned fixes locally and report that the remote is unchanged |
-| `--push` | Push explicitly; fail if review-owned fixes are still uncommitted |
-
-PR-backed runs push newly created review commits by default. Branch-only runs
-require `--push`. Every run returns a structured commit/push result with local
-and remote head SHAs; a push failure is an incomplete review, never success.
-
-## Step 1: Detect Scope & Base Branch
-
-If `PR_ARG` is set, use it directly. Otherwise, auto-detect from the current branch using two strategies in order — fall through when the first returns empty.
-
-**Strategy 1 — current branch:**
-
-```bash
-PR_JSON=$(gh pr view --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences --jq '.' 2>/dev/null)
-```
-
-**Strategy 2 — match HEAD commit against PRs with one REST read:**
-
-`gh pr list --search` goes through the search API (30 requests/minute
-secondary limit) and `gh pr list`/`gh pr view` spend GraphQL, which Detent and
-every other tool on the same token already share. One core-pool REST read
-resolves the same thing. `{owner}/{repo}` is filled in by `gh` from the git
-remote without an API call.
-
-```bash
-if [ -z "$PR_JSON" ]; then
-  HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
-  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null)
-  # Prefer an open PR whose head is this branch, then any open PR that
-  # contains the commit, then any PR (closed/merged) that contains it.
-  PR_PAGES=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/$HEAD_SHA/pulls?per_page=100") || {
-    echo "review-deep: failed to resolve PRs for HEAD; stop instead of assuming a branch-only review" >&2
-    exit 1
-  }
-  PR_NUM=$(printf '%s\n' "$PR_PAGES" | jq -r --arg branch "$CURRENT_BRANCH" '
-        [.[][]] as $all
-        | ( [$all[] | select(.state == "open" and .head.ref == $branch)]
-          + [$all[] | select(.state == "open")]
-          + $all )
-        | map(.number) | first // empty') || exit 1
-  if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ]; then
-    PR_JSON=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,headRefName,closingIssuesReferences) || exit 1
-  fi
-fi
-```
-
-**Extract PR number and base branch:**
-
-```bash
-if [ -n "$PR_JSON" ]; then
-  PR_NUM=$(echo "$PR_JSON" | jq -r '.number')
-  BASE_BRANCH=$(echo "$PR_JSON" | jq -r '.baseRefName')
-  PR_HEAD_BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName')
-  echo "Found PR #$PR_NUM (base: $BASE_BRANCH, head: $PR_HEAD_BRANCH)"
-else
-  BASE_BRANCH=$( (git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' | grep .) || (git remote show -n origin 2>/dev/null | grep 'HEAD branch' | sed 's/.*: //' | grep .) || echo "main" )
-  PR_HEAD_BRANCH=""
-  echo "No PR found. Using base branch: $BASE_BRANCH"
-fi
-```
-
-Display a brief summary of what was detected.
-
-## Step 2: Gather Full Context
-
-Read `context-gathering.md` and execute the procedure end-to-end:
-
-- PR metadata (title, body, state, comments, reviews)
-- Linked issues (title, body, labels, comments)
-- Review threads (unresolved, with file paths and line numbers)
-- Inline review comments
-- Pending reviews (CHANGES_REQUESTED)
-- Repo guidelines (AGENTS.md or CLAUDE.md)
-
-If `--issue N` was provided instead of a PR, fetch just the issue context. If no PR and no issue, proceed with diff-only review (no requirement verification, no review-comment status).
-
-`context-gathering.md` includes the size guard — if combined context exceeds ~6000 characters, use summary format.
-
-## Step 3: Generate Diff and Coverage Plan
-
-Based on detected scope:
-
-- **Changes vs base branch** (default when PR detected): `git diff ${BASE_BRANCH}...HEAD`
-- **Uncommitted changes** (no PR + uncommitted changes exist): `git diff HEAD` plus untracked files via `git ls-files --others --exclude-standard`
-- **Explicit `PR_ARG`:** always use changes vs base branch
-
-```bash
-DIFF=$(git diff "${BASE_BRANCH}...HEAD")
-REVIEW_BASE="$BASE_BRANCH"
-REVIEW_BACKEND=agent
-REVIEW_CONCURRENCY=auto
-```
-
-Read `${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`, run the shared planner, display its coverage
-plan, and follow it through the final coordinated pass. Do not interrupt solely
-because of raw diff size. Preserve `SCOPE_HINT` as review emphasis.
-
-## Step 4: Static Analysis
-
-Detect the package manager once and reuse it for every command in this skill.
-Run all root scripts from the repository root — in a monorepo (`turbo.json`,
-`nx.json`, or `pnpm-workspace.yaml` present) the root scripts fan out to the
-workspaces, so never `cd` into a package to run them.
-
-```bash
-REPO_ROOT=$(git rev-parse --show-toplevel)
-cd "$REPO_ROOT"
-
-# Sets PM/PMX/IS_MONOREPO and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
-pm_detect "$REPO_ROOT"
-
-echo "Package manager: $PM"
-```
-
-If a Node/TypeScript project is detected (`package.json` exists):
-
-```bash
-CHANGED=$(git diff --name-only "${BASE_BRANCH}...HEAD" | grep -E '\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$' || true)
-if [ -n "$CHANGED" ] && [ -f package.json ]; then
-  echo "=== Type check ==="
-  if has_script type-check; then
-    $PM run type-check 2>&1 || true
-  elif has_script typecheck; then
-    $PM run typecheck 2>&1 || true
-  elif [ -f tsconfig.json ]; then
-    $PMX tsc --noEmit 2>&1 || true
-  fi
-
-  echo "=== Lint ==="
-  if has_script lint; then
-    $PM run lint 2>&1 || true
-  fi
-
-  echo "=== Tests ==="
-  if has_script test; then
-    $PM run test 2>&1 || true
-  elif ls vitest.config.* >/dev/null 2>&1; then
-    $PMX vitest run 2>&1 || true
-  elif ls jest.config.* >/dev/null 2>&1; then
-    $PMX jest 2>&1 || true
-  fi
-fi
-```
-
-**Rust fallback** (`Cargo.toml` exists, no `package.json`):
-
-```bash
-cargo clippy 2>&1 || true
-cargo test 2>&1 || true
-```
-
-**Go fallback** (`go.mod` exists, no `package.json`):
-
-```bash
-go vet ./... 2>&1 || true
-go test -race -count=1 ./... 2>&1 || true
-```
-
-Static-analysis failures are informational — they feed into the review, not block it.
-
-## Step 5: Perform Review
-
-Read `review-criteria.md` for the full criteria, the Quality Score Rubric, the confidence-scoring guide, and the breaking-change detection block. Apply all criteria to the diff with the gathered context.
-
-Process:
-
-1. Review every unit from the Step 3 coverage plan against every criterion in `review-criteria.md`.
-2. Cross-reference with requirements (when PR/issue context is available): each acceptance criterion → implementation → tests; check for missing requirements and scope creep.
-3. For each existing review thread, mark whether it appears addressed in the current diff.
-4. Include the Step 4 static-analysis results.
-5. Detect breaking changes in exported symbols (grep recipe in `review-criteria.md`).
-6. Run the plan's cross-cutting pass, then verify, deduplicate, and rank findings against the checkout before Step 6.
-
-For the exact findings-table layout, spec-compliance table, review-comments-status table, and the recommendation values — Read `output-format.md`.
-
-## Step 6: Fix Findings
-
-Read `fix-and-verify.md` and follow it end-to-end. Highlights:
-
-- When `FIX_CHANGES=false`, skip file edits, test generation, and verification
-  for fixes; continue to the post-fix action result
-- Process findings in priority order (P0 → P3)
-- Auto-skip priority 3 AND confidence < 0.5 (nit noise)
-- Make minimal fixes; track which fixes are testable
-- Delegate fresh-context reviewers in parallel when 3+ findings target different files
-- Generate tests for testable fixes; verify build/test/lint pass
-- Pass only review-owned files to the post-fix helper
-- Apply `COMMIT_CHANGES` and `PUSH_CHANGES` independently
-- Treat any commit, push, or remote-head verification failure as incomplete
-
-## Step 7: Post-Review Summary & Actions
-
-Display the final summary:
-
-```
-## Review Complete
-
-- **Findings reported:** <n>
-- **Findings fixed:** <n>
-- **Findings skipped:** <n> (with reasons)
-- **Files changed:** <list>
-- **Quality Score:** <n>/100
-- **All verifications passed:** yes/no
-- **Commit result:** created / none / skipped
-- **Push result:** pushed / skipped
-- **Local head:** <sha>
-- **Remote head:** <sha or empty when unavailable>
-- **Recommendation:** APPROVE / REQUEST_CHANGES / COMMENT
-```
-
-Use the exact structured result from `review-deep-post-fix.sh`. If that helper
-failed, do not display `Review Complete`, post an approval, or imply that PR
-fixes reached the remote.
-
-### Post to PR
-
-If `AUTO_POST` is `true` and a PR was detected, post immediately with `gh pr comment "$PR_NUM" --body ...` using the formatting from `output-format.md`.
-
-If `AUTO_POST` is `false` and a PR was detected, resolve a
-**driver-resolvable gate**. Post only when the original request explicitly asks
-for a PR comment; otherwise keep the report in the current response. State
-`Decision`, `Evidence`, and `Rationale`. Do not request input for this
-reversible delivery choice.
-
-## Further Reading
-
-- `context-gathering.md` — PR/issue/review-thread fetching, repo-guideline detection, size guard
-- `review-criteria.md` — full review criteria, TS/JS idiom checks, framework checks (React/Next.js, Convex), Quality Score Rubric, confidence scoring, breaking-change detection
-- `fix-and-verify.md` — fix iteration, parallel dispatch, test generation, verification, commit, and push
-- `${CLAUDE_PLUGIN_ROOT}/scripts/review-deep-post-fix.sh` — deterministic owned-file commit, optional push, and remote-head verification
-- `output-format.md` — findings table, spec-compliance table, review-comments-status table, PR-comment template
-- `${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md` — shared adaptive coverage planning and finding coordination
+## Plugin Resource Resolution
+
+`<PLUGIN_ROOT>` is notation. Replace it with a concrete absolute plugin root before every resource read or command:
+
+- **Codex:** Start from the directory containing the absolute selected `SKILL.md` path, then ascend two directories (`skills/<name>` -> plugin root).
+- **Claude Code:** Bind it to the injected `${CLAUDE_PLUGIN_ROOT}` value.
+
+Before decisions or delegation, read `<PLUGIN_ROOT>/lib/driver-interaction.md`.
+Read `<PLUGIN_ROOT>/lib/decision-gates.md` before resolving scope or delivery.
+Bind `SKILL_ARGS` for `$ts-workflow:review-deep` by reading
+`<PLUGIN_ROOT>/lib/skill-arguments.md` with this compatibility payload:
+
+<claude-skill-arguments>
+$ARGUMENTS
+</claude-skill-arguments>
+
+## Step 0: Arguments and Action Contract
+
+Read `<PLUGIN_ROOT>/skills/review-deep/arguments.md` completely and execute it.
+It parses PR/issue targets, post and scope hints, and independent
+`FIX_CHANGES`, `COMMIT_CHANGES`, and `PUSH_CHANGES` controls.
+
+Action matrix:
+
+- PR-backed default: fix, commit, push, and verify local/remote head equality.
+- Branch-only default: fix and commit locally without push.
+- `--no-fix`: report only; no review commit or push.
+- `--no-commit`: leave owned fixes uncommitted and disable auto-push.
+- `--no-push`: commit locally and report the unchanged remote.
+- `--push`: push explicitly, but fail when owned fixes remain uncommitted.
+
+A commit, push, or remote-head verification failure is incomplete, never a
+successful review.
+
+## Steps 1-2: Scope and Context
+
+Read `<PLUGIN_ROOT>/skills/review-deep/scope-discovery.md` completely and
+execute PR detection, associated-HEAD fallback, base selection, and context
+routing. API failure is incomplete discovery, not evidence of no PR.
+
+Then read `<PLUGIN_ROOT>/skills/review-deep/context-gathering.md` completely
+and gather PR metadata, linked issues, unresolved threads, inline comments,
+pending reviews, and repository guidelines. For `--issue`, gather issue-only
+context; with neither target, perform a diff-only review. Apply the documented
+context size guard and bot-noise filtering.
+
+## Steps 3-4: Coverage Plan and Static Analysis
+
+Read `<PLUGIN_ROOT>/skills/review-deep/static-analysis.md` completely and
+execute it. Generate the correct base/uncommitted diff, preserve `SCOPE_HINT`,
+run the shared adaptive planner in
+`<PLUGIN_ROOT>/lib/review-planning.md`, and complete every planned unit plus
+the coordinated cross-cutting pass.
+
+For TypeScript/JavaScript changes, collect type-check, lint, and test output
+through the detected package manager as review evidence; these commands inform
+findings rather than independently blocking.
+For visual work, read `<PLUGIN_ROOT>/lib/screenshot-evidence.md`, initialize
+the manifest, inspect each capture, and preserve evidence for reporting.
+
+## Step 5: Ordered Review Pipeline
+
+Read `<PLUGIN_ROOT>/skills/review-deep/review-criteria.md` completely. Review
+every planned unit for correctness, security, performance, maintainability,
+TypeScript/JavaScript and framework idioms, tests, documentation, and breaking changes.
+
+In order:
+
+1. Map each issue/PR acceptance criterion to implementation and tests; identify
+   missing requirements and scope creep.
+2. Re-evaluate each unresolved review thread against the current diff.
+3. Incorporate static-analysis and screenshot evidence.
+4. Run the cross-cutting pass, then verify, deduplicate, confidence-score, and
+   rank findings against the checkout.
+5. Read `<PLUGIN_ROOT>/skills/review-deep/output-format.md` for the exact
+   findings, spec-compliance, review-status, score, and recommendation formats.
+
+## Step 6: Fix, Verify, Commit, and Push
+
+Read `<PLUGIN_ROOT>/skills/review-deep/fix-and-verify.md` completely and
+execute it end-to-end. Process P0 through P3; skip invalid, pre-existing, or
+intentional findings and P3 findings below the confidence threshold. Make
+minimal fixes, add tests for observable changes, and track only review-owned
+files.
+
+Review and fix all findings in the current context; never delegate based on
+finding count. Verify the applicable build, tests, and lint.
+Pass only owned files to `review-deep-post-fix.sh` and apply commit/push flags
+independently.
+
+## Step 7: Report and Optional PR Post
+
+Read **Step 7: Final Summary and Delivery** in
+`<PLUGIN_ROOT>/skills/review-deep/output-format.md` and execute it using the
+structured helper result. If the helper failed, do not render a completed review
+or imply fixes reached the remote.
+
+Post only when `--post` or the original request explicitly authorizes a PR
+comment. Otherwise keep the report in the response. This is driver-resolvable;
+state Decision, Evidence, and Rationale without requesting redundant input.
+
+## Completion Contract
+
+A completed review reports all findings, fixes/skips with reasons, verification
+status, commit/push result, local/remote heads, quality score, and one of
+`APPROVE|REQUEST_CHANGES|COMMENT`. Never report success after an incomplete
+scope lookup, fix verification, commit, push, or remote-head check.

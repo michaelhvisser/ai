@@ -229,7 +229,7 @@ always run them from the repository root — never `cd` into a package.
 
 ```bash
 # Sets PM/PMX/IS_MONOREPO and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+source "<PLUGIN_ROOT>/lib/detect-pm.sh"
 pm_detect "$WORKTREE_PATH"
 echo "Package manager: $PM | monorepo: $IS_MONOREPO"
 ```
