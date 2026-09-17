@@ -1,33 +1,60 @@
-# Start-Issue — Subagent-Orchestrated Workflow
+# Start-Issue — Native Delegation Workflow
 
-Loaded by `skills/start-issue/SKILL.md` when `NO_AGENTS=false` (the default).
-The orchestrator (the trunk's session) retains all control flow, verification
-gates, and external interactions; subagents handle exploration,
-implementation, and review.
+Loaded only after the Surface Dispatch Decision in `skills/start-issue/SKILL.md`
+selects native orchestration. The orchestrator retains all control flow,
+verification gates, and external interactions; delegated agents handle
+exploration, implementation, and review.
 
-## Subagent Model Policy
+## Reusable Prompt Contract
 
-Each prompt under `${CLAUDE_PLUGIN_ROOT}/agents/` declares its default `model`
-frontmatter. Do not pass a per-dispatch model in this workflow unless the user
-explicitly requests a one-off override; doing so would mask the prompt's model
-policy.
+The Markdown body of each existing prompt is its surface-neutral reusable
+template:
 
-When dispatching, always set `subagent_type` to the prompt file's frontmatter
-`name` so Claude Code loads that custom subagent definition and applies its
-model policy.
+- `<PLUGIN_ROOT>/agents/explore-prompt.md`
+- `<PLUGIN_ROOT>/agents/implementer-prompt.md`
+- `<PLUGIN_ROOT>/agents/spec-review-prompt.md`
+- `<PLUGIN_ROOT>/agents/quality-review-prompt.md`
 
-Defaults:
+Fill the placeholders in that Markdown body before dispatch. The YAML
+frontmatter is Claude Code binding metadata only; Codex ignores it and uses the
+same surface-neutral body with its native profile binding. Keep these prompt
+files in place so both surfaces share one behavioral contract.
 
-| Delegated prompt | Model policy | Purpose |
-|--------------|--------------|---------|
-| `explore-prompt.md` | `haiku` | Read-only codebase exploration |
-| `implementer-prompt.md` | `inherit` | TDD implementation keeps the parent session's model |
-| `spec-review-prompt.md` | `sonnet` | Mechanical requirements checklist |
-| `quality-review-prompt.md` | `sonnet` | TypeScript/React idiom, complexity, security, and test review |
+## Surface Bindings
 
-To override all subagent models for a run, set `CLAUDE_CODE_SUBAGENT_MODEL`
-before invoking `$ts-workflow:start-issue` or `$ts-workflow:complete-issue`. To avoid subagents
-entirely, pass `--no-agents`.
+### Codex binding
+
+Use native Codex delegation and map each workflow role to a built-in profile:
+
+| Role | Native profile |
+|------|----------------|
+| Explore | `explorer` |
+| Implementer | `worker` |
+| Spec Review | `default` |
+| Quality Review | `default` |
+
+Dispatch the filled Markdown body for each role and wait synchronously for its
+result before consuming it. Parallel Implementer tasks may run concurrently,
+but the orchestrator waits for every result in the same session. Delegated
+agents inherit the active Codex model, reasoning effort, and configuration; do
+not add per-dispatch overrides.
+
+### Claude Code binding
+
+Use each prompt file's frontmatter `name` as `subagent_type` so Claude Code
+loads the custom agent definition and applies its model policy:
+
+| Role | Prompt | Model policy |
+|------|--------|--------------|
+| Explore | `explore-prompt.md` | `inherit` |
+| Implementer | `implementer-prompt.md` | `inherit` |
+| Spec Review | `spec-review-prompt.md` | `sonnet` |
+| Quality Review | `quality-review-prompt.md` | `sonnet` |
+
+Do not pass a per-dispatch model unless the user explicitly requests a one-off
+override. To override all Claude Code subagent models for a run, set
+`CLAUDE_CODE_SUBAGENT_MODEL=<model>` before invoking
+`$ts-workflow:start-issue` or `$ts-workflow:complete-issue`.
 
 ## Step 1: Check for Duplicates (Bug Fix Only)
 
@@ -71,7 +98,7 @@ Verify: `git -C "$WORKTREE_PATH" branch --show-current`
 
 ## Step 3: Explore Phase
 
-Read `${CLAUDE_PLUGIN_ROOT}/agents/explore-prompt.md` and fill in:
+Read `<PLUGIN_ROOT>/agents/explore-prompt.md` and fill in:
 
 - `{ISSUE_TITLE}` — from issue context
 - `{ISSUE_BODY}` — from issue context (body + comments)
@@ -131,7 +158,7 @@ Using the Explore results and approved approach:
 
 ## Step 6: Implementation Phase
 
-For each task, read `${CLAUDE_PLUGIN_ROOT}/agents/implementer-prompt.md` and fill in:
+For each task, read `<PLUGIN_ROOT>/agents/implementer-prompt.md` and fill in:
 
 - `{TASK_DESCRIPTION}` — from task decomposition
 - `{TARGET_FILES}` — files this agent may create/modify
@@ -172,7 +199,7 @@ git -C "$WORKTREE_PATH" fetch origin "$DEFAULT_BRANCH" 2>/dev/null || true
 git -C "$WORKTREE_PATH" diff "origin/${DEFAULT_BRANCH}...HEAD"
 ```
 
-Read `${CLAUDE_PLUGIN_ROOT}/agents/spec-review-prompt.md` and fill in:
+Read `<PLUGIN_ROOT>/agents/spec-review-prompt.md` and fill in:
 
 - `{ISSUE_TITLE}`, `{ISSUE_BODY}`, `{ACCEPTANCE_CRITERIA}` — from issue context
 - `{WORKTREE_PATH}` — working directory
@@ -187,7 +214,7 @@ Delegate the filled spec-review prompt through the active surface.
 
 ## Step 8: Code Quality Review
 
-Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md` and fill in `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` (from Explore, prefixed with the `STACK` section), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md).
+Read `<PLUGIN_ROOT>/agents/quality-review-prompt.md` and fill in `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` (from Explore, prefixed with the `STACK` section), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md).
 
 Delegate the filled quality-review prompt through the active surface.
 
@@ -217,7 +244,7 @@ If any step fails, fix the issue and re-run until all green.
 
 ## Step 9.5: Coverage Verification
 
-Read `${CLAUDE_PLUGIN_ROOT}/lib/coverage/coverage-verification.md` and follow Steps A through F with:
+Read `<PLUGIN_ROOT>/lib/coverage/coverage-verification.md` and follow Steps A through F with:
 
 | Variable | Value |
 |----------|-------|
@@ -284,17 +311,6 @@ or the first lexical template when all candidates are equally general. State
 
 ## Step 12: Watch CI
 
-After creating the PR, watch CI and fix any failures:
-
-1. `gh pr checks "$PR_NUM" --repo "$REPO_SLUG" --watch`
-2. **If "no checks reported"**: wait 10 seconds and retry, up to 3 times:
-   ```bash
-   for i in 1 2 3; do sleep 10 && gh pr checks "$PR_NUM" --repo "$REPO_SLUG" --watch && break; done
-   ```
-   If still no checks after retries, verify CI workflow files exist.
-3. If checks fail:
-   - Get failure details: `gh pr checks "$PR_NUM" --repo "$REPO_SLUG" --json name,state,description`
-   - Analyze and fix the failing check
-   - Commit and push the fix
-   - Return to step 1
-4. Continue only when all checks pass.
+After creating the PR, follow `<PLUGIN_ROOT>/lib/start-issue/ci-monitoring.md`.
+Fix failing checks, verify, commit, and push fixes, then repeat monitoring for
+the newly published head. Continue only when all checks pass.

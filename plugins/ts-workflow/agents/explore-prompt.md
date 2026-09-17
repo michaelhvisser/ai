@@ -1,7 +1,6 @@
 ---
 name: explore-prompt
 description: Explore a TypeScript/JavaScript codebase before an implementation task — surface relevant files, conventions, tests, and architectural touchpoints.
-model: haiku
 ---
 
 # Explore Agent Prompt

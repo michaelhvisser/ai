@@ -7,27 +7,16 @@ This document details the full context gathering procedure for deep review.
 ### Fetch PR Metadata
 
 ```bash
-# Owner and name come from the git remote; `gh repo view` would spend two
-# GraphQL calls on the shared token for the same answer.
-REMOTE_URL=$(git remote get-url origin 2>/dev/null) || {
-  echo "review-deep: origin remote is required to resolve the review repository" >&2
+if ! PR_FULL=$(gh pr view "$PR_NUM" --json number,title,body,state,baseRefName,closingIssuesReferences,comments,reviews,url --jq '.'); then
+  printf '%s\n' 'PR context lookup failed; retry with backoff before continuing.' >&2
   exit 1
-}
-case "$REMOTE_URL" in
-  https://github.com/*) REPO_FULL=${REMOTE_URL#https://github.com/} ;;
-  git@github.com:*) REPO_FULL=${REMOTE_URL#git@github.com:} ;;
-  ssh://git@github.com/*) REPO_FULL=${REMOTE_URL#ssh://git@github.com/} ;;
-  *) echo "review-deep: origin must be a github.com repository" >&2; exit 1 ;;
-esac
-REPO_FULL=${REPO_FULL%.git}
-if ! printf '%s\n' "$REPO_FULL" | LC_ALL=C grep -Eq '^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$'; then
-  echo "review-deep: origin must identify exactly owner/repo" >&2
+fi
+if ! REPO_FULL=$(printf '%s\n' "$PR_FULL" | jq -er '.url | capture("^https://[^/]+/(?<repo>[^/]+/[^/]+)/pull/[0-9]+$").repo'); then
+  printf '%s\n' 'PR context has no valid canonical repository URL.' >&2
   exit 1
 fi
 OWNER=${REPO_FULL%%/*}
 REPO=${REPO_FULL##*/}
-
-PR_FULL=$(gh pr view "$PR_NUM" --repo "github.com/$REPO_FULL" --json number,title,body,state,baseRefName,closingIssuesReferences,comments,reviews --jq '.') || exit 1
 ```
 
 Display a brief summary:
@@ -49,7 +38,7 @@ ISSUE_NUMS=$(echo "$PR_FULL" | jq -r '.closingIssuesReferences[].number' 2>/dev/
 
 for NUM in $ISSUE_NUMS; do
   echo "--- Issue #$NUM ---"
-  gh issue view "$NUM" --json number,title,body,labels,comments --jq '.' 2>/dev/null
+  gh issue view "$NUM" --repo "$REPO_FULL" --json number,title,body,labels,comments --jq '.' 2>/dev/null
 done
 ```
 
@@ -105,7 +94,7 @@ gh api "repos/$REPO_FULL/pulls/$PR_NUM/comments" --jq '.[] | {path, line, body, 
 ### Fetch Pending Reviews
 
 ```bash
-gh pr view "$PR_NUM" --json reviews --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")' 2>/dev/null
+gh pr view "$PR_NUM" --repo "$REPO_FULL" --json reviews --jq '.reviews[] | select(.state == "CHANGES_REQUESTED")' 2>/dev/null
 ```
 
 ---
@@ -161,7 +150,7 @@ REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
 # Sets PM/PMX/IS_MONOREPO (true/false) and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+source "<PLUGIN_ROOT>/lib/detect-pm.sh"
 pm_detect "$REPO_ROOT"
 
 # Dependency names across the root manifest and any workspace manifests.

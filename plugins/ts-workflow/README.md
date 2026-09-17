@@ -44,6 +44,7 @@ configured.
 | `/ts-workflow:review-deep [PR]` | Deep code review with full PR context, then fix findings |
 | `/ts-workflow:e2e-verify [PR]` | Run browser E2E verification on a PR |
 | `/ts-workflow:ship` | Verify, push, watch CI/reviews, and merge |
+| `/ts-workflow:cancel-loop [loop-name]` | Cancel active persistent workflow state |
 
 `commit`, `create-pr`, `antagonist-review`, `codex-ship`, and the worktree commands
 (`/create-worktree`, `/remove-worktree`, `/prune-worktree`) moved to the
@@ -63,7 +64,7 @@ cross-model review for any language; `ts-workflow` owns the Node-specific
 
 | Mode | Skills |
 |------|--------|
-| Slash-only | `start-issue`, `address-review`, `e2e-verify`, `ship`, `complete-issue`, `tmux-start` |
+| Slash-only | `start-issue`, `address-review`, `cancel-loop`, `e2e-verify`, `ship`, `complete-issue`, `tmux-start` |
 | Auto-triggerable | `review-deep` |
 
 Slash-only skills still run through their slash commands, but their descriptions are omitted from the always-loaded auto-invoked skill list. Use `/ts-workflow:<command>` in Claude Code or `$ts-workflow:<skill>` in Codex. Codex requires the qualified plugin name; bare skill names are not resolver aliases. In Claude Code, type the slash command directly; `$ts-workflow:start-issue` is Codex syntax and causes a blocked Skill-tool invocation. Auto-triggerable skills remain available from natural-language requests such as "commit these changes" or "review my changes".
@@ -85,10 +86,13 @@ The `start-issue` skill provides an intelligent issue-to-PR workflow:
 Tests follow the repo's runner and naming (`*.test.ts` / `*.spec.ts`, colocated
 or under `__tests__/`), with `it.each`/`test.each` for parameterized cases.
 
-#### Subagent Model Tiering
+#### Surface-Aware Orchestration
 
-The default orchestrated flow routes read-heavy and review subagents through
-rolling model aliases in agent prompt frontmatter:
+The default start flow uses native delegation when the active surface supports
+all required roles. The four prompt Markdown bodies are shared behavioral
+templates; each surface supplies its own dispatch metadata.
+
+Claude Code uses the custom agent definitions and their model frontmatter:
 
 | Agent | Model policy |
 |-------|--------------|
@@ -97,10 +101,16 @@ rolling model aliases in agent prompt frontmatter:
 | Spec Review | Sonnet |
 | Quality Review | Sonnet |
 
-Set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` before running
-`$ts-workflow:start-issue` or `$ts-workflow:complete-issue` to override all
-subagent models for that run. Use
-`--no-agents` to switch to the single-session workflow.
+Set `CLAUDE_CODE_SUBAGENT_MODEL=<model>` before a Claude Code
+`/ts-workflow:start-issue` or `/ts-workflow:complete-issue` run to override
+those agent models.
+
+Codex maps Explore to its `explorer` profile, Implementer to `worker`, and both
+review roles to `default`. Delegated agents inherit the active Codex model,
+reasoning effort, and configuration. If the required native profiles are not
+available, Codex explains the limitation and uses the single-session workflow.
+Use `--no-agents` to select the single-session workflow explicitly on either
+surface.
 
 #### Codex Model Defaults
 
@@ -122,13 +132,14 @@ automatically:
 
 #### Auto Bot Re-review
 
-When bot reviewers (Codex, CodeRabbit, Greptile, etc.) leave feedback, the skill automatically requests re-review by posting `@bot review` comments.
+When supported bot reviewers leave feedback, the skill automatically requests
+re-review only when discovered among the pull request's actual reviewers.
 
 **Supported bots:**
-- `codex` → `@codex review`
-- `coderabbitai` → `@coderabbitai review`
-- `greptileai` → `@greptileai review`
-- `copilot` → Added via GitHub Reviewers
+- `chatgpt-codex-connector[bot]` → `@codex review`
+- `coderabbitai[bot]` → `@coderabbitai full review`
+- `greptileai` → `@greptileai`
+- `copilot-pull-request-review[bot]` → Manual re-request through GitHub Reviewers
 
 **To disable auto bot re-review**, add to your project's CLAUDE.md:
 ```markdown
@@ -145,6 +156,20 @@ and comparing it against the issue spec. Route discovery understands Next.js
 App and Pages Router, Astro `src/pages`, Remix `app/routes`, and
 Express/Hono/Fastify registrations. A configured Playwright suite runs as a
 supplement; it never substitutes for the visual check.
+## Local Review Cost and Opt-in
+
+Sub-agent reviews can double the session's token cost by loading another
+context, and are disabled by default in ship and review-deep. Ship tries usable
+external review CLIs; when none is available, it reports and records a skipped
+local review while retaining verification, coverage, E2E, and current-head PR
+CI gates. Review-deep addresses findings in the current context, including
+large sets of findings across multiple files.
+
+A project that wants a sub-agent review must opt in explicitly, for example by
+requesting `$ts-workflow:ship --llm fable` in its workflow instructions.
+Review-deep delegation likewise requires an explicit project or user request;
+finding count alone never opts in. Explicit backend choices are not silently
+replaced.
 
 ## Requirements
 

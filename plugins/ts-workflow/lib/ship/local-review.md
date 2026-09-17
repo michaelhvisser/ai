@@ -5,7 +5,7 @@ Loaded by `skills/ship/SKILL.md` Phase 1. Owns the full review/fix/verify/covera
 ## Step 5: Review Phase
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/lib/loop-state.sh"
+source "<PLUGIN_ROOT>/lib/loop-state.sh"
 set_loop_phase "$STATE_FILE" "reviewing" "$WORKFLOW_STATE_PATH"
 PASS=$(get_loop_field "$STATE_FILE" "pass" "$WORKFLOW_STATE_PATH")
 PASS="${PASS:-0}"
@@ -13,19 +13,26 @@ PASS="${PASS:-0}"
 
 The pass counter is incremented in Step 8 (after commit), not here. This prevents burning a pass number if the session exits mid-review.
 
-### Session-boundary rule for agent-backed reviews
+### Review routing and explicit Fable session boundaries
 
-Fable and agent-based reviews must run synchronously in the foreground. Never
-use `run_in_background: true`, return while an agent is still running, or
+Only explicitly selected `--llm fable` may delegate a review. Never select it
+as a default or automatic recovery path. Fable reviews must run synchronously
+in the foreground. Never use `run_in_background: true`, return while an agent is still running, or
 persist an agent handle for a successor session. Wait for the final response
 and parse it before leaving Step 5.
 
-In a headless worker context, if an agent-backed review cannot complete in the
-current session, do not start it. Persist `review_result="skipped"` and
+In a headless worker context, if an explicitly requested Fable review cannot
+complete in the current session, do not start it. Persist `review_result="skipped"` and
 `review_skip_reason="headless-worker"`, then continue through verification,
 commit, push, and non-draft PR creation. PR CI is the authoritative remote
 gate. A successor that finds `phase="reviewing"` follows the expired-review
-recovery in `skills/ship/SKILL.md`; it never restarts the review.
+routing in `lib/ship/reentry.md`: a persisted skip resumes Step 7; only an
+actual expired review uses expired-review recovery. It never restarts the review.
+
+Restore `REVIEW_RESULT` from the persisted `review_result` before any backend
+detection or planning. If `REVIEW_RESULT=skipped`, display the persisted skip
+reason and skip Steps 5a through 6, continuing at Step 7. Do not parse absent
+output, set `REVIEW_CLEAN=true`, or start a replacement reviewer.
 
 **Re-detect `$CODEX_CMD` when Step 5 is resumed within the same session**
 (the stop hook can jump directly here, skipping Step 4):
@@ -38,7 +45,8 @@ if [ "$LLM_CHOICE" = "codex" ] && [ -z "${CODEX_CMD:-}" ]; then
 fi
 ```
 
-If `CODEX_CMD` is still empty, return to the Step 4 prerequisite flow. Do not
+If `CODEX_CMD` is still empty or nested execution is prohibited by the active
+driver, return to the Step 4 prerequisite flow. Do not
 download or execute a package during re-entry detection.
 
 ### 5a. Generate Diff and Coverage Plan
@@ -52,16 +60,15 @@ If the diff is empty, skip the review loop entirely — proceed to Phase 2 (Step
 
 Otherwise set `REVIEW_BASE="origin/${BASE_BRANCH}"`,
 `REVIEW_BACKEND="$LLM_CHOICE"`, and `REVIEW_CONCURRENCY=auto`. Read
-`${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`, run the shared planner, display the coverage plan, and
+`<PLUGIN_ROOT>/lib/review-planning.md`, run the shared planner, display the coverage plan, and
 follow its units and final coordinator pass. The planner, not raw diff length,
 determines whether further partitioning or a backend decision is necessary.
 
 ### 5b. Run LLM Review
 
-**Cross-model default:** the value of this stage is a second model's
-perspective. When the diff was written by Claude (the usual case), keep the
-`codex` default. When the diff was written by Codex (wtcodex flows), prefer
-`--llm fable` so a different model family reviews the work.
+Use the selected external CLI. An unavailable unpinned backend follows
+`prerequisites.md`: external CLI recovery only, then a visible durable skip.
+Do not infer permission for Fable from the model that wrote the diff.
 
 <!-- SYNC: codex-exec-review — keep aligned with review-loop.md Step 5b -->
 
@@ -82,7 +89,7 @@ if [ "$CODEX_TIMEOUT" -gt 900 ]; then CODEX_TIMEOUT=900; fi
 
 Use the shared coverage plan for full-context or partitioned execution. If it
 reports `REVIEW_PLAN_REQUIRES_INPUT=yes`, apply the decision policy in
-`${CLAUDE_PLUGIN_ROOT}/lib/review-planning.md`. Never narrow baseline coverage or request input solely
+`<PLUGIN_ROOT>/lib/review-planning.md`. Never narrow baseline coverage or request input solely
 because the diff is large.
 
 #### Codex Exhaustive (`codex exec --output-schema`)
@@ -182,7 +189,8 @@ and command diagnostics. Retry once when the evidence identifies a transient or
 correctable failure. If failure persists, use an available fallback only when
 `LLM_EXPLICIT=false`; otherwise follow the shared **missing-intent gate** before
 replacing the explicitly selected backend. If no complete review path remains,
-stop incomplete with `WORKFLOW_REASON=review-backend-failed`.
+follow the prerequisite skip path for an unpinned backend. A pinned backend
+remains at the missing-intent gate; never interpret failure as clean.
 
 #### Invalid JSON
 
@@ -212,6 +220,9 @@ set_loop_field "$STATE_FILE" "quick_mode" "true" "$WORKFLOW_STATE_PATH"
 ### Fable — Claude Subagent (`LLM_CHOICE=fable`)
 
 <!-- SYNC: fable-subagent-review — keep aligned with llm-tools lib/review-loop/review-phase.md -->
+
+This section requires an explicitly selected `--llm fable` or an explicit user
+decision to replace the backend with Fable.
 
 Review by a fresh-context Claude subagent. No external CLI, no API key, no
 timeout wrapper — the subagent runs on the session's subscription and inherits
@@ -243,8 +254,7 @@ implementer's assumptions loaded, which is what makes it a genuine second read.
 **Error handling:** invalid JSON from the subagent is a review failure — do
 NOT fall through to the free-text clean path. Display the raw output (first
 500 chars) and retry once. If the backend was explicitly selected, follow the
-shared missing-intent gate before replacing it. Otherwise select the next
-usable review path from prerequisite evidence and state the rationale.
+shared missing-intent gate before replacing it.
 
 **When native Claude-subagent delegation is unavailable:** never shell out to
 `claude -p` — headless print mode bills metered API usage, not the
@@ -253,9 +263,7 @@ assembled prompt to a temp file, then `tmux send-keys -t <claude-window> "Read
 <prompt-file> and follow it; write the JSON result to <result-file>" Enter`,
 and poll for the result file. If no Claude tmux window is available and Fable
 was explicitly selected, follow the shared missing-intent gate before switching
-backends. If it was driver-selected as an unpinned fallback, select the next
-usable backend, state the evidence and rationale, and continue. Never skip the
-review silently.
+backends. Never skip the review silently.
 
 ### Gemini
 
@@ -286,7 +294,7 @@ the state file before resolving so every review pass uses the same model.
 OLLAMA_MODEL=${OLLAMA_MODEL:-$(get_loop_field "$STATE_FILE" "ollama_model" "$WORKFLOW_STATE_PATH")}
 if [ -z "$OLLAMA_MODEL" ]; then
   set +e
-  OLLAMA_MODEL=$(cd "$WORKTREE_PATH" && "${CLAUDE_PLUGIN_ROOT}/scripts/select-ollama-model.sh" 2>"/tmp/ollama-select-stderr-$$")
+  OLLAMA_MODEL=$(cd "$WORKTREE_PATH" && /bin/bash "<PLUGIN_ROOT>/scripts/select-ollama-model.sh" 2>"/tmp/ollama-select-stderr-$$")
   OLLAMA_SELECT_EXIT_CODE=$?
   OLLAMA_SELECT_STDERR=$(cat "/tmp/ollama-select-stderr-$$" 2>/dev/null)
   rm -f "/tmp/ollama-select-stderr-$$"
@@ -342,21 +350,6 @@ silently select a different Ollama model. Replacing an explicitly selected
 backend follows the shared missing-intent gate; an unpinned backend follows the
 prerequisite fallback ordering with a stated rationale.
 
-### Delegated agent review (only when `USE_AGENT_REVIEW=true`)
-
-This section runs only when the driver selected agent-based review for an
-unpinned backend or the user explicitly authorized replacing a pinned backend.
-
-1. Set `CODEX_EXEC_FALLBACK=true`
-2. Read `${CLAUDE_PLUGIN_ROOT}/agents/quality-review-prompt.md`. Adapt for the detected project language (replace TypeScript/JavaScript-specific criteria when not a TS/JS project).
-3. Fill template variables: `{WORKTREE_PATH}`, `{CHANGED_FILES}`, `{DIFF}`, `{PATTERNS}` ("Follow existing project conventions"), `{REPO_CONVENTIONS}` (from CLAUDE.md/AGENTS.md if present)
-4. Delegate synchronously through the active surface with the filled prompt,
-   selecting sonnet when the surface supports model choice, and wait for the
-   final response in the current session.
-5. Parse the agent's structured response (skip JSON parsing in 5c):
-   - `CLEAN` → `REVIEW_CLEAN=true`, persist, skip Step 6
-   - `HAS_FINDINGS` → use FINDINGS section as free-text findings for Step 6
-
 ### 5c. Parse Findings
 
 **Structured JSON** ((`LLM_CHOICE=codex` AND `CODEX_EXEC_FALLBACK!=true`) OR `LLM_CHOICE=fable`):
@@ -408,7 +401,7 @@ rather than from an individual package directory.
 
 ```bash
 # Sets PM/PMX/IS_MONOREPO and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+source "<PLUGIN_ROOT>/lib/detect-pm.sh"
 pm_detect "$WORKTREE_PATH"
 ```
 
@@ -500,9 +493,10 @@ coverage, commit, push, or completion.
 set_loop_phase "$STATE_FILE" "coverage-check" "$WORKFLOW_STATE_PATH"
 ```
 
-**Skip when:** `PASS < MAX_PASSES - 1` AND findings were not clean. Proceed to Step 7.6.
+**Skip when:** `PASS < MAX_PASSES - 1` AND findings were not clean AND
+`REVIEW_RESULT != skipped`. A skipped review still runs this final coverage gate. Otherwise read and execute the coverage procedure below.
 
-Read `${CLAUDE_PLUGIN_ROOT}/lib/coverage/coverage-verification.md` and follow Steps A through F with:
+Read `<PLUGIN_ROOT>/lib/coverage/coverage-verification.md` and follow Steps A through F with:
 
 | Variable | Value |
 |----------|-------|
@@ -686,6 +680,13 @@ same E2E result because its page selection and browser state are not proven.
 
 ### Execute smoke tests
 
+Read `<PLUGIN_ROOT>/lib/screenshot-evidence.md` before capturing. Initialize
+`EVIDENCE_RUN` for the current commit, generate an absolute path for each route
+and capture label, and supply it as DevTools `filePath` with PNG format. Open
+each saved image and record its visual verdict in the shared manifest, including
+failures and retests. A missing disk export affects attachment delivery only.
+
+
 For each changed handler/route/template, identify the URL path and:
 
 - `mcp__chrome-devtools-mcp__navigate_page` — load URL
@@ -701,6 +702,9 @@ If any page has an unexpected 4xx/5xx status, console JavaScript errors, failed
 persist `e2e_result="blocked"` with an explanatory `e2e_skip_reason`. Browser
 tooling errors use the recording block above. Display the failed route(s) and
 stop the workflow. No merge.
+
+Before stopping on a failed smoke test with an existing PR, post the captured
+evidence using the shared poster below, preserving the blocked verification.
 
 ### Cleanup and report
 
@@ -732,6 +736,20 @@ Display:
 
 Pages tested: N | Passed: N | Errors: N
 ```
+
+Save the smoke report, visual findings, exact tested commit, and unchanged
+verification outcome to `COMMENT_BODY_FILE`, placing `{{SCREENSHOTS}}` where
+the evidence table belongs. Post on the existing PR:
+
+```bash
+python3 "<PLUGIN_ROOT>/scripts/screenshot-evidence.py" post \
+  --run "$EVIDENCE_RUN" --body-file "$COMMENT_BODY_FILE" \
+  --repo "$REPO_SLUG" --number "$PR_NUM"
+```
+
+If no PR exists yet, retain `EVIDENCE_RUN` and `COMMENT_BODY_FILE` until Step 9
+creates it, then post. Attachment failures degrade to text and never change
+verification state or block shipping. Report a failed text-only post honestly.
 
 For UI-visible diffs, only `e2e_result="passed"` allows `$ts-workflow:ship` to continue.
 `e2e_result="blocked"` is a hard stop and must not be summarized as
@@ -778,6 +796,7 @@ fi
 
 Loop decision:
 
+- `REVIEW_RESULT=skipped` → Phase 2 (verification, coverage, and E2E must have passed)
 - `REVIEW_CLEAN=true` → Phase 2 (no point re-reviewing clean code)
 - `PASS >= MAX_PASSES` → Phase 2
 - Otherwise → back to Step 5

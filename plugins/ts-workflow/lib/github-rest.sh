@@ -4,6 +4,7 @@ GITHUB_CHECKS_FAILED=1
 GITHUB_CHECKS_REGISTRATION_TIMEOUT=2
 GITHUB_CHECKS_API_ERROR=3
 GITHUB_CHECKS_HEAD_SHIFT=4
+GITHUB_CHECKS_TERMINAL_TIMEOUT=5
 
 github_pr() {
   local pr_number="${1:?PR number is required}"
@@ -24,7 +25,7 @@ github_current_pr() {
   fi
 
   pages=$(gh api --paginate --slurp "repos/{owner}/{repo}/commits/$head_sha/pulls?per_page=100") || return
-  jq -cer --arg branch "$branch" --arg head_sha "$head_sha" '
+  printf '%s\n' "$pages" | jq -cer --arg branch "$branch" --arg head_sha "$head_sha" '
     [
       .[][]
       | select(.state == "open")
@@ -38,7 +39,7 @@ github_current_pr() {
       else
         error("multiple open pull requests match the current branch and head")
       end
-  ' <<< "$pages"
+  '
 }
 
 github_pr_reviews() {
@@ -46,7 +47,7 @@ github_pr_reviews() {
   local pages
 
   pages=$(gh api --paginate --slurp "repos/{owner}/{repo}/pulls/$pr_number/reviews?per_page=100") || return
-  jq -c '[.[][]]' <<< "$pages"
+  printf '%s\n' "$pages" | jq -c '[.[][]]'
 }
 
 github_check_snapshot() {
@@ -119,6 +120,7 @@ github_watch_pr_checks() {
   local registration_attempts="${GITHUB_CHECK_REGISTRATION_ATTEMPTS:-12}"
   local stability_polls="${GITHUB_CHECK_STABILITY_POLLS:-2}"
   local poll_seconds="${GITHUB_CHECK_POLL_SECONDS:-10}"
+  local terminal_attempts="${GITHUB_CHECK_TERMINAL_ATTEMPTS:-60}"
   local pr_json
   local current_sha
   local snapshot=""
@@ -130,11 +132,13 @@ github_watch_pr_checks() {
   local signature
   local stable_signature=""
   local stable_count=0
+  local terminal_attempt=1
+  local pending_checks
 
   if ! pr_json=$(github_pr "$pr_number"); then
     return "$GITHUB_CHECKS_API_ERROR"
   fi
-  current_sha=$(jq -er '.head.sha' <<< "$pr_json") || return "$GITHUB_CHECKS_API_ERROR"
+  current_sha=$(printf '%s\n' "$pr_json" | jq -er '.head.sha') || return "$GITHUB_CHECKS_API_ERROR"
 
   if [ -n "$expected_sha" ] && [ "$current_sha" != "$expected_sha" ]; then
     return "$GITHUB_CHECKS_HEAD_SHIFT"
@@ -145,7 +149,7 @@ github_watch_pr_checks() {
     if ! snapshot=$(github_check_snapshot "$expected_sha"); then
       return "$GITHUB_CHECKS_API_ERROR"
     fi
-    item_count=$(jq '.items | length' <<< "$snapshot") || return "$GITHUB_CHECKS_API_ERROR"
+    item_count=$(printf '%s\n' "$snapshot" | jq '.items | length') || return "$GITHUB_CHECKS_API_ERROR"
     if [ "$item_count" -gt 0 ]; then
       registered=true
       break
@@ -161,8 +165,8 @@ github_watch_pr_checks() {
   fi
 
   while true; do
-    pending_count=$(jq '[.items[] | select(.terminal == false)] | length' <<< "$snapshot") || return "$GITHUB_CHECKS_API_ERROR"
-    signature=$(jq -r '[.items[] | "\(.id):\(.source_id)"] | sort | join("|")' <<< "$snapshot") || return "$GITHUB_CHECKS_API_ERROR"
+    pending_count=$(printf '%s\n' "$snapshot" | jq '[.items[] | select(.terminal == false)] | length') || return "$GITHUB_CHECKS_API_ERROR"
+    signature=$(printf '%s\n' "$snapshot" | jq -r '[.items[] | "\(.id):\(.source_id)"] | sort | join("|")') || return "$GITHUB_CHECKS_API_ERROR"
 
     if [ "$pending_count" -eq 0 ]; then
       if [ "$signature" = "$stable_signature" ]; then
@@ -179,6 +183,27 @@ github_watch_pr_checks() {
       stable_count=0
     fi
 
+    if [ "$terminal_attempt" -ge "$terminal_attempts" ]; then
+      if ! pr_json=$(github_pr "$pr_number"); then
+        return "$GITHUB_CHECKS_API_ERROR"
+      fi
+      current_sha=$(printf '%s\n' "$pr_json" | jq -er '.head.sha') || return "$GITHUB_CHECKS_API_ERROR"
+      if [ "$current_sha" != "$expected_sha" ]; then
+        return "$GITHUB_CHECKS_HEAD_SHIFT"
+      fi
+
+      pending_checks=$(printf '%s\n' "$snapshot" | jq -r '.items[] | select(.terminal == false) | "\(.name): \(.state)"') || return "$GITHUB_CHECKS_API_ERROR"
+      printf 'Timed out waiting for PR #%s checks at %s to reach a stable terminal state after %s polls.\n' \
+        "$pr_number" "$expected_sha" "$terminal_attempts" >&2
+      if [ -n "$pending_checks" ]; then
+        printf 'Pending checks:\n%s\n' "$pending_checks" >&2
+      else
+        printf 'No checks are pending, but the terminal check set did not stabilize.\n' >&2
+      fi
+      return "$GITHUB_CHECKS_TERMINAL_TIMEOUT"
+    fi
+
+    terminal_attempt=$((terminal_attempt + 1))
     sleep "$poll_seconds"
     if ! snapshot=$(github_check_snapshot "$expected_sha"); then
       return "$GITHUB_CHECKS_API_ERROR"
@@ -188,13 +213,13 @@ github_watch_pr_checks() {
   if ! pr_json=$(github_pr "$pr_number"); then
     return "$GITHUB_CHECKS_API_ERROR"
   fi
-  current_sha=$(jq -er '.head.sha' <<< "$pr_json") || return "$GITHUB_CHECKS_API_ERROR"
+  current_sha=$(printf '%s\n' "$pr_json" | jq -er '.head.sha') || return "$GITHUB_CHECKS_API_ERROR"
   if [ "$current_sha" != "$expected_sha" ]; then
     return "$GITHUB_CHECKS_HEAD_SHIFT"
   fi
 
   printf '%s\n' "$snapshot"
-  failure_count=$(jq '[.items[] | select(.terminal and (.successful | not))] | length' <<< "$snapshot") || return "$GITHUB_CHECKS_API_ERROR"
+  failure_count=$(printf '%s\n' "$snapshot" | jq '[.items[] | select(.terminal and (.successful | not))] | length') || return "$GITHUB_CHECKS_API_ERROR"
   if [ "$failure_count" -gt 0 ]; then
     return "$GITHUB_CHECKS_FAILED"
   fi

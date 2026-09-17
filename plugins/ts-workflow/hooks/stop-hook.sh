@@ -17,11 +17,15 @@ set -euo pipefail
 HOOK_INPUT=$(cat)
 
 # Extract transcript path from hook input
+STOP_HOOK_ACTIVE=$(echo "$HOOK_INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
+if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  exit 0
+fi
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null)
-HOOK_SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-TRANSCRIPT_SESSION_ID=""
-if [ -n "$TRANSCRIPT_PATH" ]; then
-  TRANSCRIPT_SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
+CURRENT_SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+HOOK_CWD=$(echo "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+if [ -z "$CURRENT_SESSION_ID" ] && [ -n "$TRANSCRIPT_PATH" ]; then
+  CURRENT_SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
 fi
 
 # Source shared library for state management
@@ -34,84 +38,412 @@ fi
 
 source "$LIB_PATH"
 
-loop_log "stop-hook: entered, transcript=$TRANSCRIPT_PATH"
+resolve_current_worktree() {
+  local candidate="$HOOK_CWD"
+  local root
+  if [ -z "$candidate" ] || [ ! -d "$candidate" ]; then
+    candidate=$(pwd -P)
+  fi
+  root=$(git -C "$candidate" rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$root" ] && [ -d "$root" ]; then
+    root=$(cd "$root" && pwd -P)
+  else
+    root=$(cd "$candidate" && pwd -P)
+  fi
+  printf '%s\n' "$root"
+}
+
+CURRENT_WORKTREE_PATH=$(resolve_current_worktree)
+
+loop_log "stop-hook: entered, transcript=$TRANSCRIPT_PATH worktree=$CURRENT_WORKTREE_PATH"
 
 block_stop() {
   local reason="$1"
   local message="$2"
+  local state_context="${3:-${STATE_FILE:-unknown}}"
   if ! printf '%s' "$reason" | grep '[^[:space:]]' >/dev/null; then
     reason="Loop execution is blocked by invalid state."
   fi
+  message="$message State file(s): $state_context. Cancel with /ts-workflow:cancel-loop."
   jq -n --arg reason "$reason" --arg msg "$message" \
     '{"decision": "block", "reason": $reason, "systemMessage": $msg}'
 }
 
-transcript_has_loop_init_marker() {
-  local loop_name="$1"
-  local transcript="$2"
-  local marker="Loop initialized: $loop_name"
-  grep -Fxq "$marker" "$transcript" || grep -Fq "${marker}\\n" "$transcript"
+transcript_proves_loop_initialization() {
+  local state_file="$1"
+  local loop_instance_id
+  local loop_name
+
+  [ -n "$CURRENT_SESSION_ID" ] &&
+    [ -n "$TRANSCRIPT_PATH" ] &&
+    [ -f "$TRANSCRIPT_PATH" ] || return 1
+
+  loop_name=$(jq -r '.loop_name // empty' "$state_file" 2>/dev/null)
+  loop_instance_id=$(jq -r '.loop_instance_id // empty' "$state_file" 2>/dev/null)
+  [ -n "$loop_name" ] && [ -n "$loop_instance_id" ] || return 1
+
+  grep -Fq -- "Loop initialized: $loop_name [$loop_instance_id]\\n" "$TRANSCRIPT_PATH" ||
+    grep -Fq -- "Loop initialized: $loop_name [$loop_instance_id]\"" "$TRANSCRIPT_PATH"
 }
 
-# Find every loop state file (finished ones included, so an owner's <done> still
-# removes its record), then narrow them to the stopping session before resolving
-# ambiguity. Repository-scoped storage may contain a live loop from a different
-# linked worktree/session; foreign state is not an active loop here.
-STATE_FILES=$(find_loop_state_files)
+session_owns_loop_state() {
+  local state_file="$1"
+  local stored_session_id
+  local stored_session_worktree_path
 
-if [ -z "$STATE_FILES" ]; then
-  loop_log "stop-hook: no active loops found"
-  exit 0
-fi
+  [ -f "$state_file" ] && [ -r "$state_file" ] && jq empty "$state_file" 2>/dev/null || return 1
+
+  stored_session_id=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null)
+  stored_session_worktree_path=$(jq -r '.session_worktree_path // empty' "$state_file" 2>/dev/null)
+
+  if [ -n "$stored_session_worktree_path" ]; then
+    [ -d "$stored_session_worktree_path" ] || return 1
+    stored_session_worktree_path=$(cd "$stored_session_worktree_path" && pwd -P)
+    [ "$stored_session_worktree_path" = "$CURRENT_WORKTREE_PATH" ] || return 1
+  fi
+
+  if [ -n "$stored_session_id" ]; then
+    [ -n "$CURRENT_SESSION_ID" ] && [ "$stored_session_id" = "$CURRENT_SESSION_ID" ]
+    return
+  fi
+
+  transcript_proves_loop_initialization "$state_file"
+}
+
+state_is_stale_for_transcript() {
+  local state_file="$1"
+  local started_at
+  local transcript_birth
+  local loop_epoch
+  local loop_instance_id
+  local stored_session_id
+
+  [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ] || return 1
+  stored_session_id=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null)
+  loop_instance_id=$(jq -r '.loop_instance_id // empty' "$state_file" 2>/dev/null)
+  if [ -z "$stored_session_id" ] && [ -n "$loop_instance_id" ]; then
+    return 1
+  fi
+  started_at=$(jq -r '.started_at // empty' "$state_file" 2>/dev/null)
+  [ -n "$started_at" ] || return 1
+
+  if [[ "${OSTYPE:-}" == "darwin"* ]]; then
+    transcript_birth=$(stat -f %B "$TRANSCRIPT_PATH" 2>/dev/null || echo "0")
+    loop_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started_at" +%s 2>/dev/null || echo "0")
+  else
+    transcript_birth=$(stat -c %W "$TRANSCRIPT_PATH" 2>/dev/null || echo "0")
+    loop_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo "0")
+  fi
+
+  [ "$loop_epoch" -gt 0 ] &&
+    [ "$transcript_birth" -gt 0 ] &&
+    [ "$transcript_birth" -gt "$loop_epoch" ]
+}
+
+state_has_explicit_session_mismatch() {
+  local state_file="$1"
+  local stored_session_id
+
+  stored_session_id=$(jq -r '.session_id // empty' "$state_file" 2>/dev/null)
+  [ -n "$stored_session_id" ] &&
+    [ -n "$CURRENT_SESSION_ID" ] &&
+    [ "$stored_session_id" != "$CURRENT_SESSION_ID" ]
+}
+
+state_has_stale_worktree() {
+  local state_file="$1"
+  local field
+  local stored_path
+  for field in session_worktree_path worktree_path; do
+    stored_path=$(jq -r --arg field "$field" '.[$field] // empty' "$state_file" 2>/dev/null)
+    if [ -n "$stored_path" ] && [ ! -d "$stored_path" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+repository_target_required_for() {
+  local owner_workflow="$1"
+  local phase="$2"
+  case "$owner_workflow:$phase" in
+    ship:reviewing|ship:pushing)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+loop_requires_repository_target() {
+  repository_target_required_for "$OWNER_WORKFLOW" "$PHASE"
+}
+
+repository_has_target() {
+  local worktree_path="$1"
+  local base_branch="${2:-}"
+  local current_branch
+  local upstream
+  local default_ref
+  local default_branch
+  local remote
+  local candidate
+  local ahead
+
+  git -C "$worktree_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
+
+  if ! git -C "$worktree_path" diff --cached --quiet --; then
+    return 0
+  fi
+
+  upstream=$(git -C "$worktree_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+  if [ -n "$upstream" ]; then
+    ahead=$(git -C "$worktree_path" rev-list --count "$upstream"..HEAD 2>/dev/null) || return 2
+    if [ "$ahead" -gt 0 ]; then
+      return 0
+    fi
+  fi
+
+  current_branch=$(git -C "$worktree_path" branch --show-current 2>/dev/null || true)
+  default_ref=""
+  default_branch=""
+  if [ -n "$base_branch" ]; then
+    case "$base_branch" in
+      refs/heads/*)
+        default_branch="${base_branch#refs/heads/}"
+        candidate="$base_branch"
+        ;;
+      refs/remotes/*)
+        candidate="$base_branch"
+        default_branch="${base_branch#refs/remotes/}"
+        default_branch="${default_branch#*/}"
+        ;;
+      *)
+        default_branch="$base_branch"
+        candidate="$base_branch"
+        ;;
+    esac
+    if git -C "$worktree_path" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+      default_ref="$candidate"
+    else
+      for remote in $(git -C "$worktree_path" remote); do
+        candidate="$remote/$base_branch"
+        if git -C "$worktree_path" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+          default_ref="$candidate"
+          break
+        fi
+      done
+    fi
+  fi
+  if [ -z "$default_ref" ]; then
+    for remote in $(git -C "$worktree_path" remote); do
+      candidate=$(git -C "$worktree_path" symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null || true)
+      if [ -n "$candidate" ] &&
+         git -C "$worktree_path" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+        default_ref="$candidate"
+        default_branch="${candidate#"$remote"/}"
+        break
+      fi
+    done
+  fi
+  if [ -z "$default_ref" ]; then
+    for candidate in origin/main origin/master main master; do
+      if git -C "$worktree_path" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+        default_ref="$candidate"
+        default_branch="${candidate#origin/}"
+        break
+      fi
+    done
+  fi
+  [ -n "$default_ref" ] || return 2
+  if [ -n "$current_branch" ] && [ "$current_branch" != "$default_branch" ]; then
+    ahead=$(git -C "$worktree_path" rev-list --count "$default_ref"..HEAD 2>/dev/null) || return 2
+    if [ "$ahead" -gt 0 ]; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+state_has_no_repository_target() {
+  local state_file="$1"
+  local owner_workflow
+  local phase
+  local worktree_path
+  local base_branch
+  local target_status=0
+  owner_workflow=$(jq -r '.owner_workflow // empty' "$state_file" 2>/dev/null)
+  phase=$(jq -r '.phase // empty' "$state_file" 2>/dev/null)
+  worktree_path=$(jq -r '.worktree_path // empty' "$state_file" 2>/dev/null)
+  base_branch=$(jq -r '.base_branch // empty' "$state_file" 2>/dev/null)
+  repository_target_required_for "$owner_workflow" "$phase" || return 1
+  [ -n "$worktree_path" ] && [ -d "$worktree_path" ] || return 1
+  repository_has_target "$worktree_path" "$base_branch" || target_status=$?
+  [ "$target_status" -eq 1 ]
+}
+
+repository_state_fingerprint() {
+  local worktree_path="$1"
+  local phase="$2"
+  local reason="$3"
+  local head
+  local upstream
+  local upstream_head
+  local filesystem_entry
+  local filesystem_root
+  local generated_project
+  local relative_entry
+  local entry_type
+  local entry_metadata
+  local entry_size
+  local scanned_entries=0
+  local remaining_content_bytes=8388608
+  head=$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null || true)
+  upstream=$(git -C "$worktree_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+  upstream_head=$(git -C "$worktree_path" rev-parse '@{upstream}' 2>/dev/null || true)
+  {
+    printf '%s\n' "$worktree_path" "$phase" "$reason" "$head" "$upstream" "$upstream_head"
+    if git -C "$worktree_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "$worktree_path" status --porcelain=v1 --untracked-files=all -- \
+        . ':(exclude).local/state/**' 2>/dev/null || true
+      git -C "$worktree_path" diff --no-ext-diff --binary --cached -- \
+        . ':(exclude).local/state/**' 2>/dev/null || true
+      git -C "$worktree_path" diff --no-ext-diff --binary -- \
+        . ':(exclude).local/state/**' 2>/dev/null || true
+      while IFS= read -r -d '' untracked_file; do
+        printf '%s\0' "$untracked_file"
+        git -C "$worktree_path" hash-object -- "$untracked_file" 2>/dev/null || true
+      done < <(git -C "$worktree_path" ls-files --others --exclude-standard -z -- \
+        . ':(exclude).local/state/**' 2>/dev/null)
+    else
+      filesystem_root="$worktree_path"
+      case "${LOOP_NAME:-}" in
+        create-go-project-*)
+          generated_project="${LOOP_NAME#create-go-project-}"
+          case "$generated_project" in
+            ''|*[!A-Za-z0-9_-]*) ;;
+            *)
+              if [ -d "$worktree_path/$generated_project" ] &&
+                 [ ! -L "$worktree_path/$generated_project" ]; then
+                filesystem_root="$worktree_path/$generated_project"
+              fi
+              ;;
+          esac
+          ;;
+      esac
+      printf '%s\n' "$filesystem_root"
+      while IFS= read -r -d '' filesystem_entry; do
+        [ "$filesystem_entry" != "$TRANSCRIPT_PATH" ] || continue
+        scanned_entries=$((scanned_entries + 1))
+        if [ "$scanned_entries" -gt 512 ]; then
+          printf '%s\n' "entry-limit:512"
+          break
+        fi
+        relative_entry="${filesystem_entry#"$filesystem_root"/}"
+        if [ -L "$filesystem_entry" ]; then
+          entry_type="link"
+        elif [ -d "$filesystem_entry" ]; then
+          entry_type="directory"
+        else
+          entry_type="file"
+        fi
+        printf '%s\0%s\0' "$entry_type" "$relative_entry"
+        if [ "$entry_type" = "file" ]; then
+          if entry_metadata=$(stat -c '%s:%Y' -- "$filesystem_entry" 2>/dev/null); then
+            :
+          elif entry_metadata=$(stat -f '%z:%m' "$filesystem_entry" 2>/dev/null); then
+            :
+          else
+            entry_metadata=""
+          fi
+          printf '%s\0' "$entry_metadata"
+          entry_size="${entry_metadata%%:*}"
+          case "$entry_size" in
+            ''|*[!0-9]*) entry_size=0 ;;
+          esac
+          if [ "$remaining_content_bytes" -gt 0 ]; then
+            if [ "$entry_size" -le "$remaining_content_bytes" ]; then
+              cksum < "$filesystem_entry" 2>/dev/null || true
+              remaining_content_bytes=$((remaining_content_bytes - entry_size))
+            else
+              head -c "$remaining_content_bytes" "$filesystem_entry" 2>/dev/null | cksum || true
+              remaining_content_bytes=0
+            fi
+          fi
+        elif [ "$entry_type" = "link" ]; then
+          readlink "$filesystem_entry" 2>/dev/null || true
+        fi
+      done < <(find "$filesystem_root" \
+        \( -type d \( -name .git -o -name node_modules -o -name vendor -o -name .cache \) \
+          -o -type d -path "$worktree_path/.local/state" \) -prune -o \
+        \( -type d -o -type f -o -type l \) -print0 2>/dev/null)
+    fi
+  } | cksum | awk '{print $1 ":" $2}'
+}
+
+# Find any active loop state file
+STATE_FILES=$(find_active_loops)
 
 OWNED_STATE_FILES=""
-while IFS= read -r candidate_state; do
-  [ -n "$candidate_state" ] || continue
-  if ! jq -e 'type == "object"' "$candidate_state" >/dev/null 2>&1; then
-    loop_log "stop-hook: ignoring unidentifiable state: $candidate_state"
+while IFS= read -r CANDIDATE_STATE_FILE; do
+  [ -n "$CANDIDATE_STATE_FILE" ] || continue
+  if state_has_stale_worktree "$CANDIDATE_STATE_FILE"; then
+    loop_log "stop-hook: pruning stale loop state '$CANDIDATE_STATE_FILE'"
+    cleanup_loop "$CANDIDATE_STATE_FILE"
     continue
   fi
-  candidate_loop=$(jq -r '.loop_name // empty' "$candidate_state")
-  candidate_session=$(jq -r '.session_id // empty' "$candidate_state")
-  candidate_owned=false
-  if [ -n "$candidate_session" ]; then
-    if { [ -n "$HOOK_SESSION_ID" ] && [ "$candidate_session" = "$HOOK_SESSION_ID" ]; } ||
-       { [ -n "$TRANSCRIPT_SESSION_ID" ] && [ "$candidate_session" = "$TRANSCRIPT_SESSION_ID" ]; }; then
-      candidate_owned=true
-    fi
-  elif [ -n "$candidate_loop" ] && [ -n "$TRANSCRIPT_PATH" ] &&
-       [ -f "$TRANSCRIPT_PATH" ] &&
-       transcript_has_loop_init_marker "$candidate_loop" "$TRANSCRIPT_PATH"; then
-    candidate_owned=true
+  if state_has_explicit_session_mismatch "$CANDIDATE_STATE_FILE"; then
+    loop_log "stop-hook: current session does not own loop state '$CANDIDATE_STATE_FILE', skipping"
+    continue
   fi
-
-  if [ "$candidate_owned" = true ]; then
-    if [ -n "$OWNED_STATE_FILES" ]; then
-      OWNED_STATE_FILES="$OWNED_STATE_FILES
-$candidate_state"
+  if state_is_stale_for_transcript "$CANDIDATE_STATE_FILE"; then
+    loop_log "stop-hook: pruning timestamp-stale loop state '$CANDIDATE_STATE_FILE'"
+    cleanup_loop "$CANDIDATE_STATE_FILE"
+    continue
+  fi
+  if session_owns_loop_state "$CANDIDATE_STATE_FILE"; then
+    if loop_state_is_terminal "$CANDIDATE_STATE_FILE"; then
+      TERMINAL_PROMISE=$(jq -r '.completion_promise' "$CANDIDATE_STATE_FILE")
+      if check_completion_promise "$TERMINAL_PROMISE" "$TRANSCRIPT_PATH"; then
+        cleanup_loop "$CANDIDATE_STATE_FILE"
+      fi
+      continue
+    fi
+    if state_has_no_repository_target "$CANDIDATE_STATE_FILE"; then
+      loop_log "stop-hook: pruning targetless loop state '$CANDIDATE_STATE_FILE'"
+      cleanup_loop "$CANDIDATE_STATE_FILE"
+      continue
+    fi
+    if [ -z "$OWNED_STATE_FILES" ]; then
+      OWNED_STATE_FILES="$CANDIDATE_STATE_FILE"
     else
-      OWNED_STATE_FILES="$candidate_state"
+      OWNED_STATE_FILES="$OWNED_STATE_FILES
+$CANDIDATE_STATE_FILE"
     fi
   else
-    loop_log "stop-hook: ignoring foreign loop '$candidate_loop' from $candidate_state"
+    loop_log "stop-hook: current session does not own loop state '$CANDIDATE_STATE_FILE', skipping"
   fi
 done <<< "$STATE_FILES"
+STATE_FILES="$OWNED_STATE_FILES"
 
-if [ -z "$OWNED_STATE_FILES" ]; then
-  loop_log "stop-hook: no active loops belong to this session"
+if [ -z "$STATE_FILES" ]; then
+  loop_log "stop-hook: no active loops owned by current session"
   exit 0
 fi
 
-STATE_COUNT=$(printf '%s\n' "$OWNED_STATE_FILES" | wc -l | tr -d ' ')
+STATE_COUNT=$(printf '%s\n' "$STATE_FILES" | wc -l | tr -d ' ')
 if [ "$STATE_COUNT" -ne 1 ]; then
-  MULTIPLE_REASON=$(printf 'Multiple active loop states belong to this session; ownership is ambiguous:\n%s' "$OWNED_STATE_FILES")
-  loop_log "stop-hook: refusing ambiguous owned loops: $OWNED_STATE_FILES"
+  MULTIPLE_REASON=$(printf 'Multiple active loop states were found; ownership is ambiguous:\n%s' "$STATE_FILES")
+  loop_log "stop-hook: refusing ambiguous active loops: $STATE_FILES"
   block_stop "$MULTIPLE_REASON" \
-    "$MULTIPLE_REASON Cancel the orphaned loop states or restore one caller-owned state before continuing."
+    "$MULTIPLE_REASON Cancel the orphaned loop states or restore one caller-owned state before continuing." \
+    "$STATE_FILES"
   exit 0
 fi
 
-STATE_FILE="$OWNED_STATE_FILES"
+STATE_FILE="$STATE_FILES"
 
 # Verify state file exists and is readable
 if [ ! -f "$STATE_FILE" ] || [ ! -r "$STATE_FILE" ]; then
@@ -143,52 +475,22 @@ if ! read_loop_state "$STATE_FILE" '[]' 2>/dev/null; then
   exit 0
 fi
 
-# LOCAL PATCH (upstream gopherguides/gopher-ai#309): bind repo-scoped loop state
-# to the session that initialized it. Legacy state and drivers without a supported
-# session environment may still have an empty session_id. Their first legitimate
-# Stop proves ownership through setup-loop.sh's unique
-# "Loop initialized: <loop_name>" transcript marker and persists the transcript
-# session id. Later owner stops no longer depend on that marker surviving
-# compaction. Foreign or unidentifiable sessions fail open: they do not block,
-# increment, pause, or delete another session's loop.
 STORED_SESSION_ID=$(jq -r '.session_id // empty' "$STATE_FILE")
-
-if [ -n "$STORED_SESSION_ID" ]; then
-  if [ -z "$HOOK_SESSION_ID" ] && [ -z "$TRANSCRIPT_SESSION_ID" ]; then
-    loop_log "stop-hook: cannot prove ownership of loop '$LOOP_NAME' without a current session id, skipping"
-    exit 0
-  fi
-  if [ "$STORED_SESSION_ID" != "$HOOK_SESSION_ID" ] &&
-     [ "$STORED_SESSION_ID" != "$TRANSCRIPT_SESSION_ID" ]; then
-    loop_log "stop-hook: session mismatch (stored=$STORED_SESSION_ID hook=$HOOK_SESSION_ID transcript=$TRANSCRIPT_SESSION_ID), skipping without cleanup"
-    exit 0
-  fi
-else
-  if [ -z "$TRANSCRIPT_SESSION_ID" ] || [ -z "$TRANSCRIPT_PATH" ] ||
-     [ ! -f "$TRANSCRIPT_PATH" ]; then
-    loop_log "stop-hook: unowned loop '$LOOP_NAME' has no usable session evidence, skipping"
-    exit 0
-  fi
-  if ! transcript_has_loop_init_marker "$LOOP_NAME" "$TRANSCRIPT_PATH"; then
-    loop_log "stop-hook: session does not own loop '$LOOP_NAME' (no init marker in transcript), skipping"
-    exit 0
-  fi
-
-  BIND_TMP="${STATE_FILE}.session.$$"
-  if ! jq --arg current "$TRANSCRIPT_SESSION_ID" '
-    if ((.session_id // "") == "") or .session_id == $current then
-      .session_id = $current
-    else
-      error("loop session was claimed concurrently")
-    end
-  ' "$STATE_FILE" > "$BIND_TMP"; then
-    rm -f "$BIND_TMP"
-    loop_log "stop-hook: loop '$LOOP_NAME' was claimed by another session, skipping"
-    exit 0
-  fi
-  mv "$BIND_TMP" "$STATE_FILE"
-  STORED_SESSION_ID="$TRANSCRIPT_SESSION_ID"
-  loop_log "stop-hook: bound loop '$LOOP_NAME' to transcript session $TRANSCRIPT_SESSION_ID"
+if [ -z "$STORED_SESSION_ID" ] && [ -n "$CURRENT_SESSION_ID" ]; then
+  set_loop_field "$STATE_FILE" "session_id" "$CURRENT_SESSION_ID" '[]'
+  loop_log "stop-hook: claimed loop state '$STATE_FILE' for session '$CURRENT_SESSION_ID'"
+fi
+STORED_SESSION_WORKTREE_PATH=$(jq -r '.session_worktree_path // empty' "$STATE_FILE")
+if [ -z "$STORED_SESSION_WORKTREE_PATH" ]; then
+  set_loop_field "$STATE_FILE" "session_worktree_path" "$CURRENT_WORKTREE_PATH" '[]'
+  STORED_SESSION_WORKTREE_PATH="$CURRENT_WORKTREE_PATH"
+  loop_log "stop-hook: claimed loop state '$STATE_FILE' for session worktree '$CURRENT_WORKTREE_PATH'"
+fi
+STORED_WORKTREE_PATH=$(jq -r '.worktree_path // empty' "$STATE_FILE")
+if [ -z "$STORED_WORKTREE_PATH" ]; then
+  set_loop_field "$STATE_FILE" "worktree_path" "$CURRENT_WORKTREE_PATH" '[]'
+  STORED_WORKTREE_PATH="$CURRENT_WORKTREE_PATH"
+  loop_log "stop-hook: claimed loop state '$STATE_FILE' for worktree '$CURRENT_WORKTREE_PATH'"
 fi
 
 # Validate iteration is a number
@@ -223,6 +525,17 @@ if [ -n "$COMPLETION_PROMISE" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIP
   fi
 fi
 
+TARGET_STATUS=0
+if loop_requires_repository_target; then
+  STORED_BASE_BRANCH=$(jq -r '.base_branch // empty' "$STATE_FILE")
+  repository_has_target "$STORED_WORKTREE_PATH" "$STORED_BASE_BRANCH" || TARGET_STATUS=$?
+  if [ "$TARGET_STATUS" -eq 1 ]; then
+    loop_log "stop-hook: no repository target remains; cleaning up '$STATE_FILE'"
+    cleanup_loop "$STATE_FILE"
+    exit 0
+  fi
+fi
+
 # Increment iteration counter
 increment_iteration "$STATE_FILE"
 NEW_ITERATION=$((ITERATION + 1))
@@ -232,7 +545,19 @@ SYSTEM_MSG="Iteration $NEW_ITERATION of loop '$LOOP_NAME'."
 
 # Phase-aware re-feed: look up phase message from state file, fall back to generic
 PHASE_MSG=""
-if [ "$LOOP_NAME" = "ship" ] && [ "$PHASE" = "reviewing" ]; then
+if [ "$LOOP_NAME" = "ship" ] && [ "$PHASE" = "reviewing" ] &&
+   [ "$(jq -r '.components.ship.review_result? // .review_result // ""' "$STATE_FILE")" = "skipped" ]; then
+  RECOVERY_TMP="${STATE_FILE}.tmp"
+  jq '
+    .phase = "verifying" |
+    if (.components.ship? | type) == "object" then
+      .components.ship.phase = "verifying"
+    else . end
+  ' \
+    "$STATE_FILE" > "$RECOVERY_TMP" && mv "$RECOVERY_TMP" "$STATE_FILE"
+  PHASE="verifying"
+  PHASE_MSG="The local review was skipped because no usable review backend existed. Do not start a review. Run verification, coverage, and E2E before commit or push."
+elif [ "$LOOP_NAME" = "ship" ] && [ "$PHASE" = "reviewing" ]; then
   RECOVERY_TMP="${STATE_FILE}.tmp"
   jq '
     .review_result = "void" |
@@ -288,7 +613,7 @@ else
       ;;
     ci-watch)
       REASON="Resume: watch CI status and fix failures."
-      SYSTEM_MSG="$SYSTEM_MSG Resume CI monitoring. Run gh pr checks and fix any failures."
+      SYSTEM_MSG="$SYSTEM_MSG Resume CI monitoring using the workflow REST helper pinned to the published head, with a 60-second polling interval. Fix failures; API errors, missing checks, and head changes are not success."
       ;;
     merging)
       REASON="Resume: merge the PR."
@@ -313,8 +638,16 @@ if ! printf '%s' "$REASON" | grep '[^[:space:]]' >/dev/null; then
   REASON="Continue working on the task."
 fi
 
-loop_log "stop-hook: blocking exit, reason='$REASON'"
+MAX_UNCHANGED_BLOCKS=3
+BLOCK_FINGERPRINT=$(repository_state_fingerprint "$STORED_WORKTREE_PATH" "$PHASE" "$REASON")
+UNCHANGED_BLOCK_COUNT=$(record_loop_block_attempt "$STATE_FILE" "$BLOCK_FINGERPRINT")
+if [ "$UNCHANGED_BLOCK_COUNT" -gt "$MAX_UNCHANGED_BLOCKS" ]; then
+  loop_log "stop-hook: unchanged block cap reached ($UNCHANGED_BLOCK_COUNT > $MAX_UNCHANGED_BLOCKS); cleaning up '$STATE_FILE'"
+  cleanup_loop "$STATE_FILE"
+  exit 0
+fi
+SYSTEM_MSG="$SYSTEM_MSG Unchanged worktree-state block $UNCHANGED_BLOCK_COUNT of $MAX_UNCHANGED_BLOCKS; the loop self-expires before another identical block."
 
-# Block exit and re-feed prompt
-jq -n --arg reason "$REASON" --arg msg "$SYSTEM_MSG" \
-  '{"decision": "block", "reason": $reason, "systemMessage": $msg}'
+loop_log "stop-hook: blocking exit, reason='$REASON' unchanged_blocks=$UNCHANGED_BLOCK_COUNT"
+
+block_stop "$REASON" "$SYSTEM_MSG" "$STATE_FILE"

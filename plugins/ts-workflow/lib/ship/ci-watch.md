@@ -31,10 +31,11 @@ echo "Watching CI for commit: $HEAD_SHA"
 
 ## 10b. Watch every check source for the correct SHA
 
-Use the shared watcher. It provides the bounded registration window, combines
-check runs with legacy commit statuses, waits through a stability window for
-late registrations, aggregates every terminal failure, and verifies the PR
-head after watching.
+Use the shared watcher. It bounds both registration and terminal polling,
+combines check runs with legacy commit statuses, waits through a stability
+window for late registrations, aggregates every terminal failure, and verifies
+the PR head after watching. `GITHUB_CHECK_TERMINAL_ATTEMPTS` configures the
+post-registration poll limit.
 
 ```bash
 if CI_SNAPSHOT=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$HEAD_SHA"); then
@@ -60,6 +61,9 @@ case "$CI_STATUS" in
   "$GITHUB_CHECKS_HEAD_SHIFT")
     WORKFLOW_REASON="ci-head-shift"
     ;;
+  "$GITHUB_CHECKS_TERMINAL_TIMEOUT")
+    WORKFLOW_REASON="ci-terminal-timeout"
+    ;;
   *)
     WORKFLOW_REASON="ci-watch-unknown-error"
     ;;
@@ -69,9 +73,11 @@ esac
 On status 0, persist `has_ci: true`, clear `ci_skip_reason`, display
 `CI_SNAPSHOT`, and continue to Step 11. On `GITHUB_CHECKS_FAILED`, display the
 full snapshot and continue to Step 10e. On `GITHUB_CHECKS_HEAD_SHIFT`, continue
-to Step 10d. On `GITHUB_CHECKS_API_ERROR` or an unknown status, follow **Hard
-Invariant Failure** immediately with the supplied reason. Never treat an API
-failure or head shift as passing CI.
+to Step 10d. On `GITHUB_CHECKS_TERMINAL_TIMEOUT`, retain the pending check
+names and states printed by the helper and stop incomplete with
+`ci-terminal-timeout`. On `GITHUB_CHECKS_API_ERROR` or an unknown status,
+follow **Hard Invariant Failure** immediately with the supplied reason. Never
+treat a timeout, API failure, or head shift as passing CI.
 
 On `GITHUB_CHECKS_REGISTRATION_TIMEOUT`, determine whether any workflow can
 produce a check for this PR before stopping:
@@ -147,6 +153,8 @@ if [ "$FINAL_SHA" != "$HEAD_SHA" ]; then
   set_loop_field "$STATE_FILE" "head_sha" "$HEAD_SHA" "$WORKFLOW_STATE_PATH"
   set_loop_json_field "$STATE_FILE" "pass" 0 "$WORKFLOW_STATE_PATH"
   set_loop_field "$STATE_FILE" "review_clean" "" "$WORKFLOW_STATE_PATH"
+  set_loop_field "$STATE_FILE" "review_result" "" "$WORKFLOW_STATE_PATH"
+  set_loop_field "$STATE_FILE" "review_skip_reason" "" "$WORKFLOW_STATE_PATH"
   set_loop_phase "$STATE_FILE" "review-required" "$WORKFLOW_STATE_PATH"
 fi
 ```
@@ -164,7 +172,9 @@ fetch, check out, or reset until the working tree is clean.
 
 The reset on SHA shift is critical: if a concurrent push lands content that
 wasn't reviewed locally, we MUST re-review it. The pass counter is reset to
-0 so the user gets full max-passes coverage of the new code. The distinct
+0 so the user gets full max-passes coverage of the new code. Clear the previous
+review result and skip reason so Step 5 reassesses backend availability for the
+new head instead of honoring a stale skip. The distinct
 `review-required` phase survives a session boundary because no reviewer has
 started yet; once Step 5 changes it to `reviewing`, the normal expired-review
 recovery applies.

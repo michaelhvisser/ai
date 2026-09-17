@@ -11,7 +11,7 @@ the lockfile at `WORKTREE_PATH`:
 
 ```bash
 # Sets PM/PMX/IS_MONOREPO and defines has_script().
-source "${CLAUDE_PLUGIN_ROOT}/lib/detect-pm.sh"
+source "<PLUGIN_ROOT>/lib/detect-pm.sh"
 pm_detect "$WORKTREE_PATH"
 ```
 

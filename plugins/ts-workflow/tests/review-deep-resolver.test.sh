@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Run the published recipes, including their failure paths, in bash and zsh.
+# Run the published review-deep discovery recipes, including their failure
+# paths, in bash and zsh.
 set -euo pipefail
 PLUGIN_DIR=$(cd "$(dirname "$0")/.." && pwd)
 TEST_DIR=$(mktemp -d)
 trap 'rm -rf "$TEST_DIR"' EXIT
-for DOC in SKILL context-gathering; do
+for DOC in scope-discovery context-gathering; do
   awk -v prefix="$TEST_DIR/$DOC" '
     /^```bash$/ { inside=1; n++; next }
     /^```/ { inside=0; next }
@@ -12,13 +13,12 @@ for DOC in SKILL context-gathering; do
   ' "$PLUGIN_DIR/skills/review-deep/$DOC.md"
 done
 export RESOLVER_BLOCK CONTEXT_BLOCK TEST_DIR
-RESOLVER_BLOCK=$(grep -l 'PR_PAGES=' "$TEST_DIR"/SKILL.*.sh)
-CONTEXT_BLOCK=$(grep -l 'REMOTE_URL=' "$TEST_DIR"/context-gathering.*.sh)
+RESOLVER_BLOCK=$(grep -l 'commits/$HEAD_SHA/pulls' "$TEST_DIR"/scope-discovery.*.sh)
+CONTEXT_BLOCK=$(grep -l '^if ! PR_FULL=' "$TEST_DIR"/context-gathering.*.sh)
 [[ -n "$RESOLVER_BLOCK" && -n "$CONTEXT_BLOCK" ]]
 mkdir "$TEST_DIR/repo"
 git -C "$TEST_DIR/repo" init -q -b feature
 git -C "$TEST_DIR/repo" -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m initial
-git -C "$TEST_DIR/repo" remote add origin https://github.com/example/project.git
 cd "$TEST_DIR/repo"
 cat > "$TEST_DIR/run.sh" <<'SH'
 gh() {
@@ -29,7 +29,7 @@ gh() {
     printf '%s\n' "$PAGES"
   elif [ "$1 $2" = 'pr view' ]; then
     [ "${VIEW_FAIL:-false}" = false ] || return 19
-    printf '{"number":%s}\n' "$3"
+    printf '{"number":%s,"url":%s}\n' "$3" "${PR_URL_JSON:-\"https://github.com/example/project/pull/$3\"}"
   else
     return 20
   fi
@@ -66,28 +66,24 @@ for SHELL_BIN in bash zsh; do
   INITIAL_JSON='{"number":8}' assert_number 8
   [[ ! -s "$TEST_DIR/calls" ]]
   if API_FAIL=true run_recipe; then echo 'FAIL: swallowed API error'; exit 1; fi
-  grep -q 'failed to resolve PRs' "$TEST_DIR/err"
+  grep -q 'PR discovery failed' "$TEST_DIR/err"
   PAGES='not json'
   if run_recipe; then echo 'FAIL: accepted invalid JSON'; exit 1; fi
   PAGES='[[{"number":3,"state":"closed","head":{"ref":"old"}}]]'
   if VIEW_FAIL=true run_recipe; then echo 'FAIL: swallowed PR read error'; exit 1; fi
+  grep -q 'PR metadata lookup failed' "$TEST_DIR/err"
   MODE=context
-  for URL in https://github.com/example/project.git git@github.com:example/project.git ssh://git@github.com/example/project https://github.com/example/project; do
-    git remote set-url origin "$URL"
-    run_recipe
-    [[ $(cat "$TEST_DIR/out") = 'example/project|example|project' ]]
+  run_recipe
+  [[ $(cat "$TEST_DIR/out") = 'example/project|example|project' ]]
+  # Fork PRs resolve to the canonical repository from the PR URL, not the checkout remote.
+  PR_URL_JSON='"https://github.com/upstream-org/canonical/pull/7"' run_recipe
+  [[ $(cat "$TEST_DIR/out") = 'upstream-org/canonical|upstream-org|canonical' ]]
+  for BAD in '"https://github.com/example/project"' '"https://github.com/example/project/pull/7/files"' 'null' '""'; do
+    if PR_URL_JSON="$BAD" run_recipe; then echo "FAIL: accepted PR url $BAD"; exit 1; fi
+    grep -q 'no valid canonical repository URL' "$TEST_DIR/err"
   done
-  for URL in https://enterprise.example/example/project.git https://github.com/example/project/extra /tmp/local.git https://github.com/example; do
-    git remote set-url origin "$URL"
-    : > "$TEST_DIR/calls"
-    if run_recipe; then echo "FAIL: accepted $URL"; exit 1; fi
-    [[ ! -s "$TEST_DIR/calls" ]]
-    grep -q 'review-deep: origin' "$TEST_DIR/err"
-  done
-  git remote rename origin upstream
-  if run_recipe; then echo 'FAIL: accepted missing origin'; exit 1; fi
-  grep -q 'origin remote is required' "$TEST_DIR/err"
-  git remote rename upstream origin
+  if VIEW_FAIL=true run_recipe; then echo 'FAIL: swallowed PR context read error'; exit 1; fi
+  grep -q 'PR context lookup failed' "$TEST_DIR/err"
   MODE=resolver
   echo "PASS: $SHELL_BIN resolver pagination, selection, failures, and repository guards"
 done
