@@ -125,7 +125,7 @@ Belong in `WORKFLOW.md` as `## Prioritisation Criteria` next to Admission Criter
 
 Absolute: a bug is never closed for inactivity; an issue with an open PR referencing it in closing syntax stays open until that PR merges or closes. The apply script fails closed on any GitHub read error.
 
-**Decision packets.** One comment with a hidden marker, the exact question, options, recommendation, evidence; label `triage:needs-decision`. The morning digest lists them. You answer in the thread; the next sweep reads your comment as an authoritative routing instruction.
+**Decision packets.** One comment with a hidden marker, the exact question, options, recommendation, evidence; it carries the `needs-info` triage label. The morning digest lists them. You answer in the thread; the next sweep reads your comment as an authoritative routing instruction.
 
 ## Parallel without clobbering
 
@@ -208,7 +208,7 @@ Brief: adjudicate Codex, verify its claims against the repo, name what both miss
 
 **What both missed:**
 1. Intake shape is mostly solved for new issues: 52 of the 60 most recent open issues carry a `detent-agent` block. Templates are low value. The migration problem is the 142 old issues, and the answer is the sweep proposing close or park, not retrofitting blocks.
-2. A third inbox. Packet comments join `/today` and the Detent dashboard while 24 open PRs already wait on Michael. Decisions live in one board view filtered on `triage:needs-decision`; no email in Phase A.
+2. A third inbox. Packet comments join `/today` and the Detent dashboard while 24 open PRs already wait on Michael. Decisions live in one board view filtered on the `needs-info` triage label; no email in Phase A.
 3. Double triage with `/pr-details`. Still-needed and the supersession sweep would run three times per issue and PR pair at different `dev` tips and can disagree. Write the verdict plus the `dev` SHA into the marker comment; `pr-details` trusts a verdict newer than its merge base.
 4. Cory's issues. 11 of the last 60 are his; every unparented one scores Low and his stale ones draw close proposals. Rule: the evaluator never proposes close or park on the other human's issue without that human's reaction, and priority on someone else's filing is a comment, not a field write.
 5. The revised MVP is still five phases. Planning at intake duplicates what the Detent lane already does at `xhigh`. And 21 of 52 recent effort blocks are `xhigh`, so "antagonist only for xhigh" is 40% of issues unless triage actively downgrades.
@@ -219,4 +219,4 @@ Brief: adjudicate Codex, verify its claims against the repo, name what both miss
 - `detent.yaml`: comment out `intake` (`:244-256`); set `backlog_admission.enabled: false` (`:214`). One PR.
 - Label the four or five Q3 epics `goal:q3-2026`.
 - `/issue-details <n>`, read-only: classify (bug, goal, idea, noise); search open issues and PRs by title terms for duplicates; propose a `goal:*` label and board Priority per the table; propose effort, never `max`; post one marker comment. No plan, no still-needed, no antagonist. Run it on last week's 49 issues; Michael and Cory each read every comment.
-- A board view filtered on `triage:needs-decision`.
+- A board view filtered on the `needs-info` triage label.

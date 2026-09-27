@@ -46,12 +46,12 @@ Three commands, and only these, each repo-qualified, each reachable **only** fro
 |---|---|---|
 | create | `gh api --hostname "$HOST" -X POST "repos/$SLUG/issues/$n/comments" -F body=@comment-<n>.md` | `comment_action: create` |
 | edit in place | `gh api --hostname "$HOST" -X PATCH "repos/$SLUG/issues/comments/<marker_id>" -F body=@comment-<n>.md` | `comment_action: edit` |
-| label | `gh issue edit <n> -R "$SLUG" --add-label "triage:needs-decision"` | the comment write succeeded **and** `needs_decision: true` |
+| label | `gh issue edit <n> -R "$SLUG" --add-label "needs-info"` | the comment write succeeded **and** `needs_decision: true` |
 
 All three are **bare `gh`, one attempt each, never retried** (§4).
 
 `-F body=@<path>` reads the value from the file (`gh api --help`: "use @<path> … to read
-value from file"). The label is added, never removed: clearing `triage:needs-decision` is
+value from file"). The label is added, never removed: clearing the `needs-info` triage label is
 the human's signal that the decision landed, and this skill must not undo it on a re-run.
 
 Never: `gh issue close`, `gh issue edit --body`, `--remove-label`, any other `--add-label`,
@@ -102,7 +102,7 @@ write:
 |---|---|---|---|
 | `POST` | the comment list — an owned marker present | `posted (confirmed after an ambiguous response)`; the next run edits it | `comment create failed — not retried`; the user re-runs |
 | `PATCH` | the comment by id — its body equals the draft | `edited #<id> (confirmed …)` | `comment edit failed — not retried; re-run` |
-| `--add-label` | the issue's labels — `triage:needs-decision` present | `label added (confirmed …)` | `label add failed — not retried` |
+| `--add-label` | the issue's labels — the `needs-info` triage label present | `label added (confirmed …)` | `label add failed — not retried` |
 
 Per issue it prints `#<n> posted`, `#<n> edited #<id>`, `, label added` / `, label add
 failed` when it applied, or `#<n> skipped — <note>`. A skipped issue does not abort the
@@ -112,4 +112,4 @@ rest, and a skipped write is reported, never retried silently.
 
 Stop. There is no "then run X" here: the design's hand-off to Detent, the plan, and the
 close reasons are later versions' work (`SKILL.md` §"Scope"), and the decision view (the
-board filtered on `triage:needs-decision`) is where a human picks the issue up.
+board filtered on the `needs-info` triage label) is where a human picks the issue up.

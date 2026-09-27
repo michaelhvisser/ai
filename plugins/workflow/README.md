@@ -99,7 +99,7 @@ them.
 Its product is one marker-backed comment per issue — a fenced YAML block plus
 cited prose — that a re-run finds by marker and edits in place. Nothing is
 written before the closing approval, which asks once per run: post the
-comments (plus `triage:needs-decision` where a decision is required), print
+comments (plus the `needs-info` triage label where a decision is required), print
 them, or stop. `--json` and non-interactive sessions mean print only. It
 never changes board Status or Priority, never closes, never edits a body.
 
