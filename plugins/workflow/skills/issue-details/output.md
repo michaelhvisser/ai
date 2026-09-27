@@ -86,7 +86,7 @@ complete prints one line, `=== #<n> === unevaluated: <reason>`:
   priority  <P>              <rule>  <(board differs — note for @author)?>
   effort    <tier> (<stance>)<existing block, when present>
   decision  <yes — reason|no>
-  comment   <create|edit #<id>|refuse>  <+ label triage:needs-decision?>
+  comment   <create|edit #<id>|refuse>  <+ label needs-info?>
 
 --- <k> issue(s) · <base> @ <sha7> · registry: <n> goal label(s), <m> issue(s) · files: <run dir>
 ```

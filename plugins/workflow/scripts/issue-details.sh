@@ -588,7 +588,7 @@ id_render_report() {
         "  priority  \(.priority | . + "               " | .[0:15]) \(.evidence.priority // "")\(if .priority_note then "  (" + .priority_note + ")" else "" end)\n" +
         "  effort    \("\(.effort) (\(.effort_stance))" | . + "               " | .[0:15]) \(if .existing_effort != "" then "issue block: \(.existing_effort)" else "no detent-agent block on the issue" end)\n" +
         "  decision  \(if .needs_decision then "yes" else "no" end | . + "               " | .[0:15]) \(.decision_reason // "")\n" +
-        "  comment   \(.comment.action)\(if .comment.action == "edit" then " #\(.marker_id)" else "" end)\(if .needs_decision and (.comment.action == "create" or .comment.action == "edit") then "  + label triage:needs-decision" else "" end)\n"' "$r"
+        "  comment   \(.comment.action)\(if .comment.action == "edit" then " #\(.marker_id)" else "" end)\(if .needs_decision and (.comment.action == "create" or .comment.action == "edit") then "  + label needs-info" else "" end)\n"' "$r"
     done < "$RUN_DIR/selected.txt"
     printf -- '--- %s issue(s) · %s @ %s · registry: %s goal label(s), %s issue(s) · files: %s\n' \
       "$(sort -u "$RUN_DIR/selected.txt" | wc -l | tr -d ' ')" "$BASE" "$(printf '%s' "$BASE_SHA" | cut -c1-7)" \
@@ -669,9 +669,9 @@ id_dispatch() {
       *) note="no write action for this issue ($action)" ;;
     esac
     if [ -n "$wrote" ] && [ "$nd" = true ]; then
-      if gh issue edit "$n" -R "$SLUG" --add-label "triage:needs-decision" > "$rf.label" 2>/dev/null; then wrote="$wrote, label added"
+      if gh issue edit "$n" -R "$SLUG" --add-label "needs-info" > "$rf.label" 2>/dev/null; then wrote="$wrote, label added"
       elif gh api --hostname "$HOST" "repos/$SLUG/issues/$n/labels" > "$rf.labels" 2>/dev/null \
-           && jq -e 'map(.name) | index("triage:needs-decision") != null' "$rf.labels" >/dev/null 2>&1; then
+           && jq -e 'map(.name) | index("needs-info") != null' "$rf.labels" >/dev/null 2>&1; then
         wrote="$wrote, label added (confirmed after an ambiguous response)"
       else wrote="$wrote, label add failed — not retried"; fi
     fi

@@ -71,7 +71,7 @@ which:
 1. `own-label` — the issue already carries a `goal:*` label. Keep it; propose nothing.
 2. `reference` — a `facts.md` §1i reference names an issue in the goal registry. Propose
    stamping that label on this issue (the proposal lives in the comment; this skill applies
-   no label but `triage:needs-decision`). Two references resolving to **different** goal
+   no label but the `needs-info` triage label). Two references resolving to **different** goal
    labels → `goal: null`, `DECISION_REQUIRED=1`, reason `two goal epics referenced: #A
    (<label>) and #B (<label>)`.
 3. `none` — no label, no resolving reference. `goal: null`, with the reason (`no
@@ -84,7 +84,7 @@ when its suffix equals it, next-quarter when it is the quarter after, and past o
 ended). Resolution runs in `finalize` against `goal-registry.tsv` — `goal_own_label`
 first, else the first `goal_refs` entry found in the registry (`source: reference`, the
 proposal being to stamp that label; this skill applies no label but
-`triage:needs-decision`), else `null` with the reason (`no part-of/epic reference`,
+the `needs-info` triage label), else `null` with the reason (`no part-of/epic reference`,
 `referenced issues carry no goal:* label`, `goal registry empty`). Two references
 resolving to **different** labels → `null`, `decision_required`, reason naming both.
 
@@ -143,7 +143,7 @@ instruction.
 ## §6 `needs_decision`
 
 True when a human has to rule before the issue can move; it is also the only condition
-under which the gate may add `triage:needs-decision`:
+under which the gate may add the `needs-info` triage label:
 
 `needs_decision` is true when the guarded verdict is `unclear`, the class is `question`,
 the judgement set `decision_required`, or a duplicate/fixed verdict landed on another

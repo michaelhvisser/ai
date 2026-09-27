@@ -1,6 +1,6 @@
 ---
 name: issue-details
-description: "Read-only triage evaluation for one or more GitHub issues: classify each as bug, goal, idea, question, or noise; run an advisory duplicate check against open issues, open PRs, and PRs merged into the base branch since filing (closed verdict vocabulary, at most one canonical, no invented numbers); resolve goal alignment through goal:* labels and epic references; propose board Priority and a Detent effort tier (never max) from the repo's own rubric; and draft one marker-backed comment per issue that a re-run edits in place. Mutates nothing until the closing approval, which asks once per run: post the comments (plus the triage:needs-decision label where a decision is required), print them, or stop. Use when an issue is filed or picked up cold and you want its class, duplicates, goal, priority, and effort settled before anyone plans or codes; or with --since to sweep last week's filings. SKIP for a PR — run pr-details — and SKIP when you want the issue planned, closed, or admitted: this version proposes only."
+description: "Read-only triage evaluation for one or more GitHub issues: classify each as bug, goal, idea, question, or noise; run an advisory duplicate check against open issues, open PRs, and PRs merged into the base branch since filing (closed verdict vocabulary, at most one canonical, no invented numbers); resolve goal alignment through goal:* labels and epic references; propose board Priority and a Detent effort tier (never max) from the repo's own rubric; and draft one marker-backed comment per issue that a re-run edits in place. Mutates nothing until the closing approval, which asks once per run: post the comments (plus the needs-info triage label where a decision is required), print them, or stop. Use when an issue is filed or picked up cold and you want its class, duplicates, goal, priority, and effort settled before anyone plans or codes; or with --since to sweep last week's filings. SKIP for a PR — run pr-details — and SKIP when you want the issue planned, closed, or admitted: this version proposes only."
 argument-hint: "[<issue-number> ...] [--since <n>d] [--base <branch>] [--no-dup-search] [--no-gate] [--json]"
 ---
 
@@ -77,8 +77,8 @@ marker comment. Excluded on purpose, each with its later home:
    state files; no subagent and no Codex process is dispatched in this version.
 3. **`post` is the only writer**, and its write set is exactly three commands
    (`execute.md` §2): one bare `gh api -X POST` to create the comment, or one bare `PATCH`
-   to edit the marker comment in place, then one bare `--add-label triage:needs-decision`
-   only when the comment landed and `needs_decision` is true — each attempted **once**,
+   to edit the marker comment in place, then one bare `--add-label needs-info` (the
+   `needs-info` triage label) only when the comment landed and `needs_decision` is true — each attempted **once**,
    and none of them unless the fail-closed refresh passed and the issue is still open. Board `Status` and `Priority`,
    the issue body, every other label, and the issue's open/closed state are never written.
 4. **Every GitHub read goes through the lib's retry wrapper** (`pr_facts_gh`), with these
@@ -191,7 +191,7 @@ getparable/parable · by michaelhvisser, you · OPEN · board Todo/none · creat
   priority  High            bug, workaround: none stated
   effort    xhigh (propose) no detent-agent block on the issue
   decision  yes             the body asks for a design ruling: read-time decay vs periodic full rebuild
-  comment   create  + label triage:needs-decision
+  comment   create  + label needs-info
 
 --- 1 issue(s) · dev @ 2baa683 · registry: 1 goal label(s), 0 issue(s) · files: <run dir>
 ```

@@ -232,7 +232,7 @@ dispatch() {  # <state-json> <result-json> [extra env] → log
 ST_OK=$(jq -c '.write_ok=1 | .write_note=""' <<<"$SNAP"); ST_NO=$(jq -c '.write_ok=0 | .write_note="x"' <<<"$SNAP")
 LOG=$(dispatch "$ST_NO" '{"needs_decision":true,"state":"OPEN"}');                     [ -z "$LOG" ] || fail V6 "WRITE_OK=0 must issue no gh call: $LOG"
 LOG=$(dispatch "$ST_OK" '{"needs_decision":false,"state":"OPEN"}');                    [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X POST repos/o/r/issues/1/comments' <<<"$LOG" || fail V6 "create without decision must be one bare POST and zero reads: $LOG"
-LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}');                     [ "$(grep -c . <<<"$LOG")" = 2 ] && [ "$(tail -1 <<<"$LOG" | grep -c 'add-label triage:needs-decision')" = 1 ] || fail V6 "create with decision must be POST then label: $LOG"
+LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}');                     [ "$(grep -c . <<<"$LOG")" = 2 ] && [ "$(tail -1 <<<"$LOG" | grep -c 'add-label needs-info')" = 1 ] || fail V6 "create with decision must be POST then label: $LOG"
 grep -q PATCH <<<"$LOG" && fail V6 "create run issued a PATCH"
 LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":false,"state":"OPEN"}'); [ "$(grep -c . <<<"$LOG")" = 1 ] && grep -q -- '-X PATCH repos/o/r/issues/comments/400' <<<"$LOG" || fail V6 "edit must be one PATCH on the marker: $LOG"
 printf '%s' "$C_MINE" > "$STUB_DIR/comments-after-1.json"
@@ -247,7 +247,7 @@ printf '{"body":"old"}' > "$STUB_DIR/comment-after-400.json"
 LOG=$(dispatch "$(jq -c '.write_ok=1' <<<"$SNAP_EDIT")" '{"needs_decision":true,"state":"OPEN"}' "STUB_PATCH_FAIL=1"); [ "$(grep -c 'X PATCH' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 2 ] && ! grep -q 'add-label' <<<"$LOG" && grep -q 'edit failed — not retried' "$RUN/dispatch.out" || fail V6 "failed PATCH: one attempt, no label, not retried: $LOG"
 rm -f "$STUB_DIR/comment-after-400.json"
 # label failure: one attempt, one confirming GET
-printf '[{"name":"triage:needs-decision"}]' > "$STUB_DIR/labels-after-1.json"
+printf '[{"name":"needs-info"}]' > "$STUB_DIR/labels-after-1.json"
 LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 3 ] && grep -q '^api --hostname github.com repos/o/r/issues/1/labels$' <<<"$LOG" && grep -q 'label added (confirmed' "$RUN/dispatch.out" || fail V6 "ambiguous label that landed: one attempt, confirmed: $LOG"
 printf '[]' > "$STUB_DIR/labels-after-1.json"
 LOG=$(dispatch "$ST_OK" '{"needs_decision":true,"state":"OPEN"}' "STUB_LABEL_FAIL=1"); [ "$(grep -c 'add-label' <<<"$LOG")" = 1 ] && [ "$(grep -c . <<<"$LOG")" = 3 ] && grep -q 'label add failed — not retried' "$RUN/dispatch.out" || fail V6 "failed label: one attempt, not retried: $LOG"
@@ -385,7 +385,7 @@ e2e() {  # <label> <collect args...>
   : > "$STUB_LOG"
   with_script "id_main post --run-dir '$d'" > "$d.post.out" 2>&1 || fail "V12/$label" "post failed: $(tail -3 "$d.post.out")"
   local writes; writes=$(grep -E 'X POST|X PATCH|add-label' "$STUB_LOG" | sed -E 's/ -F body=@.*//; s/ --hostname github.com//' || true)
-  [ "$writes" = "$(printf 'api -X POST repos/o/r/issues/11/comments\napi -X PATCH repos/o/r/issues/comments/400\nissue edit 12 -R o/r --add-label triage:needs-decision')" ] \
+  [ "$writes" = "$(printf 'api -X POST repos/o/r/issues/11/comments\napi -X PATCH repos/o/r/issues/comments/400\nissue edit 12 -R o/r --add-label needs-info')" ] \
     || fail "V12/$label" "write sequence: $(printf '%s' "$writes" | tr '\n' ';')"
   grep -q '^#11 posted$' "$d.post.out" && grep -q '^#12 edited #400, label added$' "$d.post.out" || fail "V12/$label" "post output: $(cat "$d.post.out")"
 }
