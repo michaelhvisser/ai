@@ -436,6 +436,24 @@ resume_loop_after_driver() {
 cleanup_loop() {
   local state_file="$1"
   loop_log "cleanup_loop: file=$state_file"
+  local browser_states browser_state script_dir
+  browser_states=$(jq -r '[.. | objects | .e2e_browser_state? | select(type == "string" and length > 0)] | unique[]' "$state_file" 2>/dev/null || true)
+  if [ -n "$browser_states" ]; then
+    if [ -n "${BASH_SOURCE[0]:-}" ]; then
+      script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
+    elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+      script_dir="${CLAUDE_PLUGIN_ROOT}/scripts"
+    else
+      echo "Cannot locate E2E browser cleanup helper; retaining $state_file" >&2
+      return 1
+    fi
+    while IFS= read -r browser_state; do
+      if ! bash "$script_dir/e2e-browser.sh" stop "$browser_state"; then
+        echo "E2E browser cleanup failed; retaining $state_file for retry" >&2
+        return 1
+      fi
+    done <<< "$browser_states"
+  fi
   rm -f "$state_file"
 }
 

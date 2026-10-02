@@ -18,7 +18,7 @@ if [ -n "$LOOP_NAME" ]; then
   STATE_FILE="$STATE_DIR/${SAFE_LOOP_NAME}.loop.local.json"
 
   if [ -f "$STATE_FILE" ]; then
-    rm -f "$STATE_FILE"
+    cleanup_loop "$STATE_FILE"
     echo "Loop '$LOOP_NAME' cancelled."
   else
     echo "No active loop found with name '$LOOP_NAME'."
@@ -32,7 +32,7 @@ else
   else
     echo "$LOOP_FILES" | while read -r file; do
       loop_name=$(jq -r '.loop_name // "unknown"' "$file" 2>/dev/null || echo "unknown")
-      rm -f "$file"
+      cleanup_loop "$file"
       echo "Cancelled loop: $loop_name"
     done
     echo "All active loops cancelled."
