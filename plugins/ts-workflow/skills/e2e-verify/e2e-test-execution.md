@@ -250,15 +250,16 @@ navigate → stabilize → screenshot → READ sequence in §5h remains mandator
 Detect if the app requires authentication:
 
 Start the owned session before the first browser call. On resumption, use
-its persisted state path instead of allocating a second session. Resolve
+its persisted state path instead of allocating a second session. Session state
+lives in a private system temporary directory outside the checkout, so browser
+verification does not leave untracked files behind. Resolve
 `<PLUGIN_ROOT>` as directed by `SKILL.md` on each agent surface.
 
 ```bash
 E2E_BROWSER_HELPER="<PLUGIN_ROOT>/scripts/e2e-browser.sh"
 E2E_BROWSER_STATE=$(get_loop_field "$STATE_FILE" "e2e_browser_state" "$WORKFLOW_STATE_PATH")
 if [ -z "$E2E_BROWSER_STATE" ]; then
-  mkdir -p "$WORKTREE_PATH/tmp"
-  E2E_BROWSER_DIR=$(mktemp -d "$WORKTREE_PATH/tmp/e2e-browser.XXXXXX")
+  E2E_BROWSER_DIR=$(mktemp -d "${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/ts-workflow-e2e-browser.XXXXXX")
   E2E_BROWSER_STATE="$E2E_BROWSER_DIR/session.json"
   set_loop_field "$STATE_FILE" "e2e_browser_state" "$E2E_BROWSER_STATE" "$WORKFLOW_STATE_PATH"
   if ! bash "$E2E_BROWSER_HELPER" start "$E2E_BROWSER_STATE"; then

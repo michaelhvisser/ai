@@ -155,6 +155,7 @@ set_loop_field() {
 }
 source "$E2E_FAKE_ROOT/start-block"
 jq -e '.active == true' "$E2E_BROWSER_STATE" >/dev/null
+case "$E2E_BROWSER_STATE" in "$WORKTREE_PATH"/*) echo 'browser state dirties worktree' >&2; exit 1 ;; esac
 # A resumed invocation must keep the same session.
 FIRST_STATE=$E2E_BROWSER_STATE
 source "$E2E_FAKE_ROOT/start-block"
@@ -247,4 +248,42 @@ jq -n --arg path "$SCRATCH/stale.json" '{e2e_browser_state:$path,workflow_result
 [ -f "$SCRATCH/stale-loop.json" ]
 jq -e '.active == true' "$SCRATCH/stale.json" >/dev/null
 cleanup_loop "$SCRATCH/stale-loop.json"
+# Exercise the real Stop hook: cleanup failures must emit blocking JSON.
+for HOOK_CASE in terminal max-iterations stale-worktree; do
+  HOOK_DIR="$SCRATCH/hook-$HOOK_CASE"
+  mkdir -p "$HOOK_DIR"
+  HOOK_STATE="$HOOK_DIR/.local/state/e2e-verify-42.loop.local.json"
+  HOOK_TRANSCRIPT="$HOOK_DIR/transcript.jsonl"
+  (
+    cd "$HOOK_DIR"
+    export CLAUDE_SESSION_ID=e2e-hook-session
+    bash "$PLUGIN_ROOT/scripts/setup-loop.sh" e2e-verify-42 VERIFIED 2 e2e-testing '{}' '' '["VERIFIED","E2E_FAIL","INCOMPLETE"]' >/dev/null
+  )
+  bash "$HELPER" start "$HOOK_DIR/browser.json" >/dev/null
+  set_loop_field "$HOOK_STATE" e2e_browser_state "$HOOK_DIR/browser.json"
+  echo '{}' > "$HOOK_TRANSCRIPT"
+  case "$HOOK_CASE" in
+    terminal)
+      set_loop_terminal_result "$HOOK_STATE" verified '' completed VERIFIED
+      echo '{"role":"assistant","message":{"content":[{"type":"text","text":"<done>VERIFIED</done>"}]}}' > "$HOOK_TRANSCRIPT"
+      ;;
+    max-iterations) set_loop_json_field "$HOOK_STATE" iteration 2 ;;
+    stale-worktree) set_loop_field "$HOOK_STATE" worktree_path "$HOOK_DIR/missing" ;;
+  esac
+  jq -n --arg cwd "$HOOK_DIR" --arg transcript "$HOOK_TRANSCRIPT" \
+    '{cwd:$cwd,session_id:"e2e-hook-session",transcript_path:$transcript}' > "$HOOK_DIR/input.json"
+  (
+    cd "$HOOK_DIR"
+    E2E_FAKE_FAIL_STOP=true bash "$PLUGIN_ROOT/hooks/stop-hook.sh" < input.json
+  ) > "$HOOK_DIR/blocked.json" 2> "$HOOK_DIR/stderr"
+  jq -e '.decision == "block" and (.reason | contains("browser cleanup"))' "$HOOK_DIR/blocked.json" >/dev/null
+  [ -f "$HOOK_STATE" ]
+  jq -e '.active == true' "$HOOK_DIR/browser.json" >/dev/null
+  (
+    cd "$HOOK_DIR"
+    bash "$PLUGIN_ROOT/hooks/stop-hook.sh" < input.json
+  ) > "$HOOK_DIR/retry-output" 2> "$HOOK_DIR/retry-stderr"
+  [ ! -f "$HOOK_STATE" ]
+  jq -e '.active == false' "$HOOK_DIR/browser.json" >/dev/null
+done
 echo 'e2e-browser: OK'

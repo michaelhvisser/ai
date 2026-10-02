@@ -69,6 +69,19 @@ block_stop() {
     '{"decision": "block", "reason": $reason, "systemMessage": $msg}'
 }
 
+# Cleanup failure must schedule a retry rather than escape through set -e.
+# Send lifecycle output to stderr so stdout remains one hook decision object.
+cleanup_loop_or_block() {
+  local cleanup_state="$1"
+  if cleanup_loop "$cleanup_state" >&2; then
+    return 0
+  fi
+  block_stop "Owned E2E browser cleanup is pending." \
+    "Retry cleanup of the recorded browser sessions before completing this loop. Keep the state file until shutdown succeeds." \
+    "$cleanup_state"
+  exit 0
+}
+
 transcript_proves_loop_initialization() {
   local state_file="$1"
   local loop_instance_id
@@ -391,7 +404,7 @@ while IFS= read -r CANDIDATE_STATE_FILE; do
   [ -n "$CANDIDATE_STATE_FILE" ] || continue
   if state_has_stale_worktree "$CANDIDATE_STATE_FILE"; then
     loop_log "stop-hook: pruning stale loop state '$CANDIDATE_STATE_FILE'"
-    cleanup_loop "$CANDIDATE_STATE_FILE"
+    cleanup_loop_or_block "$CANDIDATE_STATE_FILE"
     continue
   fi
   if state_has_explicit_session_mismatch "$CANDIDATE_STATE_FILE"; then
@@ -400,20 +413,20 @@ while IFS= read -r CANDIDATE_STATE_FILE; do
   fi
   if state_is_stale_for_transcript "$CANDIDATE_STATE_FILE"; then
     loop_log "stop-hook: pruning timestamp-stale loop state '$CANDIDATE_STATE_FILE'"
-    cleanup_loop "$CANDIDATE_STATE_FILE"
+    cleanup_loop_or_block "$CANDIDATE_STATE_FILE"
     continue
   fi
   if session_owns_loop_state "$CANDIDATE_STATE_FILE"; then
     if loop_state_is_terminal "$CANDIDATE_STATE_FILE"; then
       TERMINAL_PROMISE=$(jq -r '.completion_promise' "$CANDIDATE_STATE_FILE")
       if check_completion_promise "$TERMINAL_PROMISE" "$TRANSCRIPT_PATH"; then
-        cleanup_loop "$CANDIDATE_STATE_FILE"
+        cleanup_loop_or_block "$CANDIDATE_STATE_FILE"
       fi
       continue
     fi
     if state_has_no_repository_target "$CANDIDATE_STATE_FILE"; then
       loop_log "stop-hook: pruning targetless loop state '$CANDIDATE_STATE_FILE'"
-      cleanup_loop "$CANDIDATE_STATE_FILE"
+      cleanup_loop_or_block "$CANDIDATE_STATE_FILE"
       continue
     fi
     if [ -z "$OWNED_STATE_FILES" ]; then
@@ -510,7 +523,7 @@ fi
 if [ -n "$MAX_ITERATIONS" ] && [[ "$MAX_ITERATIONS" =~ ^[0-9]+$ ]]; then
   if [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
     loop_log "stop-hook: max iterations reached ($ITERATION >= $MAX_ITERATIONS)"
-    cleanup_loop "$STATE_FILE"
+    cleanup_loop_or_block "$STATE_FILE"
     exit 0
   fi
 fi
@@ -520,7 +533,7 @@ if [ -n "$COMPLETION_PROMISE" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIP
   loop_log "stop-hook: checking completion promise '$COMPLETION_PROMISE'"
   if check_completion_promise "$COMPLETION_PROMISE" "$TRANSCRIPT_PATH"; then
     loop_log "stop-hook: completion promise found, cleaning up"
-    cleanup_loop "$STATE_FILE"
+    cleanup_loop_or_block "$STATE_FILE"
     exit 0
   fi
 fi
@@ -531,7 +544,7 @@ if loop_requires_repository_target; then
   repository_has_target "$STORED_WORKTREE_PATH" "$STORED_BASE_BRANCH" || TARGET_STATUS=$?
   if [ "$TARGET_STATUS" -eq 1 ]; then
     loop_log "stop-hook: no repository target remains; cleaning up '$STATE_FILE'"
-    cleanup_loop "$STATE_FILE"
+    cleanup_loop_or_block "$STATE_FILE"
     exit 0
   fi
 fi
@@ -643,7 +656,7 @@ BLOCK_FINGERPRINT=$(repository_state_fingerprint "$STORED_WORKTREE_PATH" "$PHASE
 UNCHANGED_BLOCK_COUNT=$(record_loop_block_attempt "$STATE_FILE" "$BLOCK_FINGERPRINT")
 if [ "$UNCHANGED_BLOCK_COUNT" -gt "$MAX_UNCHANGED_BLOCKS" ]; then
   loop_log "stop-hook: unchanged block cap reached ($UNCHANGED_BLOCK_COUNT > $MAX_UNCHANGED_BLOCKS); cleaning up '$STATE_FILE'"
-  cleanup_loop "$STATE_FILE"
+  cleanup_loop_or_block "$STATE_FILE"
   exit 0
 fi
 SYSTEM_MSG="$SYSTEM_MSG Unchanged worktree-state block $UNCHANGED_BLOCK_COUNT of $MAX_UNCHANGED_BLOCKS; the loop self-expires before another identical block."
