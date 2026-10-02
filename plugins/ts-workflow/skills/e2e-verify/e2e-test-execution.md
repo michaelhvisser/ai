@@ -263,6 +263,12 @@ if [ -z "$E2E_BROWSER_STATE" ]; then
   set_loop_field "$STATE_FILE" "e2e_browser_state" "$E2E_BROWSER_STATE" "$WORKFLOW_STATE_PATH"
   if ! bash "$E2E_BROWSER_HELPER" start "$E2E_BROWSER_STATE"; then
     E2E_RESULT='missing-browser-tooling'
+    # The helper records ownership before launch. No file means it never
+    # reached launch, so there is no owned session for cleanup to stop.
+    if [ ! -e "$E2E_BROWSER_STATE" ] && [ ! -L "$E2E_BROWSER_STATE" ]; then
+      set_loop_field "$STATE_FILE" "e2e_browser_state" "" "$WORKFLOW_STATE_PATH"
+      E2E_BROWSER_STATE=''
+    fi
   fi
 fi
 ```

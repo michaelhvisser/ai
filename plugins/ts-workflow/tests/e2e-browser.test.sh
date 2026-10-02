@@ -192,6 +192,35 @@ SCENARIO
 for DOC_SHELL in bash zsh; do
   "$DOC_SHELL" "$SCRATCH/doc-scenario" "$PLUGIN_ROOT" "$SCRATCH/doc-$DOC_SHELL"
 done
+# Missing CLI creates no ownership record and must remain cancellable.
+mkdir -p "$SCRATCH/no-cli-bin"
+ln -s "$(command -v jq)" "$SCRATCH/no-cli-bin/jq"
+cat > "$SCRATCH/no-cli-scenario" <<'NOCLI'
+set -eu
+CLAUDE_PLUGIN_ROOT=$1
+WORKTREE_PATH=$2
+STATE_FILE="$WORKTREE_PATH/workflow.json"
+WORKFLOW_STATE_PATH='[]'
+mkdir -p "$WORKTREE_PATH"
+echo '{}' > "$STATE_FILE"
+get_loop_field() { jq -r --arg field "$2" '.[$field] // empty' "$1"; }
+set_loop_field() {
+  jq --arg field "$2" --arg value "$3" '.[$field] = $value' "$1" > "$1.tmp"
+  mv "$1.tmp" "$1"
+}
+source "$E2E_FAKE_ROOT/start-block"
+[ "$E2E_RESULT" = missing-browser-tooling ]
+[ -z "$E2E_BROWSER_STATE" ]
+jq -e '.e2e_browser_state == ""' "$STATE_FILE" >/dev/null
+source "$E2E_FAKE_ROOT/stop-block"
+[ "$E2E_CLEANUP_FAILED" = false ]
+source "$CLAUDE_PLUGIN_ROOT/lib/loop-state.sh"
+cleanup_loop "$STATE_FILE"
+[ ! -f "$STATE_FILE" ]
+NOCLI
+for DOC_SHELL in /bin/bash /bin/zsh; do
+  PATH="$SCRATCH/no-cli-bin:/usr/bin:/bin" "$DOC_SHELL" "$SCRATCH/no-cli-scenario" "$PLUGIN_ROOT" "$SCRATCH/missing-$(basename "$DOC_SHELL")"
+done
 # Hook cleanup and explicit cancellation must not forget embedded ownership.
 source "$PLUGIN_ROOT/lib/loop-state.sh"
 bash "$HELPER" start "$SCRATCH/cancel.json"
@@ -218,4 +247,4 @@ jq -n --arg path "$SCRATCH/stale.json" '{e2e_browser_state:$path,workflow_result
 [ -f "$SCRATCH/stale-loop.json" ]
 jq -e '.active == true' "$SCRATCH/stale.json" >/dev/null
 cleanup_loop "$SCRATCH/stale-loop.json"
-echo 'e2e-browser: OK' \n\n
+echo 'e2e-browser: OK'
