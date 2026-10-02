@@ -94,7 +94,10 @@ if [ "$EMBEDDED_WORKFLOW" = "true" ]; then
 elif [ -f "$STATE_FILE" ] && loop_state_is_terminal "$STATE_FILE" &&
      ! loop_state_owned_by_current_session "$STATE_FILE"; then
   echo "Discarding finished E2E state from a previous session ($(jq -r '.workflow_result' "$STATE_FILE")) — starting fresh."
-  rm -f "$STATE_FILE"
+  if ! cleanup_loop "$STATE_FILE"; then
+    echo "Previous E2E browser cleanup is pending; retaining its state."
+    exit 1
+  fi
 elif [ -f "$STATE_FILE" ]; then
   read_loop_state "$STATE_FILE" "$WORKFLOW_STATE_PATH"
   EXISTING_PHASE="$PHASE"
@@ -236,6 +239,14 @@ persisted reason, re-emits only its terminal promise, and stops:
 
 ```bash
 if [ "$PHASE" = "e2e-failed" ]; then
+  E2E_BROWSER_STATE=$(get_loop_field "$STATE_FILE" "e2e_browser_state" "$WORKFLOW_STATE_PATH")
+  if [ -n "$E2E_BROWSER_STATE" ]; then
+    if bash "<PLUGIN_ROOT>/scripts/e2e-browser.sh" stop "$E2E_BROWSER_STATE"; then
+      set_loop_field "$STATE_FILE" "e2e_browser_cleanup" "stopped" "$WORKFLOW_STATE_PATH"
+    else
+      set_loop_field "$STATE_FILE" "e2e_browser_cleanup" "failed" "$WORKFLOW_STATE_PATH"
+    fi
+  fi
   WORKFLOW_REASON=$(get_loop_field "$STATE_FILE" "reason" "$WORKFLOW_STATE_PATH")
   echo "E2E verification failed: $WORKFLOW_REASON"
   if [ "$EMBEDDED_WORKFLOW" = "true" ]; then

@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# Capture this library's own location while sourcing it. Codex does not inject
+# CLAUDE_PLUGIN_ROOT, and zsh has no BASH_SOURCE array.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  TS_LOOP_LIBRARY_FILE="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+  eval 'TS_LOOP_LIBRARY_FILE=${(%):-%x}'
+else
+  TS_LOOP_LIBRARY_FILE=''
+fi
+if [ -n "$TS_LOOP_LIBRARY_FILE" ]; then
+  TS_LOOP_PLUGIN_ROOT=$(cd "$(dirname "$TS_LOOP_LIBRARY_FILE")/.." && pwd)
+else
+  TS_LOOP_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+fi
+
 resolve_loop_owner_root() {
   local root
   root=""
@@ -436,6 +451,21 @@ resume_loop_after_driver() {
 cleanup_loop() {
   local state_file="$1"
   loop_log "cleanup_loop: file=$state_file"
+  local browser_states browser_state script_dir
+  browser_states=$(jq -r '[.. | objects | .e2e_browser_state? | select(type == "string" and length > 0)] | unique[]' "$state_file" 2>/dev/null || true)
+  if [ -n "$browser_states" ]; then
+    if [ -z "$TS_LOOP_PLUGIN_ROOT" ]; then
+      echo "Cannot locate E2E browser cleanup helper; retaining $state_file" >&2
+      return 1
+    fi
+    script_dir="$TS_LOOP_PLUGIN_ROOT/scripts"
+    while IFS= read -r browser_state; do
+      if ! bash "$script_dir/e2e-browser.sh" stop "$browser_state"; then
+        echo "E2E browser cleanup failed; retaining $state_file for retry" >&2
+        return 1
+      fi
+    done <<< "$browser_states"
+  fi
   rm -f "$state_file"
 }
 

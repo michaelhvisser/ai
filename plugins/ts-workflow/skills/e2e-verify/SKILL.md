@@ -51,7 +51,9 @@ in order:
 5. **Terminal Re-entry**
 
 If this skill or any supporting file sets `WORKFLOW_RESULT=INCOMPLETE`, execute
-**Hard Invariant Failure** from `loop-state.md` and stop. Never continue to
+**Hard Invariant Failure** from `loop-state.md` and stop. If browser ownership
+was recorded, first execute section 5j of `e2e-test-execution.md`, even on
+invariant failure, cancellation, or terminal re-entry. Never continue to
 browser testing, add labels, invoke ship, or claim verification on that path.
 
 Phase → step routing:
@@ -113,7 +115,7 @@ Do not fix findings in this mode.
 Set phase to `e2e-testing`, refresh PR metadata, and read
 `<PLUGIN_ROOT>/skills/e2e-verify/e2e-test-execution.md` completely. Execute
 its full procedure, including per-route navigate, stabilize, screenshot, READ,
-spec comparison, evidence recording, and cleanup.
+spec comparison, evidence recording, and owned-browser cleanup on every exit.
 
 Then read **Persist E2E Result** in
 `<PLUGIN_ROOT>/skills/e2e-verify/loop-state.md` and execute it.
@@ -138,7 +140,8 @@ no marker.
 ## Completion Contract
 
 A verified result requires rebase, local checks, applicable review, passing UI
-E2E (or a non-UI skip), posted results, and the mode finish action. Apply the
+E2E (or a non-UI skip), successful cleanup of any recorded browser session,
+posted results, and the mode finish action. Apply the
 exact result matrix and completion mechanics in `mode-finish.md`.
 
 Standalone success persists then emits `<done>VERIFIED</done>`. Embedded
