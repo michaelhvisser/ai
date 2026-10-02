@@ -4,6 +4,7 @@ PLUGIN_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 export E2E_FAKE_ROOT="$SCRATCH"
+export XDG_STATE_HOME="$SCRATCH/user-state"
 mkdir -p "$SCRATCH/bin"
 cat > "$SCRATCH/bin/chrome-devtools" <<'CLI'
 #!/usr/bin/env bash
@@ -156,6 +157,7 @@ set_loop_field() {
 source "$E2E_FAKE_ROOT/start-block"
 jq -e '.active == true' "$E2E_BROWSER_STATE" >/dev/null
 case "$E2E_BROWSER_STATE" in "$WORKTREE_PATH"/*) echo 'browser state dirties worktree' >&2; exit 1 ;; esac
+case "$E2E_BROWSER_STATE" in "$XDG_STATE_HOME"/*) ;; *) echo 'browser state is not durable' >&2; exit 1 ;; esac
 # A resumed invocation must keep the same session.
 FIRST_STATE=$E2E_BROWSER_STATE
 source "$E2E_FAKE_ROOT/start-block"
@@ -189,6 +191,23 @@ unset E2E_FAKE_FAIL_STOP
 ( source "$E2E_FAKE_ROOT/terminal-block" )
 jq -e '.e2e_browser_cleanup == "stopped"' "$STATE_FILE" >/dev/null
 jq -e '.active == false' "$WORKTREE_PATH/terminal.json" >/dev/null
+# A reboot can end the daemon; its durable ownership record must still permit
+# resumption and cleanup without allocating a replacement session.
+set_loop_field "$STATE_FILE" e2e_browser_state ''
+source "$E2E_FAKE_ROOT/start-block"
+REBOOT_STATE=$E2E_BROWSER_STATE
+REBOOT_SESSION=$(jq -r '.session' "$REBOOT_STATE")
+rm "$E2E_FAKE_ROOT/$REBOOT_SESSION"
+source "$E2E_FAKE_ROOT/start-block"
+[ "$E2E_BROWSER_STATE" = "$REBOOT_STATE" ]
+if bash "$CLAUDE_PLUGIN_ROOT/scripts/e2e-browser.sh" call "$REBOOT_STATE" list_pages; then
+  echo 'reboot unexpectedly restarted browser' >&2
+  exit 1
+fi
+E2E_RESULT=missing-browser-tooling
+source "$E2E_FAKE_ROOT/stop-block"
+[ "$E2E_CLEANUP_FAILED" = false ]
+jq -e '.active == false' "$REBOOT_STATE" >/dev/null
 SCENARIO
 for DOC_SHELL in bash zsh; do
   "$DOC_SHELL" "$SCRATCH/doc-scenario" "$PLUGIN_ROOT" "$SCRATCH/doc-$DOC_SHELL"
@@ -286,4 +305,15 @@ for HOOK_CASE in terminal max-iterations stale-worktree; do
   [ ! -f "$HOOK_STATE" ]
   jq -e '.active == false' "$HOOK_DIR/browser.json" >/dev/null
 done
+# Codex zsh has no injected Claude plugin root. Source the real library,
+# not field-function mocks, and prove recorded browser cleanup still works.
+bash "$HELPER" start "$SCRATCH/zsh-owned.json" >/dev/null
+jq -n --arg path "$SCRATCH/zsh-owned.json" '{e2e_browser_state:$path}' > "$SCRATCH/zsh-loop.json"
+env -u CLAUDE_PLUGIN_ROOT /bin/zsh -c '
+  set -eu
+  source "$1/lib/loop-state.sh"
+  cleanup_loop "$2"
+' zsh "$PLUGIN_ROOT" "$SCRATCH/zsh-loop.json"
+[ ! -f "$SCRATCH/zsh-loop.json" ]
+jq -e '.active == false' "$SCRATCH/zsh-owned.json" >/dev/null
 echo 'e2e-browser: OK'
