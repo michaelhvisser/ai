@@ -24,6 +24,7 @@ Add the marketplace, then install the plugin:
 | `/workflow:visual-review [PR or worktree] [feedback.json]` | Build a local UI review package with inspected screenshots, change coverage, zoom, pins/rectangles, optional video timestamps, and capture-bound feedback export/import; backend-only PRs get a one-line "no UI changes" verdict instead; no hosting or workflow approval |
 | `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists (checked against recently shipped and backlog work, so a superseded PR is named for closing), whether its plan is right, which review skill is still needed at this head — and the ordered execution plan to merge-readiness, approvable at the closing prompt for local execution or a Detent handoff, with a by-hand recipe per step and preview-deploy screenshots for UI changes |
 | `/workflow:issue-details <n> [...] \| --since <n>d` | Read-only triage evaluation for one or more issues: class (bug / goal / idea / question / noise), an advisory duplicate verdict from a closed vocabulary (open issues, open PRs, PRs merged into the base branch since filing — at most one canonical, no invented numbers), goal alignment via `goal:*` labels and epic references, proposed board Priority and Detent effort tier (never `max`), the author-decides social rule — then one marker-backed comment per issue, edited in place on re-run, posted only past the closing approval |
+| `/workflow:split-issue <issue> [--project <project>] [--plan-only]` | Split a large Detent issue, including an imported GitHub issue, into children with independent acceptance criteria and native dependencies. Uses the connected Detent MCP and stages children before releasing them to dispatch. |
 | `/workflow:antagonist-review [PR]` | Cross-model adversarial review with quorum tie-breaks: a strong finder model finds defects, the local Codex CLI attacks every one, a third model breaks ties, and a human settles only what the models genuinely cannot — then Codex fixes the confirmed set and the loop re-reviews until clean |
 | `/workflow:codex-ship [PR]` | Triage-gated Codex↔fix loop: judge every Codex connector finding (real vs. slop), corroborate with a local Codex CLI second opinion, fix only the confirmed-real set, and loop until Codex runs out of genuine value |
 | `/workflow:resolve-conflicts` | Resolve an in-progress merge/rebase conflict hunk by hunk on intent, verify with the repo's own checks, and prove no reviewed change was silently dropped |
@@ -33,10 +34,10 @@ Add the marketplace, then install the plugin:
 | `/workflow:remove-worktree` | Interactively select and remove a git worktree |
 | `/workflow:prune-worktree` | Batch cleanup of all completed issue and PR-review worktrees |
 
-`commit`, `create-pr`, `worktree`, `pr-details`, `issue-details`, `visual-review`,
+`commit`, `create-pr`, `worktree`, `pr-details`, `issue-details`, `split-issue`, `visual-review`,
 and `resolve-conflicts` are also reachable in Codex as `$workflow:commit`,
 `$workflow:create-pr`, `$workflow:worktree <action>`, `$workflow:pr-details`,
-`$workflow:issue-details`, `$workflow:visual-review`, and
+`$workflow:issue-details`, `$workflow:split-issue`, `$workflow:visual-review`, and
 `$workflow:resolve-conflicts`. Codex requires the qualified plugin name; bare
 skill names are not resolver aliases.
 
@@ -238,6 +239,14 @@ plain commit + push and hands the PR back to you instead of merging.
 `create-pr`, and worktree commands now live here.
 
 ## Requirements
+
+`split-issue` requires a connected Detent MCP with access to the target project.
+It follows Cory LaNou's built-in Detent skill and uses the MCP's tracker tools;
+it does not depend on Luna's private proposal tools. Invoke
+`$workflow:split-issue <issue> --project <project>` in Codex or
+`/workflow:split-issue <issue> --project <project>` in Claude Code. Add
+`--plan-only` to review the proposed children and graph without tracker writes.
+GitHub import itself does not invoke the skill.
 
 - Git with worktree support
 - GitHub CLI (`gh`) — authenticated
