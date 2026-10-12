@@ -7,12 +7,15 @@ strategy detection, REST mergeability decision tree, and summary rendering.
 
 ## 13a. Final checks
 
-1. Verify CI is green for the exact expected head, unless `has_ci=false` in the
-   state file:
+1. Apply current local policy before checking inherited CI applicability;
+   otherwise verify CI is green for the exact expected head when required:
 
 ```bash
 HAS_CI=$(get_loop_field "$STATE_FILE" "has_ci" "$WORKFLOW_STATE_PATH")
 HEAD_SHA=$(get_loop_field "$STATE_FILE" "head_sha" "$WORKFLOW_STATE_PATH")
+if [ "${VALIDATION_MODE:-auto}" = "local" ]; then
+  HAS_CI=false
+fi
 if [ "${VALIDATION_MODE:-auto}" = "pr-ci" ] && [ "$HAS_CI" != "true" ]; then
   WORKFLOW_REASON="required-ci-unverified"
 fi

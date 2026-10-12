@@ -30,7 +30,10 @@ for permission to bypass the invariant and never output `SHIPPED` on this path.
 
 Before this phase restoration, resolve
 `<PLUGIN_ROOT>/lib/validation-policy.md` against the persisted target. Record
-current validation mode and reconcile inherited evidence. If policy now
+current validation mode and reconcile inherited evidence. When policy selects
+local validation, set `has_ci=false` and replace any inherited CI skip reason
+with the current policy reason before routing; saved CI applicability cannot
+override current repository policy. If policy now
 requires PR CI after a saved local-mode result, clear `ci_skip_reason` and the
 saved `has_ci=false`, set phase to `ci-watch`, and continue through exact-head
 CI and review before merging. If required local evidence is stale, set phase

@@ -22,8 +22,14 @@ get_loop_field() {
     head_sha) printf '%040d' 1 ;;
   esac
 }
-github_pr() { printf '{"head":{"sha":"%040d"}}' 1; }
-github_check_snapshot() { printf '{"items":[{"terminal":true,"successful":true}]}'; }
+github_pr() { test "$VALIDATION_MODE" != local; printf '{"head":{"sha":"%040d"}}' 1; }
+github_check_snapshot() {
+  if [ "$VALIDATION_MODE" = local ]; then
+    echo 'local mode queried remote checks' >&2
+    return 1
+  fi
+  printf '{"items":[{"terminal":true,"successful":true}]}'
+}
 . "$WORKTREE_PATH/final-checks.sh"
 test "$WORKFLOW_REASON" = "$EXPECTED_REASON"
 SCRIPT
@@ -31,6 +37,7 @@ for TEST_SHELL in bash zsh; do
   "$TEST_SHELL" "$SCRATCH/scenario.sh" pr-ci false required-ci-unverified "$SCRATCH"
   "$TEST_SHELL" "$SCRATCH/scenario.sh" pr-ci true '' "$SCRATCH"
   "$TEST_SHELL" "$SCRATCH/scenario.sh" local false '' "$SCRATCH"
+  "$TEST_SHELL" "$SCRATCH/scenario.sh" local true '' "$SCRATCH"
   "$TEST_SHELL" "$SCRATCH/scenario.sh" auto false '' "$SCRATCH"
 done
 echo 'required-ci-policy: saved skips cannot waive required CI; verified, local, and auto paths pass'
