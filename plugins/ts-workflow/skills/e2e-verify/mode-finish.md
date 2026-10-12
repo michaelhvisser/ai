@@ -64,44 +64,55 @@ Then evaluate `E2E_RESULT`:
   - Any non-`skipped` value on a non-UI diff is a logic error — investigate
     before continuing.
 
-## Step 7.1: Mode → Action Table (only reached when the gate above passed)
+## Step 7.1: Resolve policy and authorized triggers
 
-Apply `<PLUGIN_ROOT>/lib/validation-policy.md` before the table's labels or
-watchers. In local mode, verification modes report their current-head evidence
-without CI-trigger labels. Ship modes run the local-validation path and proceed
-directly to the authorized Ship Workflow Handoff, skipping the CI Watch Loop.
-In pr-ci mode, add a trigger label only when current repository configuration
-and authorization establish that it is required. The conventional label name
-alone is not evidence of a trigger.
+Only after Step 7.0 passes, resolve `<PLUGIN_ROOT>/lib/validation-policy.md`.
+Run any explicitly configured, authorized repository trigger helper required
+by that policy now, before watching checks. Do not return to Step 6 to trigger
+it. The mode/task must authorize the mutation; helper existence or a
+conventional label name is not authority. Investigate remains read-only.
+Failed or unavailable required triggering is incomplete, not a CI exemption.
+Report mutations only after confirmed success. This skill has no built-in
+label POST recipe.
+On resume, reuse confirmed triggering for the same head and inspect an existing
+run before invoking its helper again. Never launch a duplicate full suite while
+the configured run is pending; follow the helper's repository-owned contract.
 
-| Mode | Action |
-|------|--------|
-| `verify` | Report results, then finish with a verified result |
-| `fix-and-verify` | Report results, then finish with a verified result |
-| `investigate` | Report findings with no label, then finish with a verified result |
-| `ship-prep` | Report results, then finish with a verified result |
-| `ship` | Set phase to `shipping`. Execute the ship workflow |
-| `fix-and-ship` | Set phase to `shipping`. Satisfy current validation policy, then execute the full ship workflow |
+Local mode skips automatic trigger/readiness handling and executes the shared
+local-validation path, including required checks and published-head equality.
 
-Step 6d owns any explicitly configured repository label handling. Step 7 adds
-no labels and never treats a conventional label name as a trigger.
+## Step 7.2: Completion validation gate (every mode)
 
-## `fix-and-ship` CI Watch Loop
-
-Run only when CI is applicable under current policy. Local mode uses required
-local evidence and proceeds to the authorized ship handoff without this watcher.
+Execute this before any action table row, `verified` result, or ship handoff.
+Explicit pr-ci policy watches the exact head in every mode, even with no rebase.
+Auto retains the earlier post-rebase watcher and final fix-and-ship watcher;
+ship also validates through its own workflow. Local mode uses the required
+local proof above and never calls this CI watcher.
 The watcher waits for check registration, pins every
 poll to the exact PR head, and rejects API failures or a head shift.
 
 ```bash
-set_loop_phase "$STATE_FILE" "shipping" "$WORKFLOW_STATE_PATH"
-if [ "${VALIDATION_MODE:-auto}" != "local" ]; then
+COMPLETION_CI_REQUIRED=false
+case "${VALIDATION_MODE:-auto}" in
+  pr-ci) COMPLETION_CI_REQUIRED=true ;;
+  auto) if [ "$MODE" = "fix-and-ship" ]; then COMPLETION_CI_REQUIRED=true; fi ;;
+  local) ;;
+  *) WORKFLOW_RESULT=INCOMPLETE; WORKFLOW_REASON=invalid-validation-policy; exit 1 ;;
+esac
+if [ "$COMPLETION_CI_REQUIRED" = "true" ]; then
 PR_JSON=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM") || {
   WORKFLOW_RESULT=INCOMPLETE
   WORKFLOW_REASON=ci-api-failed
 }
 if [ "${WORKFLOW_RESULT:-}" != "INCOMPLETE" ]; then
-  HEAD_SHA=$(jq -er '.head.sha' <<< "$PR_JSON")
+  HEAD_SHA=$(git -C "$WORKTREE_PATH" rev-parse HEAD)
+  PUBLISHED_COMPLETION_HEAD=$(jq -er '.head.sha' <<< "$PR_JSON")
+  if [ "$PUBLISHED_COMPLETION_HEAD" != "$HEAD_SHA" ]; then
+    WORKFLOW_RESULT=INCOMPLETE
+    WORKFLOW_REASON=pr-head-shift
+  fi
+fi
+if [ "${WORKFLOW_RESULT:-}" != "INCOMPLETE" ]; then
   CHECKS_STATUS=0
   CHECKS_SNAPSHOT=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$HEAD_SHA") || CHECKS_STATUS=$?
   if [ "$CHECKS_STATUS" -ne 0 ]; then
@@ -127,6 +138,17 @@ fi
 
 Every non-success watcher result follows the top-level **Hard Invariant
 Failure** procedure. Do not continue to the ship workflow.
+
+## Step 7.3: Mode → Action Table (only after both gates pass)
+
+| Mode | Action |
+|------|--------|
+| `verify` | Finish with a verified result |
+| `fix-and-verify` | Finish with a verified result |
+| `investigate` | Finish with a verified result for the reported findings |
+| `ship-prep` | Finish with a verified result |
+| `ship` | Set phase to `shipping`. Execute the ship workflow |
+| `fix-and-ship` | Set phase to `shipping`. Execute the full ship workflow |
 
 ## Ship Workflow Handoff
 

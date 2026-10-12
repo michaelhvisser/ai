@@ -134,12 +134,12 @@ is identical across modes.
 
 | Mode | Footer |
 |------|--------|
-| `verify` | "Verification complete. Ready for review." |
-| `fix-and-verify` | "Review feedback addressed and verified." |
-| `investigate` | "Investigation complete. See findings above." |
-| `ship-prep` | "Ship prep complete. Ready for `$ts-workflow:ship`." |
-| `ship` | "Verified and shipping via `$ts-workflow:ship`." |
-| `fix-and-ship` | "Review addressed, verified, and shipping." |
+| `verify` | "E2E evidence posted. Final policy validation is pending." |
+| `fix-and-verify` | "Review feedback addressed; E2E evidence posted. Final policy validation is pending." |
+| `investigate` | "Investigation findings posted. Final policy validation is pending." |
+| `ship-prep` | "E2E evidence posted. Ship prep completes after final policy validation." |
+| `ship` | "E2E evidence posted. Shipping remains gated by final policy validation." |
+| `fix-and-ship` | "Review feedback addressed; E2E evidence posted. Shipping remains gated by final policy validation." |
 
 **Fail path** (`E2E_RESULT` is `fail`, `partial`, `skipped-server-failed`,
 `missing-browser-tooling`, or `uninspected-screenshots` on a UI-visible diff)
@@ -151,13 +151,11 @@ is identical across modes.
 
 ## 6d. Repository-owned labels
 
-This skill does not automatically add CI-trigger or readiness labels. Passing
-E2E produces evidence; it does not authorize state changes. Apply
-`<PLUGIN_ROOT>/lib/validation-policy.md` before any repository-required label
-handling. Use only the repository's explicitly configured, authorized helper
-after the full Step 7.0 E2E gate passes. Local mode skips automatic trigger and
-readiness labels. If no helper or authorization is established, leave labels
-unchanged; a conventional label name is not configuration.
+Step 6 only posts evidence; it does not invoke triggers or change labels.
+Step 7.1 owns any explicitly configured, authorized repository helper, after
+the full Step 7.0 gate passes and before Step 7.2 watches required CI. Missing
+configuration or authorization leaves labels unchanged. Conventional label
+names are not configuration.
 
 The footer reports verification and the authorized next phase. It never claims
 a label mutation in advance. Report a repository-owned mutation separately

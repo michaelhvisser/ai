@@ -140,8 +140,9 @@ its structured result posting and mode-specific label rules.
 ## Step 7: Finish
 
 Read `<PLUGIN_ROOT>/skills/e2e-verify/mode-finish.md` completely and execute
-Step 7.0 before any mode action. It owns the E2E gate, labels, exact-head CI
-watch, direct ship workflow handoff, and final result persistence.
+Steps 7.0-7.2 before any mode action. It owns the E2E gate, authorized repository
+triggers after that gate, policy-required exact-head validation in every mode,
+direct ship workflow handoff, and final result persistence.
 
 The gate is mandatory: UI-visible failures return `e2e-fail` after posting,
 without labels or ship. Standalone E2E persists then emits
