@@ -339,7 +339,7 @@ Keep replies brief and professional.
 
 ## Step 9: Resolve Review Threads (Group A only)
 
-**Only resolve after CI passes and fixes are pushed.** Only for line-specific threads (Group A).
+**Only resolve after current-head validation satisfies the shared policy and fixes are pushed.** Only for line-specific threads (Group A).
 
 ```bash
 (cd "$WORKTREE_PATH" && gh api graphql -f query='

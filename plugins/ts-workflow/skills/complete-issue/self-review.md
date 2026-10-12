@@ -16,7 +16,7 @@ Delegated fallback reviews are session-local and must complete
 synchronously. Never dispatch them in the background or persist them for a
 successor session. If a successor re-enters with `phase="reviewing"`, skip the
 expired review and continue to Phase 3; the PR already created in Phase 1 and
-its CI are the durable gate.
+its current policy-required validation are the durable gate.
 
 Detect codex availability:
 

@@ -13,8 +13,9 @@ initialize_workflow_state "$STATE_FILE" "$E2E_VERIFY_STATE_PATH"
 Read `<PLUGIN_ROOT>/skills/e2e-verify/SKILL.md` and execute its workflow
 directly, treating `$PR_NUM fix-and-ship` as its `SKILL_ARGS`. Do not call the
 Skill tool. This runs the full workflow in `fix-and-ship` mode (rebase, build,
-address review, E2E browser tests, post results, add the `run-full-ci` label,
-watch CI, and execute the ship workflow).
+address review, E2E browser tests, post results, satisfy current validation
+policy, and execute the ship workflow). It does not add conventional labels
+automatically.
 
 Before executing the loaded workflow, set its explicit caller contract:
 
@@ -44,7 +45,11 @@ fi
 
 ## Owner Completion Result
 
-Run only after every completion criterion in the router is satisfied:
+Run only after every completion criterion in the router is satisfied. Resolve
+the shared validation policy again against the persisted target and confirm
+the downstream evidence applies to the exact published head. Local-mode CI
+is not applicable, not a missing owner gate; required local evidence and
+published-head equality remain mandatory. Preserve bot and human approval.
 
 ```bash
 set_loop_terminal_result "$STATE_FILE" "complete" "" "completed" "COMPLETE"

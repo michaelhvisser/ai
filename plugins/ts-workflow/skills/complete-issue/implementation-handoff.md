@@ -14,7 +14,7 @@ Read `<PLUGIN_ROOT>/skills/start-issue/SKILL.md` and execute its workflow
 directly, treating `$ISSUE_NUM $FLAGS` as its `SKILL_ARGS`. Do not call the
 Skill tool. Read `phases.md` for the full sub-step list (fetch issue, create
 worktree, detect type, explore, design, TDD, verify, coverage, security review,
-commit/push/PR, watch CI).
+commit/push/PR, policy-required validation).
 
 Before executing the loaded workflow, set its explicit caller contract:
 

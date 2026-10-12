@@ -39,7 +39,13 @@ coverage/agent flags. A missing issue number is a missing-intent gate: request
 it and stop before loop initialization or any completion claim.
 
 Read `<PLUGIN_ROOT>/skills/complete-issue/loop-state.md` completely and execute
-its bootstrap, argument persistence, and re-entry checks. Complete-issue owns the
+its bootstrap, then resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against
+the persisted target before its owner re-entry routing. On a fresh run, resolve
+policy when start-issue establishes the target. This single shared contract
+governs validation in every child, the owner's completion gate, and feedback
+resolution; do not add a second unconditional CI requirement at the owner.
+Execute the remaining argument persistence and re-entry checks from
+`loop-state.md`. Complete-issue owns the
 physical state file and terminal promise. Each component uses a child path in
 that same file and returns structured state without a terminal marker.
 
@@ -100,15 +106,16 @@ execute it. It initializes the E2E child, reads
 terminal result.
 
 The E2E child owns rebase/build, embedded address-review, generated-output
-recovery, browser verification, result posting, exact-head CI, and embedded ship.
+recovery, browser verification, result posting, policy-required validation, and embedded ship.
 It may not emit a child marker or weaken the top-level completion gate.
 
 ## Completion Criteria
 
 Complete only when the issue is implemented with tests; a non-draft PR is
 created and pushed; self-review completed with findings addressed or a
-successor-session expired review is durably recorded as void and the exact
-current head passes downstream CI; E2E verification and posting succeeded; and
+successor-session expired review is durably recorded as void; the exact current
+head satisfies `<PLUGIN_ROOT>/lib/validation-policy.md` with fresh downstream
+evidence; E2E verification and posting succeeded; and
 ship merged the PR. An ordinary timeout or fallback failure does not count as
 a completed review.
 

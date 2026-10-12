@@ -18,7 +18,7 @@ The `start-issue` workflow runs with `$ISSUE_NUM $FLAGS` as its arguments:
 8. Coverage check
 9. Security review
 10. Commit, push, create PR
-11. Watch CI
+11. Satisfy the shared validation policy for the published head
 
 This is purely informational — `$ts-workflow:start-issue` owns the implementation. The
 trunk in `SKILL.md` consumes its persisted worktree output, validates it, and
