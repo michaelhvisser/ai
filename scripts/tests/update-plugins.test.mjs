@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -14,11 +15,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
+  acquireUpdateLock,
+  assertNoUpdateOwner,
+  cli,
   inventory,
   main,
   restoreDisabled,
   schedulePlist,
-  updatePlugins,
+  updatePlugins as runUpdatePlugins,
 } from "../update-plugins.ts";
 
 const plugin = (name, marketplace, enabled = true, sourceType = "git") => ({
@@ -29,6 +33,244 @@ const plugin = (name, marketplace, enabled = true, sourceType = "git") => ({
   marketplaceSource: { sourceType },
 });
 const temporary = () => mkdtempSync(join(tmpdir(), "plugin-update-test-"));
+
+// Mocked inventories must never consult the operator's pending recovery state.
+function updatePlugins(options) {
+  const home = options.codexHome || temporary();
+  try {
+    return runUpdatePlugins({ ...options, codexHome: home });
+  } finally {
+    if (!options.codexHome) rmSync(home, { recursive: true, force: true });
+  }
+}
+
+test("refuses overlapping updaters and schedule changes while an owner is alive", () => {
+  const home = temporary();
+  const release = acquireUpdateLock(home);
+  try {
+    assert.throws(() => acquireUpdateLock(home), /Another updater is running/);
+    assert.throws(
+      () => assertNoUpdateOwner(home),
+      /Another updater is running/,
+    );
+    assert.equal(readdirSync(join(home, ".plugin-update-lock")).length, 1);
+    release();
+    assertNoUpdateOwner(home);
+    const releaseNext = acquireUpdateLock(home);
+    releaseNext();
+  } finally {
+    release();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a terminated updater leaves a dead claim that the next run removes", () => {
+  const home = temporary();
+  const moduleUrl = new URL("../update-plugins.ts", import.meta.url).href;
+  try {
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, ["--input-type=module", "-"], {
+          input: `import {acquireUpdateLock} from ${JSON.stringify(moduleUrl)}; acquireUpdateLock(${JSON.stringify(home)}); process.kill(process.pid, "SIGTERM");`,
+          stdio: ["pipe", "ignore", "ignore"],
+        }),
+      (error) => error.signal === "SIGTERM",
+    );
+    assert.equal(readdirSync(join(home, ".plugin-update-lock")).length, 1);
+    assertNoUpdateOwner(home);
+    assert.equal(readdirSync(join(home, ".plugin-update-lock")).length, 0);
+    const release = acquireUpdateLock(home);
+    release();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("an incomplete remote inventory warning fails even when Codex exits successfully", () => {
+  const root = temporary();
+  const savedPath = process.env.PATH;
+  try {
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.error("Warning: failed to list remote marketplace plugins: authentication unavailable"); console.log('{"installed":[],"available":[]}');`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${root}:${savedPath}`;
+    assert.throws(
+      () => cli(["plugin", "list", "--json"]),
+      /Incomplete plugin inventory.*authentication unavailable/,
+    );
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.error("Warning: unrelated advisory"); console.log('{"installed":[],"available":[]}');`,
+    );
+    assert.deepEqual(cli(["plugin", "list", "--json"]), {
+      installed: [],
+      available: [],
+    });
+  } finally {
+    process.env.PATH = savedPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recycled PIDs, including a root-owned process, do not keep stale claims alive", () => {
+  const home = temporary();
+  const root = join(home, ".plugin-update-lock");
+  try {
+    mkdirSync(root);
+    for (const pid of [1, process.pid])
+      mkdirSync(
+        join(
+          root,
+          `${pid}-${"0".repeat(64)}-00000000-0000-0000-0000-000000000000`,
+        ),
+      );
+    assertNoUpdateOwner(home);
+    assert.deepEqual(readdirSync(root), []);
+    const release = acquireUpdateLock(home);
+    release();
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("recovers a disabled preference after termination inside plugin install", () => {
+  const home = temporary();
+  const config = join(home, "config.toml");
+  const pending = join(home, ".plugin-update-disabled.json");
+  const entry = plugin("off", "fixture", false, "local");
+  const moduleUrl = new URL("../update-plugins.ts", import.meta.url).href;
+  const logs = [];
+  try {
+    writeFileSync(config, '[plugins."off@fixture"]\nenabled = false\n');
+    assert.throws(
+      () =>
+        execFileSync(process.execPath, ["--input-type=module", "-"], {
+          input: `import {updatePlugins} from ${JSON.stringify(moduleUrl)};
+        import {writeFileSync} from 'node:fs';
+        updatePlugins({codexHome:${JSON.stringify(home)},log(){},run(args){
+          if(args[1]==='list')return {installed:[${JSON.stringify(entry)}]};
+          writeFileSync(${JSON.stringify(config)}, '[plugins."off@fixture"]\\nenabled = true\\n');
+          process.kill(process.pid,'SIGTERM');
+        }});`,
+          stdio: ["pipe", "ignore", "ignore"],
+        }),
+      (error) => error.signal === "SIGTERM",
+    );
+    assert.match(readFileSync(config, "utf8"), /enabled = true/);
+    assert.equal(JSON.parse(readFileSync(pending, "utf8")), entry.pluginId);
+    const run = (args) => {
+      if (args[1] === "list")
+        return {
+          installed: [
+            {
+              ...entry,
+              enabled: readFileSync(config, "utf8").includes("enabled = true"),
+            },
+          ],
+        };
+      assert.equal(JSON.parse(readFileSync(pending, "utf8")), entry.pluginId);
+      writeFileSync(config, '[plugins."off@fixture"]\nenabled = true\n');
+      return { pluginId: entry.pluginId, version: "2.0.0" };
+    };
+    assert.equal(
+      updatePlugins({ run, codexHome: home, log: (m) => logs.push(m) }),
+      0,
+    );
+    assert.match(readFileSync(config, "utf8"), /enabled = false/);
+    assert.equal(existsSync(pending), false);
+    assert.ok(
+      logs.some((m) => m.includes("Recovered disabled setting: off@fixture")),
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("pending recovery is untouched by dry-run and fails closed when restoration cannot finish", () => {
+  const home = temporary();
+  const pending = join(home, ".plugin-update-disabled.json");
+  const entry = plugin("off", "fixture", true, "local");
+  const calls = [];
+  const run = (args) => {
+    calls.push(args);
+    return { installed: [entry] };
+  };
+  try {
+    writeFileSync(pending, JSON.stringify(entry.pluginId));
+    assert.equal(
+      updatePlugins({ run, codexHome: home, dryRun: true, log() {} }),
+      0,
+    );
+    assert.equal(existsSync(pending), true);
+    assert.throws(
+      () => updatePlugins({ run, codexHome: home, log() {} }),
+      /Missing config while preserving/,
+    );
+    assert.equal(existsSync(pending), true);
+    assert.ok(calls.every((args) => args[1] === "list"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("a removed plugin does not block pending recovery or updates of remaining plugins", () => {
+  const home = temporary();
+  const pending = join(home, ".plugin-update-disabled.json");
+  const entry = plugin("on", "fixture", true, "local");
+  let installs = 0;
+  try {
+    writeFileSync(pending, JSON.stringify("removed@fixture"));
+    const run = (args) =>
+      args[1] === "list"
+        ? { installed: [entry] }
+        : (installs++, { pluginId: entry.pluginId, version: "2.0.0" });
+    assert.equal(updatePlugins({ run, codexHome: home, log() {} }), 0);
+    assert.equal(installs, 1);
+    assert.equal(existsSync(pending), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("unknown marketplace sources fail closed without blocking known sources", () => {
+  const entries = [
+    plugin("unknown", "old", true, "future-type"),
+    plugin("known", "local", true, "local"),
+  ];
+  const installed = [];
+  const run = (args) =>
+    args[1] === "list"
+      ? { installed: entries }
+      : (installed.push(args[2]), { pluginId: args[2], version: "2.0.0" });
+  assert.equal(updatePlugins({ run, log() {} }), 1);
+  assert.deepEqual(installed, ["known@local"]);
+});
+
+test("Codex receives the same absolute home when CODEX_HOME is relative", () => {
+  const root = temporary();
+  const savedPath = process.env.PATH;
+  const savedHome = process.env.CODEX_HOME;
+  try {
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.log(JSON.stringify({home:process.env.CODEX_HOME}));`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${root}:${savedPath}`;
+    process.env.CODEX_HOME = "relative-plugin-test-home";
+    assert.equal(
+      cli(["plugin", "list", "--json"]).home,
+      join(process.cwd(), "relative-plugin-test-home"),
+    );
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("skips disabled account-managed plugins without attempting an install or local config edit", () => {
   const plugins = [

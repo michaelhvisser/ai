@@ -89,8 +89,8 @@ plugin you want to update, and reload:
 /reload-plugins
 ```
 
-For Codex, close running Codex sessions before refreshing plugins, then run these
-commands in a separate terminal and start a new session:
+For Codex, run these commands in a separate terminal, then start a new session
+to load the refreshed plugin versions:
 
 ```bash
 codex plugin add workflow@michaelhvisser-ai
@@ -127,7 +127,9 @@ node scripts/update-plugins.ts
 ```
 
 Individual failures do not prevent other plugins from updating. Failures produce
-a nonzero exit status. Local marketplaces use their current files; the updater
+a nonzero exit status. If the CLI warns that remote inventory is incomplete,
+the entire batch stops before any updates; fix authentication or retry when the
+catalog is available. Local marketplaces use their current files; the updater
 does not pull or switch branches in development checkouts. Remote plugins are
 refreshed through the same CLI and may fail if account access or authentication
 is required. New sessions load the updated versions.
@@ -150,9 +152,12 @@ To remove the macOS job:
 node scripts/update-plugins.ts --remove-schedule
 ```
 
-Overlapping updater runs are refused. If a process is forcibly stopped, check
-the PID in `$CODEX_HOME/.plugin-update-lock/pid` (default home `~/.codex`) and
-remove that lock directory only after confirming its owner has stopped.
+Overlapping updater runs are refused. Claims under
+`$CODEX_HOME/.plugin-update-lock/` (default home `~/.codex`) identify each run
+by PID and process start time. Interrupted runs leave claims that are removed
+once their owner stops, including after reboot or PID reuse. A pending disabled
+setting is saved before installation and recovered on the next run if restoration
+was interrupted. Recovery failures stop the batch and remain in the log.
 The updater's tests use a disposable `CODEX_HOME` and never change your plugins.
 
 Claude Code has its own automatic updates: `/plugin` → Marketplaces → select a

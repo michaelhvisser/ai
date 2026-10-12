@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Refresh every installed Codex plugin through its CLI, preserving disabled state.
 import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -29,6 +31,10 @@ export function cli(args: string[]): unknown {
   const result = spawnSync("codex", args, {
     encoding: "utf8",
     cwd: homedir(),
+    env: {
+      ...process.env,
+      CODEX_HOME: resolve(process.env.CODEX_HOME || join(homedir(), ".codex")),
+    },
     timeout: 120_000,
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -36,7 +42,65 @@ export function cli(args: string[]): unknown {
   if (result.status !== 0) {
     throw new Error(result.stderr.trim() || `codex exited ${result.status}`);
   }
+  if (
+    /Warning: failed to list remote marketplace plugins/.test(result.stderr)
+  ) {
+    throw new Error(`Incomplete plugin inventory: ${result.stderr.trim()}`);
+  }
   return JSON.parse(result.stdout);
+}
+
+function processIdentity(pid: number): string | null {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+    timeout: 5_000,
+  });
+  if (result.error) throw result.error;
+  const started = result.stdout.trim();
+  if (result.status === 1 && !started) return null;
+  if (result.status !== 0 || !started)
+    throw new Error(`Cannot inspect updater owner: ${result.stderr.trim()}`);
+  return createHash("sha256").update(started).digest("hex");
+}
+
+// Each contender publishes its process identity before inspecting other owners.
+// A later contender sees the earlier claim and refuses; simultaneous contenders
+// may both refuse. Dead claims need no timeout and never block another run.
+export function assertNoUpdateOwner(
+  codexHome: string,
+  ownClaim?: string,
+): void {
+  const root = join(codexHome, ".plugin-update-lock");
+  if (!existsSync(root)) return;
+  for (const claim of readdirSync(root)) {
+    if (claim === ownClaim) continue;
+    const match = /^(\d+)-([0-9a-f]{64})-[0-9a-f-]{36}$/.exec(claim);
+    if (!match) throw new Error(`Unrecognized updater lock entry: ${claim}`);
+    if (processIdentity(Number(match[1])) !== match[2]) {
+      rmSync(join(root, claim), { recursive: true, force: true });
+      continue;
+    }
+    throw new Error(`Another updater is running (PID ${match[1]}).`);
+  }
+}
+
+export function acquireUpdateLock(codexHome: string): () => void {
+  const root = join(codexHome, ".plugin-update-lock");
+  mkdirSync(root, { recursive: true });
+  const identity = processIdentity(process.pid);
+  if (!identity) throw new Error("Cannot identify this updater process");
+  const claim = `${process.pid}-${identity}-${randomUUID()}`;
+  const path = join(root, claim);
+  mkdirSync(path);
+  const release = () => rmSync(path, { recursive: true, force: true });
+  try {
+    assertNoUpdateOwner(codexHome, claim);
+    return release;
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
 export function inventory(value: unknown): Plugin[] {
@@ -152,7 +216,31 @@ export function updatePlugins({
   codexHome?: string;
   log?: (message: string) => void;
 } = {}): number {
-  const plugins = inventory(run(["plugin", "list", "--json"]));
+  let plugins = inventory(run(["plugin", "list", "--json"]));
+  const pendingPath = join(codexHome, ".plugin-update-disabled.json");
+  if (!dryRun && existsSync(pendingPath)) {
+    const id: unknown = JSON.parse(readFileSync(pendingPath, "utf8"));
+    if (
+      typeof id !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)
+    )
+      throw new Error(`Invalid disabled recovery record: ${pendingPath}`);
+    const pending = plugins.find((plugin) => plugin.pluginId === id);
+    if (pending?.enabled) {
+      restoreDisabled(join(codexHome, "config.toml"), pending.pluginId);
+      plugins = inventory(run(["plugin", "list", "--json"]));
+      if (plugins.find((plugin) => plugin.pluginId === id)?.enabled !== false)
+        throw new Error(
+          `Pending disabled plugin was not restored: ${pendingPath}`,
+        );
+    }
+    rmSync(pendingPath);
+    log(
+      pending
+        ? `Recovered disabled setting: ${pending.pluginId}`
+        : `Discarded recovery for removed plugin: ${id}`,
+    );
+  }
   const failures: string[] = [];
   const failedMarketplaces = new Set<string>();
   const gitMarketplaces = new Set(
@@ -185,11 +273,19 @@ export function updatePlugins({
   let skipped = 0;
   for (const plugin of plugins) {
     const id = plugin.pluginId;
+    const remote =
+      plugin.source?.source === "remote" ||
+      plugin.marketplaceSource?.sourceType === "remote";
     if (
-      !plugin.enabled &&
-      (plugin.source?.source === "remote" ||
-        plugin.marketplaceSource?.sourceType === "remote")
+      !remote &&
+      !["git", "local"].includes(plugin.marketplaceSource?.sourceType || "")
     ) {
+      failures.push(
+        `${id}: unknown marketplace source; refusing a stale reinstall`,
+      );
+      continue;
+    }
+    if (!plugin.enabled && remote) {
       log(
         `SKIPPED: ${id}: the CLI install would enable this account-managed plugin; leave it disabled.`,
       );
@@ -205,6 +301,21 @@ export function updatePlugins({
       continue;
     }
     try {
+      if (!plugin.enabled) {
+        if (existsSync(pendingPath))
+          throw new Error("An earlier disabled setting still needs recovery");
+        // Publish recovery intent before the CLI can change the preference.
+        const temporary = `${pendingPath}.${randomUUID()}`;
+        try {
+          writeFileSync(temporary, JSON.stringify(id), {
+            mode: 0o600,
+            flag: "wx",
+          });
+          renameSync(temporary, pendingPath);
+        } finally {
+          rmSync(temporary, { force: true });
+        }
+      }
       // Restore even when the CLI fails after partially changing configuration.
       try {
         const result = run(["plugin", "add", id, "--json"]) as {
@@ -216,8 +327,10 @@ export function updatePlugins({
         }
         log(`  ${plugin.version ?? "unknown"} -> ${result.version}`);
       } finally {
-        if (!plugin.enabled)
+        if (!plugin.enabled) {
           restoreDisabled(join(codexHome, "config.toml"), id);
+          rmSync(pendingPath);
+        }
       }
       refreshed++;
     } catch (error) {
@@ -301,11 +414,7 @@ function schedule(remove: boolean): void {
   const codexHome = resolve(
     process.env.CODEX_HOME || join(homedir(), ".codex"),
   );
-  if (existsSync(join(codexHome, ".plugin-update-lock"))) {
-    throw new Error(
-      "An updater holds the lock; let it finish before changing the schedule.",
-    );
-  }
+  assertNoUpdateOwner(codexHome);
   if (!remove) inventory(cli(["plugin", "list", "--json"]));
   const domain = `gui/${process.getuid!()}`;
   launchctl(["bootout", `${domain}/${label}`], true);
@@ -368,26 +477,12 @@ export function main(args: string[]): number {
   const codexHome = resolve(
     process.env.CODEX_HOME || join(homedir(), ".codex"),
   );
-  const lock = join(codexHome, ".plugin-update-lock");
-  if (!dryRun) {
-    mkdirSync(codexHome, { recursive: true });
-    try {
-      mkdirSync(lock);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new Error(
-          `Another update owns ${lock}. If its process stopped, remove this directory before retrying.`,
-        );
-      }
-      throw error;
-    }
-  }
+  const release = dryRun ? () => {} : acquireUpdateLock(codexHome);
   try {
-    if (!dryRun) writeFileSync(join(lock, "pid"), String(process.pid));
     console.log(`[${new Date().toISOString()}] Updating Codex plugins`);
     return updatePlugins({ dryRun, codexHome });
   } finally {
-    if (!dryRun) rmSync(lock, { recursive: true, force: true });
+    release();
   }
 }
 
