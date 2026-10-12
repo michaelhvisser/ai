@@ -113,8 +113,11 @@ first-time marketplace registration as well as missing plugins.
 Requires Node 22.18+ and a Codex CLI with `codex plugin` support. The updater
 discovers installed plugins with `codex plugin list --json`, refreshes their Git
 marketplaces once each, and loops over every installed plugin. There are no
-hardcoded marketplace or plugin names. Disabled plugins stay disabled; plugins
-you have not installed are left alone.
+hardcoded marketplace or plugin names. Disabled local plugins stay disabled.
+Disabled account-managed plugins are reported and skipped because the CLI's
+install operation enables them on the server and offers no disable command.
+Plugins you have not installed are left alone, and missing release versions
+are treated as unknown rather than blocking the update batch.
 
 From this checkout:
 

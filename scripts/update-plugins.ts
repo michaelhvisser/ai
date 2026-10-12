@@ -19,7 +19,8 @@ type Plugin = {
   pluginId: string;
   marketplaceName: string;
   enabled: boolean;
-  version: string;
+  version: string | null;
+  source?: { source?: string };
   marketplaceSource?: { sourceType?: string };
 };
 type Run = (args: string[]) => unknown;
@@ -54,7 +55,7 @@ export function inventory(value: unknown): Plugin[] {
       ) ||
       !plugin.pluginId.endsWith(`@${plugin.marketplaceName}`) ||
       typeof plugin.enabled !== "boolean" ||
-      typeof plugin.version !== "string" ||
+      (plugin.version !== null && typeof plugin.version !== "string") ||
       ids.has(plugin.pluginId)
     ) {
       throw new Error("Invalid or duplicate installed plugin entry");
@@ -62,6 +63,36 @@ export function inventory(value: unknown): Plugin[] {
     ids.add(plugin.pluginId);
   }
   return plugins;
+}
+
+// Locate structural lines without interpreting text in TOML strings or arrays
+// as configuration. We only edit the table/boolean written by Codex's editor.
+function structuralLines(lines: string[]): boolean[] {
+  let quote = "";
+  let depth = 0;
+  return lines.map((line) => {
+    const structural = !quote && depth === 0;
+    for (let i = 0; i < line.length; i++) {
+      const character = line[i];
+      if (!quote) {
+        if (character === "#") break;
+        if (character === '"' || character === "'") {
+          quote = line.startsWith(character.repeat(3), i)
+            ? character.repeat(3)
+            : character;
+          i += quote.length - 1;
+        } else if (character === "[" || character === "{") depth++;
+        else if (character === "]" || character === "}") depth--;
+      } else if (quote[0] === '"' && character === "\\") i++;
+      else if (line.startsWith(quote, i)) {
+        i += quote.length - 1;
+        // A multiline closing delimiter may include one or two literal quotes.
+        if (quote.length === 3) while (line[i + 1] === quote[0]) i++;
+        quote = "";
+      }
+    }
+    return structural;
+  });
 }
 
 // Codex's TOML editor expands inline plugin tables and may retain literal quotes.
@@ -76,12 +107,21 @@ export function restoreDisabled(configPath: string, id: string): void {
     `^\\s*\\[\\s*(?:plugins|"plugins"|'plugins')\\s*\\.\\s*(?:"${escapedId}"|'${escapedId}')\\s*\\]\\s*(?:#.*)?$`,
   );
   const lines = text.split("\n");
-  const start = lines.findIndex((line) => header.test(line));
+  const structural = structuralLines(lines);
+  const start = lines.findIndex(
+    (line, i) => structural[i] && header.test(line),
+  );
   if (start < 0)
     throw new Error(`Cannot find Codex's generated table for ${id}`);
   let enabled = -1;
-  for (let i = start + 1; i < lines.length && !/^\s*\[/.test(lines[i]); i++) {
-    if (/^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$/.test(lines[i])) {
+  for (let i = start + 1; i < lines.length; i++) {
+    if (!structural[i]) continue;
+    if (/^\s*\[/.test(lines[i])) break;
+    if (
+      /^\s*(?:enabled|"enabled"|'enabled')\s*=\s*(true|false)\s*(?:#.*)?$/.test(
+        lines[i],
+      )
+    ) {
       if (enabled >= 0) throw new Error(`Duplicate enabled field for ${id}`);
       enabled = i;
     }
@@ -142,8 +182,20 @@ export function updatePlugins({
     }
   }
   let refreshed = 0;
+  let skipped = 0;
   for (const plugin of plugins) {
     const id = plugin.pluginId;
+    if (
+      !plugin.enabled &&
+      (plugin.source?.source === "remote" ||
+        plugin.marketplaceSource?.sourceType === "remote")
+    ) {
+      log(
+        `SKIPPED: ${id}: the CLI install would enable this account-managed plugin; leave it disabled.`,
+      );
+      skipped++;
+      continue;
+    }
     log(
       `${dryRun ? "Would update" : "Update"}: ${id}${plugin.enabled ? "" : " (keep disabled)"}`,
     );
@@ -162,7 +214,7 @@ export function updatePlugins({
         if (result?.pluginId !== id || typeof result.version !== "string") {
           throw new Error("Invalid plugin install response");
         }
-        log(`  ${plugin.version} -> ${result.version}`);
+        log(`  ${plugin.version ?? "unknown"} -> ${result.version}`);
       } finally {
         if (!plugin.enabled)
           restoreDisabled(join(codexHome, "config.toml"), id);
@@ -197,8 +249,8 @@ export function updatePlugins({
   for (const failure of failures) log(`FAILED: ${failure}`);
   log(
     dryRun
-      ? `Dry run: ${plugins.length} installed plugins; no changes made.`
-      : `${refreshed}/${plugins.length} plugins refreshed; ${failures.length} failures. New sessions load updates.`,
+      ? `Dry run: ${plugins.length} installed plugins; ${skipped} skipped; no changes made.`
+      : `${refreshed}/${plugins.length} plugins refreshed; ${skipped} skipped; ${failures.length} failures. New sessions load updates.`,
   );
   return failures.length ? 1 : 0;
 }
@@ -304,7 +356,7 @@ export function main(args: string[]): number {
   }
   if (args[0] === "--help") {
     console.log(
-      "Usage: node scripts/update-plugins.ts [--dry-run|--install-schedule|--remove-schedule]\nRequires Node 22.18+ and codex plugin commands. Updates all installed Codex plugins, including disabled plugins.\n--install-schedule runs now and daily via macOS launchd; --remove-schedule removes that job.",
+      "Usage: node scripts/update-plugins.ts [--dry-run|--install-schedule|--remove-schedule]\nRequires Node 22.18+ and codex plugin commands. Updates installed Codex plugins; disabled account-managed plugins are reported and skipped to preserve their state.\n--install-schedule runs now and daily via macOS launchd; --remove-schedule removes that job.",
     );
     return 0;
   }
@@ -341,7 +393,8 @@ export function main(args: string[]): number {
 
 if (
   process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  existsSync(process.argv[1]) &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
 ) {
   try {
     process.exitCode = main(process.argv.slice(2));
