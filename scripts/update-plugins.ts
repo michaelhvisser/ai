@@ -75,6 +75,14 @@ export function cli(args: string[]): unknown {
         arg.startsWith("-m"),
     );
   if (fullInventory && hasCachedRemoteInstall(codexHome)) {
+    // login status ignores environment keys; plugin commands give them priority.
+    const overrides = ["CODEX_API_KEY", "OPENAI_API_KEY"].filter(
+      (key) => process.env[key],
+    );
+    if (overrides.length)
+      throw new Error(
+        `Cached account-managed plugins require ChatGPT authentication without API-key overrides. Unset ${overrides.join(" and ")} before updating.`,
+      );
     const auth = spawnSync("codex", ["login", "status"], options);
     if (auth.error) throw auth.error;
     if (

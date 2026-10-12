@@ -137,6 +137,8 @@ old cache versions; an active session still using those files may need a restart
 Profiles with cached account-managed installations require ChatGPT authentication
 for a complete inventory; signed-out or API-key authentication stops the batch.
 Local-only profiles continue to work without ChatGPT authentication.
+Unset `CODEX_API_KEY` and `OPENAI_API_KEY` for profiles with cached account-managed
+plugins: plugin commands give those variables precedence over stored ChatGPT auth.
 
 On macOS, install a daily LaunchAgent:
 

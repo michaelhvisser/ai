@@ -153,6 +153,20 @@ for (const auth of [
     message: "Logged in using ChatGPT",
     allowed: true,
   },
+  {
+    name: "ChatGPT shadowed by CODEX_API_KEY",
+    status: 0,
+    message: "Logged in using ChatGPT",
+    allowed: false,
+    override: "CODEX_API_KEY",
+  },
+  {
+    name: "ChatGPT shadowed by OPENAI_API_KEY",
+    status: 0,
+    message: "Logged in using ChatGPT",
+    allowed: false,
+    override: "OPENAI_API_KEY",
+  },
 ])
   test(`cached remote installations require complete inventory with ${auth.name} authentication`, () => {
     const root = temporary();
@@ -160,7 +174,14 @@ for (const auth of [
     const calls = join(root, "inventory-calls.txt");
     const savedPath = process.env.PATH;
     const savedHome = process.env.CODEX_HOME;
+    const savedKeys = {
+      CODEX_API_KEY: process.env.CODEX_API_KEY,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    };
     try {
+      delete process.env.CODEX_API_KEY;
+      delete process.env.OPENAI_API_KEY;
+      if (auth.override) process.env[auth.override] = "test-secret";
       const metadata = join(
         home,
         "plugins",
@@ -216,6 +237,10 @@ for (const auth of [
       });
     } finally {
       process.env.PATH = savedPath;
+      for (const [key, value] of Object.entries(savedKeys)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       if (savedHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = savedHome;
       rmSync(root, { recursive: true, force: true });
