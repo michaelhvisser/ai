@@ -132,7 +132,8 @@ the entire batch stops before any updates; fix authentication or retry when the
 catalog is available. Local marketplaces use their current files; the updater
 does not pull or switch branches in development checkouts. Remote plugins are
 refreshed through the same CLI and may fail if account access or authentication
-is required. New sessions load the updated versions.
+is required. New sessions load the updated versions. The native CLI can remove
+old cache versions; an active session still using those files may need a restart.
 
 On macOS, install a daily LaunchAgent:
 

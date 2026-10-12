@@ -234,6 +234,106 @@ test("a removed plugin does not block pending recovery or updates of remaining p
   }
 });
 
+test("pending local state is restored before an unrelated remote inventory failure", () => {
+  const home = temporary();
+  const config = join(home, "config.toml");
+  const pending = join(home, ".plugin-update-disabled.json");
+  const entry = plugin("off", "fixture", true, "local");
+  const calls = [];
+  try {
+    writeFileSync(config, '[plugins."off@fixture"]\nenabled = true\n');
+    writeFileSync(pending, JSON.stringify(entry.pluginId));
+    const run = (args) => {
+      calls.push(args);
+      if (!args.includes("--marketplace"))
+        throw Error("Incomplete remote inventory");
+      assert.equal(args[3], "fixture");
+      return {
+        installed: [
+          {
+            ...entry,
+            enabled: readFileSync(config, "utf8").includes("enabled = true"),
+          },
+        ],
+      };
+    };
+    assert.throws(
+      () => updatePlugins({ run, codexHome: home, log() {} }),
+      /Incomplete remote inventory/,
+    );
+    assert.match(readFileSync(config, "utf8"), /enabled = false/);
+    assert.equal(existsSync(pending), false);
+    assert.ok(calls.every((args) => args[1] === "list"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("schedule stop and writes hold the update lock before bootstrap hands off to its worker", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS scheduling only");
+    return;
+  }
+  const root = temporary();
+  const home = join(root, "codex-home");
+  const log = join(root, "schedule-calls.jsonl");
+  const moduleUrl = new URL("../update-plugins.ts", import.meta.url).href;
+  try {
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.log('{"installed":[],"available":[]}');`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(root, "launchctl"),
+      `#!${process.execPath}
+      (async()=>{const fs=require('node:fs');const {acquireUpdateLock}=await import(${JSON.stringify(moduleUrl)});
+      let held=false;try{const release=acquireUpdateLock(process.env.CODEX_HOME);release();}catch(error){if(!String(error).includes('Another updater'))throw error;held=true;}
+      fs.appendFileSync(process.env.UPDATE_SCHEDULE_TEST_LOG,JSON.stringify({command:process.argv[2],held})+'\\n');
+      })().catch(error=>{console.error(error);process.exitCode=1;});`,
+      { mode: 0o755 },
+    );
+    const env = {
+      ...process.env,
+      HOME: root,
+      CODEX_HOME: home,
+      PATH: `${root}:${process.env.PATH}`,
+      UPDATE_SCHEDULE_TEST_LOG: log,
+    };
+    const script = fileURLToPath(
+      new URL("../update-plugins.ts", import.meta.url),
+    );
+    execFileSync(process.execPath, [script, "--install-schedule"], {
+      env,
+      stdio: "ignore",
+    });
+    const agent = join(
+      root,
+      "Library",
+      "LaunchAgents",
+      "com.michaelhvisser.ai.update-plugins.plist",
+    );
+    assert.equal(existsSync(agent), true);
+    execFileSync(process.execPath, [script, "--remove-schedule"], {
+      env,
+      stdio: "ignore",
+    });
+    assert.equal(existsSync(agent), false);
+    const calls = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(calls, [
+      { command: "bootout", held: true },
+      { command: "bootstrap", held: false },
+      { command: "bootout", held: true },
+    ]);
+    assert.deepEqual(readdirSync(join(home, ".plugin-update-lock")), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("implicit marketplace plugins delegate to native add without registration metadata", () => {
   const entries = ["local", "git", "git-subdir", "npm"].map((source) => ({
     ...plugin(source, "personal", true, "local"),
@@ -617,11 +717,11 @@ test("real Codex refreshes enabled and disabled local plugins using an isolated 
   try {
     mkdirSync(home);
     mkdirSync(join(market, ".agents", "plugins"), { recursive: true });
-    const plugins = ["on", "off"];
+    const plugins = ["on", "off", "_extra", "-extra"];
     writeFileSync(
       join(market, ".agents", "plugins", "marketplace.json"),
       JSON.stringify({
-        name: "update-fixture",
+        name: "-update-fixture",
         plugins: plugins.map((name) => ({
           name,
           source: { source: "local", path: `./plugins/${name}` },
@@ -644,14 +744,14 @@ test("real Codex refreshes enabled and disabled local plugins using an isolated 
     }
     run(["plugin", "marketplace", "add", market, "--json"]);
     for (const name of plugins)
-      run(["plugin", "add", `${name}@update-fixture`, "--json"]);
-    restoreDisabled(join(home, "config.toml"), "off@update-fixture");
+      run(["plugin", "add", "--json", "--", `${name}@-update-fixture`]);
+    restoreDisabled(join(home, "config.toml"), "off@-update-fixture");
     const config = join(home, "config.toml");
     writeFileSync(
       config,
       readFileSync(config, "utf8").replace(
-        '[plugins."off@update-fixture"]',
-        "[plugins.'off@update-fixture'] # retain literal quoting",
+        '[plugins."off@-update-fixture"]',
+        "[plugins.'off@-update-fixture'] # retain literal quoting",
       ),
     );
     for (const name of plugins)
@@ -663,11 +763,16 @@ test("real Codex refreshes enabled and disabled local plugins using an isolated 
           description: "Temporary update fixture",
         }),
       );
+    run(["plugin", "add", "--json", "--", "off@-update-fixture"]);
+    writeFileSync(
+      join(home, ".plugin-update-disabled.json"),
+      JSON.stringify("off@-update-fixture"),
+    );
     assert.equal(updatePlugins({ run, codexHome: home, log() {} }), 0);
     const after = inventory(run(["plugin", "list", "--json"]));
     for (const name of plugins) {
       assert.equal(
-        after.find((p) => p.pluginId === `${name}@update-fixture`).version,
+        after.find((p) => p.pluginId === `${name}@-update-fixture`).version,
         "2.0.0",
       );
       assert.ok(
@@ -676,7 +781,7 @@ test("real Codex refreshes enabled and disabled local plugins using an isolated 
             home,
             "plugins",
             "cache",
-            "update-fixture",
+            "-update-fixture",
             name,
             "2.0.0",
             ".codex-plugin",
@@ -686,11 +791,11 @@ test("real Codex refreshes enabled and disabled local plugins using an isolated 
       );
     }
     assert.equal(
-      after.find((p) => p.pluginId === "off@update-fixture").enabled,
+      after.find((p) => p.pluginId === "off@-update-fixture").enabled,
       false,
     );
     assert.equal(
-      after.find((p) => p.pluginId === "on@update-fixture").enabled,
+      after.find((p) => p.pluginId === "on@-update-fixture").enabled,
       true,
     );
   } finally {

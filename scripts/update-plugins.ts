@@ -27,6 +27,13 @@ type Plugin = {
 };
 type Run = (args: string[]) => unknown;
 
+function validPluginId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*@[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
 export function cli(args: string[]): unknown {
   const result = spawnSync("codex", args, {
     encoding: "utf8",
@@ -114,9 +121,8 @@ export function inventory(value: unknown): Plugin[] {
   for (const plugin of plugins) {
     if (
       !plugin ||
-      !/^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$/.test(
-        plugin.pluginId,
-      ) ||
+      !validPluginId(plugin.pluginId) ||
+      typeof plugin.marketplaceName !== "string" ||
       !plugin.pluginId.endsWith(`@${plugin.marketplaceName}`) ||
       typeof plugin.enabled !== "boolean" ||
       (plugin.version !== null && typeof plugin.version !== "string") ||
@@ -216,20 +222,30 @@ export function updatePlugins({
   codexHome?: string;
   log?: (message: string) => void;
 } = {}): number {
-  let plugins = inventory(run(["plugin", "list", "--json"]));
   const pendingPath = join(codexHome, ".plugin-update-disabled.json");
   if (!dryRun && existsSync(pendingPath)) {
     const id: unknown = JSON.parse(readFileSync(pendingPath, "utf8"));
-    if (
-      typeof id !== "string" ||
-      !/^[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)
-    )
+    if (!validPluginId(id))
       throw new Error(`Invalid disabled recovery record: ${pendingPath}`);
-    const pending = plugins.find((plugin) => plugin.pluginId === id);
+    // A scoped local-marketplace list bypasses the unrelated remote catalog.
+    const marketplace = id.split("@")[1];
+    const recoveryArgs = [
+      "plugin",
+      "list",
+      ...(marketplace.startsWith("-")
+        ? [`--marketplace=${marketplace}`]
+        : ["--marketplace", marketplace]),
+      "--json",
+    ];
+    const pending = inventory(run(recoveryArgs)).find(
+      (plugin) => plugin.pluginId === id,
+    );
     if (pending?.enabled) {
       restoreDisabled(join(codexHome, "config.toml"), pending.pluginId);
-      plugins = inventory(run(["plugin", "list", "--json"]));
-      if (plugins.find((plugin) => plugin.pluginId === id)?.enabled !== false)
+      if (
+        inventory(run(recoveryArgs)).find((plugin) => plugin.pluginId === id)
+          ?.enabled !== false
+      )
         throw new Error(
           `Pending disabled plugin was not restored: ${pendingPath}`,
         );
@@ -241,6 +257,7 @@ export function updatePlugins({
         : `Discarded recovery for removed plugin: ${id}`,
     );
   }
+  const plugins = inventory(run(["plugin", "list", "--json"]));
   const failures: string[] = [];
   const failedMarketplaces = new Set<string>();
   const gitMarketplaces = new Set(
@@ -256,8 +273,7 @@ export function updatePlugins({
         "plugin",
         "marketplace",
         "upgrade",
-        name,
-        "--json",
+        ...(name.startsWith("-") ? ["--json", "--", name] : [name, "--json"]),
       ]) as { errors?: unknown[] };
       if (!result || !Array.isArray(result.errors) || result.errors.length) {
         throw new Error(
@@ -311,7 +327,11 @@ export function updatePlugins({
       }
       // Restore even when the CLI fails after partially changing configuration.
       try {
-        const result = run(["plugin", "add", id, "--json"]) as {
+        const result = run([
+          "plugin",
+          "add",
+          ...(id.startsWith("-") ? ["--json", "--", id] : [id, "--json"]),
+        ]) as {
           pluginId?: string;
           version?: string;
         };
@@ -407,15 +427,7 @@ function schedule(remove: boolean): void {
   const codexHome = resolve(
     process.env.CODEX_HOME || join(homedir(), ".codex"),
   );
-  assertNoUpdateOwner(codexHome);
-  if (!remove) inventory(cli(["plugin", "list", "--json"]));
   const domain = `gui/${process.getuid!()}`;
-  launchctl(["bootout", `${domain}/${label}`], true);
-  if (remove) {
-    rmSync(agent, { force: true });
-    console.log("Removed daily plugin updater.");
-    return;
-  }
   const log = join(
     homedir(),
     "Library",
@@ -423,18 +435,32 @@ function schedule(remove: boolean): void {
     "michaelhvisser-ai",
     "update-plugins.log",
   );
-  mkdirSync(dirname(agent), { recursive: true });
-  mkdirSync(dirname(log), { recursive: true });
-  writeFileSync(
-    agent,
-    schedulePlist(
-      realpathSync(fileURLToPath(import.meta.url)),
-      process.execPath,
-      process.env.PATH || "",
-      codexHome,
-      log,
-    ),
-  );
+  const release = acquireUpdateLock(codexHome);
+  try {
+    if (!remove) inventory(cli(["plugin", "list", "--json"]));
+    launchctl(["bootout", `${domain}/${label}`], true);
+    if (remove) {
+      rmSync(agent, { force: true });
+      console.log("Removed daily plugin updater.");
+      return;
+    }
+    mkdirSync(dirname(agent), { recursive: true });
+    mkdirSync(dirname(log), { recursive: true });
+    writeFileSync(
+      agent,
+      schedulePlist(
+        realpathSync(fileURLToPath(import.meta.url)),
+        process.execPath,
+        process.env.PATH || "",
+        codexHome,
+        log,
+      ),
+    );
+  } finally {
+    release();
+  }
+  // Bootstrap starts RunAtLoad; that worker acquires its own update claim.
+  // Release only after bootout and all schedule writes, before starting it.
   launchctl(["bootstrap", domain, agent]);
   console.log(
     `Installed updater: runs now and daily. Keep this checkout and Node installation. Log: ${log}`,
