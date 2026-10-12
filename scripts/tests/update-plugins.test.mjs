@@ -334,6 +334,68 @@ test("schedule stop and writes hold the update lock before bootstrap hands off t
   }
 });
 
+for (const status of [1, 3])
+  test(`schedule changes ${status === 1 ? "propagate permission failures and preserve the plist" : "tolerate an absent service"}`, (t) => {
+    if (process.platform !== "darwin") {
+      t.skip("macOS scheduling only");
+      return;
+    }
+    const root = temporary();
+    const home = join(root, "codex-home");
+    const agent = join(
+      root,
+      "Library",
+      "LaunchAgents",
+      "com.michaelhvisser.ai.update-plugins.plist",
+    );
+    const script = fileURLToPath(
+      new URL("../update-plugins.ts", import.meta.url),
+    );
+    try {
+      mkdirSync(join(root, "Library", "LaunchAgents"), { recursive: true });
+      writeFileSync(agent, "original job");
+      writeFileSync(
+        join(root, "codex"),
+        `#!${process.execPath}\nconsole.log('{"installed":[],"available":[]}');`,
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(root, "launchctl"),
+        `#!${process.execPath}\nif(process.argv[2]==='bootout'){console.error('Boot-out failed: ${status}: ${status === 1 ? "Operation not permitted" : "No such process"}');process.exitCode=${status};}`,
+        { mode: 0o755 },
+      );
+      const env = {
+        ...process.env,
+        HOME: root,
+        CODEX_HOME: home,
+        PATH: `${root}:${process.env.PATH}`,
+      };
+      for (const flag of ["--install-schedule", "--remove-schedule"]) {
+        if (status === 1) {
+          assert.throws(
+            () =>
+              execFileSync(process.execPath, [script, flag], {
+                env,
+                stdio: "pipe",
+              }),
+            (error) =>
+              error.status === 1 &&
+              String(error.stderr).includes("Operation not permitted"),
+          );
+          assert.equal(readFileSync(agent, "utf8"), "original job");
+        } else
+          execFileSync(process.execPath, [script, flag], {
+            env,
+            stdio: "pipe",
+          });
+        assert.deepEqual(readdirSync(join(home, ".plugin-update-lock")), []);
+      }
+      if (status === 3) assert.equal(existsSync(agent), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
 test("implicit marketplace plugins delegate to native add without registration metadata", () => {
   const entries = ["local", "git", "git-subdir", "npm"].map((source) => ({
     ...plugin(source, "personal", true, "local"),

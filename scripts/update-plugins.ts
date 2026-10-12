@@ -415,7 +415,12 @@ export function schedulePlist(
 function launchctl(args: string[], tolerateMissing = false): void {
   const result = spawnSync("launchctl", args, { encoding: "utf8" });
   if (result.error) throw result.error;
-  if (result.status && !tolerateMissing) throw new Error(result.stderr.trim());
+  // bootout uses ESRCH (3) when this service is absent. Other failures matter.
+  if (result.status === 0 || (tolerateMissing && result.status === 3)) return;
+  throw new Error(
+    result.stderr.trim() ||
+      `launchctl failed: ${result.signal || result.status}`,
+  );
 }
 
 function schedule(remove: boolean): void {
