@@ -27,6 +27,13 @@ Run `source "<PLUGIN_ROOT>/lib/github-rest.sh"`.
 
 ## Non-Negotiable Visual Gate
 
+After target discovery, read `<PLUGIN_ROOT>/lib/validation-policy.md` before
+rebasing or triggering CI. Apply its local-mode path to all later watchers and
+label steps. Read the verification-record section of
+`<PLUGIN_ROOT>/lib/work-method.md`; reuse any maintained feature recipes to
+cover actual entry points and outcomes. Select an explicitly known test
+organization rather than the first visible login-picker option.
+
 Every screenshot must be read with vision, compared to the PR/issue spec,
 described, and checked for discrepancies. DOM, console, and network checks
 supplement visual inspection; they never replace it.
@@ -46,9 +53,12 @@ in order:
 
 1. **Embedded Workflow Contract**
 2. **Bootstrap Block**
-3. **Persist Arguments Block**
-4. **Re-entry Check**
-5. **Terminal Re-entry**
+3. **Restore resume context**, then **Persist Arguments Block**
+4. Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against the validated,
+   restored `WORKTREE_PATH`. Reconcile inherited evidence and current delivery
+   authority before any saved-phase jump.
+5. **Re-entry Check**
+6. **Terminal Re-entry**
 
 If this skill or any supporting file sets `WORKFLOW_RESULT=INCOMPLETE`, execute
 **Hard Invariant Failure** from `loop-state.md` and stop. If browser ownership
@@ -129,8 +139,9 @@ its structured result posting and mode-specific label rules.
 ## Step 7: Finish
 
 Read `<PLUGIN_ROOT>/skills/e2e-verify/mode-finish.md` completely and execute
-Step 7.0 before any mode action. It owns the E2E gate, labels, exact-head CI
-watch, direct ship workflow handoff, and final result persistence.
+Steps 7.0-7.2 before any mode action. It owns the E2E gate, authorized repository
+triggers after that gate, policy-required exact-head validation in every mode,
+direct ship workflow handoff, and final result persistence.
 
 The gate is mandatory: UI-visible failures return `e2e-fail` after posting,
 without labels or ship. Standalone E2E persists then emits

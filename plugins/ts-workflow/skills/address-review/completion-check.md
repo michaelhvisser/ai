@@ -4,7 +4,7 @@ Loaded by `skills/address-review/SKILL.md` Step 11 and directly reusable by embe
 
 ## Step 11: Verify Completion
 
-Confirm all resolvable threads are resolved and CI is passing:
+Confirm all resolvable threads are resolved and validation satisfies current policy:
 
 ```bash
 PR_JSON=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM") || {
@@ -46,7 +46,7 @@ fi
 Pin completion checks to the exact published PR head:
 
 ```bash
-if [ -z "${WORKFLOW_REASON:-}" ]; then
+if [ -z "${WORKFLOW_REASON:-}" ] && [ "${VALIDATION_MODE:-auto}" != "local" ]; then
   CHECK_STATUS=0
   CHECKS_JSON=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$PR_HEAD_SHA") || CHECK_STATUS=$?
   case "$CHECK_STATUS" in
@@ -89,7 +89,7 @@ above instead.
 
 ### With `--no-watch`:
 Output `<done>COMPLETE</done>` when: branch rebased; local verification passes;
-CI is green; Step 11 confirms no unresolved threads; and, when feedback was
+validation satisfies current policy; Step 11 confirms no unresolved threads; and, when feedback was
 found, all feedback is addressed, fixes are validated and pushed, replies are
 posted, threads are resolved, and re-review is requested. A clean review skips
 only those feedback-specific actions.

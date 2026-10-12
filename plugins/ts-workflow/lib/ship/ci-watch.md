@@ -2,6 +2,12 @@
 
 Loaded by `skills/ship/SKILL.md` Phase 3. Owns SHA-anchored CI watching.
 
+First apply `<PLUGIN_ROOT>/lib/validation-policy.md`. When `VALIDATION_MODE=local`,
+execute its local-validation path, persist `has_ci=false` and
+`ci_skip_reason=repository-local-validation-policy`, and continue to Step 11.
+Skip the rest of this file before any watcher or check-registration request.
+This records non-applicability under cited policy, not passing remote CI.
+
 ## 10a. Capture and verify HEAD SHA
 
 ```bash
@@ -14,8 +20,10 @@ for WORKFLOW_FILE in "$WORKTREE_PATH"/.github/workflows/*.yml "$WORKTREE_PATH"/.
 done
 ```
 
-If no workflow files exist → persist `has_ci: false`,
-`ci_skip_reason: no-workflow-files`, and skip to Step 11. Workflow files alone
+If no workflow files exist and `VALIDATION_MODE=auto`, persist `has_ci: false`,
+`ci_skip_reason: no-workflow-files`, and skip to Step 11. In explicit pr-ci mode,
+continue to Step 10b even without workflow files because an external provider
+may publish the required checks. Workflow files alone
 do not establish that CI applies to the current PR; leave `has_ci` unset until
 Step 10b determines whether checks registered or an active workflow applies.
 
@@ -81,6 +89,11 @@ treat a timeout, API failure, or head shift as passing CI.
 
 On `GITHUB_CHECKS_REGISTRATION_TIMEOUT`, determine whether any workflow can
 produce a check for this PR before stopping:
+
+In explicit pr-ci mode, stop incomplete with
+`WORKFLOW_REASON=ci-checks-not-registered`. Required checks did not arrive;
+absence of applicable Actions workflows cannot waive them. Only auto mode
+uses the following no-applicable-workflow determination.
 
 1. Read the PR base branch, head branch, and changed paths.
 2. Inspect each workflow's GitHub Actions state and `on` filters. Ignore

@@ -17,6 +17,12 @@ The gate is `bash scripts/check.sh`: version sync (`--check`) plus
 
 ## Versions
 
+The language-neutral work method and validation policy are canonical in
+`plugins/workflow/lib/`. Run `node scripts/sync-workflow-libs.mjs` after editing
+them to publish identical copies in the TypeScript plugin's own cache root.
+The gate checks parity. Resolve toolchain-specific commands only in the target
+repository or its language adapter.
+
 `.claude-plugin/marketplace.json` is the canonical version source. To bump a plugin, edit
 its version there and run `node scripts/sync-versions.mjs` — never hand-edit
 `plugins/<name>/.claude-plugin/plugin.json` or `.codex-plugin/plugin.json`; the script

@@ -33,8 +33,8 @@ repository resolution. `--no-watch` disables only Step 12. If no PR is found,
 use the missing-intent gate and stop before loop initialization or completion.
 
 Read `<PLUGIN_ROOT>/skills/address-review/loop-management.md` completely and
-execute **Embedded Workflow Contract**, **Loop Initialization**, and **Re-entry
-Check**. Standalone address-review owns its loop; embedded address-review uses
+execute **Embedded Workflow Contract**, **Loop Initialization**, and
+**Restore and validate target** under **Re-entry Check**. Do not route yet. Standalone address-review owns its loop; embedded address-review uses
 the caller state file and child path, never changes root promises or emits a
 terminal marker.
 
@@ -42,19 +42,27 @@ If this skill or a supporting file sets `WORKFLOW_RESULT=INCOMPLETE`, execute
 **Hard Invariant Failure** from `loop-management.md` and stop. The embedded
 branch returns structured incomplete state without a marker.
 
-A resumed standalone `watching` phase in watch mode skips to Step 12. In
-`--no-watch` mode it clears the phase and performs a full fix cycle.
-
 ## Context and Checkout
 
 Read `<PLUGIN_ROOT>/skills/address-review/setup-and-discovery.md` completely.
 Gather REST PR context, detect review bots from REST reviews and GraphQL threads,
 and preserve matched logins in `DETECTED_BOTS`.
 
+Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against the discovered target
+before its rebase, CI calls, and completion checks. Local mode uses required
+local evidence and published-head equality; pr-ci/auto retain applicable CI.
+Then execute **Phase routing** under **Re-entry Check**. A resumed standalone
+`watching` phase in watch mode restores its bot baseline and continues at
+Step 2 to refresh feedback. The clean path still executes local verification
+(Step 5), policy-required validation (Step 7), and exact-head completion
+checks (Step 11) before Step 12. New feedback follows the normal fix cycle.
+A failed gate never enters watching or emits completion. In `--no-watch`
+mode clear the phase and perform the full fix cycle.
+
 Read `<PLUGIN_ROOT>/skills/address-review/checkout-rebase.md` completely and
 execute Step 1. Use the REST-declared PR head, preserve fork/base metadata,
 rebase only when behind, push with lease when required, and re-check current-head
-CI. An unresolved rebase conflict is incomplete.
+validation. An unresolved rebase conflict is incomplete.
 
 ## Step 2: Fetch Feedback
 
@@ -68,7 +76,7 @@ the full categorize/fix/test/verify/commit/CI/reply/resolve cycle.
 
 A clean review sets and persists `REVIEW_CLEAN=true`, skips only mutation,
 reply, resolution, and re-review actions, but still performs local verification,
-exact-head CI, and Step 11. For feedback, make minimal fixes, add tests for
+policy-required validation, and Step 11. For feedback, make minimal fixes, add tests for
 observable behavior, stage only owned files, push, reply with durable behavior
 descriptions, and resolve only Group A threads after verification.
 
@@ -82,7 +90,7 @@ left applicable feedback.
 
 Read `<PLUGIN_ROOT>/skills/address-review/completion-check.md` completely and
 execute it. Completion requires the PR head to equal `EXPECTED_REVIEW_HEAD`
-(or current local HEAD), zero unresolved threads, and successful exact-head CI.
+(or current local HEAD), zero unresolved threads, and successful exact-head policy-required validation.
 Metadata failure, missing checks, API failure, or a head shift is incomplete.
 
 ## Step 12: Bot Watch
@@ -100,7 +108,7 @@ marker. Ship or E2E remains the top-level owner of later CI, bot watch, posting,
 merge, and completion gates.
 
 Standalone `--no-watch` completes after rebase, local verification, exact-head
-CI, Step 11, and all applicable feedback replies/resolutions/re-review requests.
+policy-required validation, Step 11, and all applicable feedback replies/resolutions/re-review requests.
 Default watch mode additionally requires every detected review bot to signal
 approval according to `bot-registry.md`.
 

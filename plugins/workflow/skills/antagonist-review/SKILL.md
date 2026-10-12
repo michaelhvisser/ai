@@ -469,6 +469,12 @@ Request the decision via the surface's structured-input capability:
 
 ## Fix phase (Codex fixes, finder verifies, loop re-reviews)
 
+Read `${CLAUDE_PLUGIN_ROOT}/lib/work-method.md` and paste the applicable bug,
+safety-assumption, and verification-record sections into the fixer and fix
+verifier briefs. Read `${CLAUDE_PLUGIN_ROOT}/lib/validation-policy.md` before
+running checks. Preserve report-only and approved-fix boundaries; the shared
+method does not change the review's finding bar or expand its scope.
+
 Requires a clean working tree (stash or commit anything unrelated first — ask, don't assume).
 
 1. **FIX** — one write-capable `codex exec` call (`-s workspace-write`,

@@ -134,12 +134,12 @@ is identical across modes.
 
 | Mode | Footer |
 |------|--------|
-| `verify` | "Verification complete. Ready for review." |
-| `fix-and-verify` | "Review feedback addressed and verified. `run-full-ci` label added." |
-| `investigate` | "Investigation complete. See findings above." |
-| `ship-prep` | "Ship prep complete. `run-full-ci` label added. Ready for `$ts-workflow:ship`." |
-| `ship` | "Verified and shipping via `$ts-workflow:ship`." |
-| `fix-and-ship` | "Review addressed, verified, and shipping. `run-full-ci` label added." |
+| `verify` | "E2E evidence posted. Final policy validation is pending." |
+| `fix-and-verify` | "Review feedback addressed; E2E evidence posted. Final policy validation is pending." |
+| `investigate` | "Investigation findings posted. Final policy validation is pending." |
+| `ship-prep` | "E2E evidence posted. Ship prep completes after final policy validation." |
+| `ship` | "E2E evidence posted. Shipping remains gated by final policy validation." |
+| `fix-and-ship` | "Review feedback addressed; E2E evidence posted. Shipping remains gated by final policy validation." |
 
 **Fail path** (`E2E_RESULT` is `fail`, `partial`, `skipped-server-failed`,
 `missing-browser-tooling`, or `uninspected-screenshots` on a UI-visible diff)
@@ -149,27 +149,14 @@ is identical across modes.
 > no ship invoked. Address the findings above and re-run
 > `$ts-workflow:e2e-verify`.
 
-## 6d. Add Labels (gated on `E2E_RESULT`)
+## 6d. Repository-owned labels
 
-Labels are added only when the Step 7 gate would pass — i.e. `E2E_RESULT=pass`
-on a UI-visible diff or `E2E_RESULT=skipped` on a non-UI diff. For any fail
-state, **do not add `run-full-ci`** and **do not add `e2e-verified`**.
+Step 6 only posts evidence; it does not invoke triggers or change labels.
+Step 7.1 owns any explicitly configured, authorized repository helper, after
+the full Step 7.0 gate passes and before Step 7.2 watches required CI. Missing
+configuration or authorization leaves labels unchanged. Conventional label
+names are not configuration.
 
-When the gate has passed, for modes that add the `run-full-ci` label
-(`fix-and-verify`, `ship-prep`, `fix-and-ship`):
-
-```bash
-jq -cn '{labels: ["run-full-ci"]}' |
-  gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
-```
-
-When the gate has passed, also add the `e2e-verified` label to mark the PR as
-E2E-clean:
-
-```bash
-jq -cn '{labels: ["e2e-verified"]}' |
-  gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
-```
-
-Both labels must already exist in the repository. A failed REST label request
-is a non-success result; do not report the corresponding label as added.
+The footer reports verification and the authorized next phase. It never claims
+a label mutation in advance. Report a repository-owned mutation separately
+only after its API result confirms success; a failed request is incomplete.

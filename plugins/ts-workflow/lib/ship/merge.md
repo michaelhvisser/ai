@@ -7,20 +7,32 @@ strategy detection, REST mergeability decision tree, and summary rendering.
 
 ## 13a. Final checks
 
-1. Verify CI is green for the exact expected head, unless `has_ci=false` in the
-   state file:
+1. Re-read the published PR head for every validation mode, including
+   `--no-merge`, before checking CI applicability. The current published head
+   must match the validated head; local mode skips only CI calls:
 
 ```bash
 HAS_CI=$(get_loop_field "$STATE_FILE" "has_ci" "$WORKFLOW_STATE_PATH")
 HEAD_SHA=$(get_loop_field "$STATE_FILE" "head_sha" "$WORKFLOW_STATE_PATH")
-if [ "$HAS_CI" = "true" ]; then
-  if [ -z "$HEAD_SHA" ]; then
-    WORKFLOW_REASON="ci-head-missing"
-  elif ! FINAL_PR=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM"); then
-    WORKFLOW_REASON="ci-pr-api-error"
-  elif [ "$(jq -er '.head.sha' <<< "$FINAL_PR")" != "$HEAD_SHA" ]; then
-    WORKFLOW_REASON="ci-head-shift"
-  elif ! FINAL_CHECKS=$(cd "$WORKTREE_PATH" && github_check_snapshot "$HEAD_SHA"); then
+if [ "${VALIDATION_MODE:-auto}" = "local" ]; then
+  HAS_CI=false
+fi
+if [ -z "$HEAD_SHA" ]; then
+  WORKFLOW_REASON="final-head-missing"
+elif ! FINAL_PR=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM"); then
+  WORKFLOW_REASON="final-pr-api-error"
+else
+  FINAL_PR_HEAD=$(jq -er '.head.sha' <<< "$FINAL_PR") || WORKFLOW_REASON="invalid-pr-head-metadata"
+  if [ -z "${WORKFLOW_REASON:-}" ] && [ "$FINAL_PR_HEAD" != "$HEAD_SHA" ]; then
+    WORKFLOW_REASON="final-pr-head-shift"
+  fi
+fi
+if [ -z "${WORKFLOW_REASON:-}" ] &&
+   [ "${VALIDATION_MODE:-auto}" = "pr-ci" ] && [ "$HAS_CI" != "true" ]; then
+  WORKFLOW_REASON="required-ci-unverified"
+fi
+if [ -z "${WORKFLOW_REASON:-}" ] && [ "$HAS_CI" = "true" ]; then
+  if ! FINAL_CHECKS=$(cd "$WORKTREE_PATH" && github_check_snapshot "$HEAD_SHA"); then
     WORKFLOW_REASON="ci-api-error"
   elif [ "$(jq '.items | length' <<< "$FINAL_CHECKS")" -eq 0 ]; then
     WORKFLOW_REASON="ci-checks-not-registered"
@@ -32,8 +44,9 @@ if [ "$HAS_CI" = "true" ]; then
 fi
 ```
 
-Any reason set by this block follows **Hard Invariant Failure**. Missing check
-registration, API failure, and a shifted PR head never count as green CI.
+Any reason set by this block follows **Hard Invariant Failure** before the
+`--no-merge` exit or any merge action. A missing head, metadata/API failure, or
+shifted head is never a completed delivery. Required checks must also pass.
 
 2. Check for unresolved review threads:
 
@@ -359,7 +372,7 @@ fi
 - **Coverage (changed files):** <COV_LINE>
 - **Tests generated:** <TESTS_GEN>
 - **E2E tests:** <E2E_LINE>
-- **CI:** green
+- **CI:** <green for exact head or not applicable with policy/skip reason>
 - **Bot approvals:** <list or "none required">
 - **Merge strategy:** <merge|squash|rebase>
 - **Merged:** yes (or "skipped — --no-merge")

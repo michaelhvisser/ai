@@ -268,7 +268,7 @@ id_noise() {  # mechanical, before any search; the model does not override it
   local n="$1" sig="" title
   title=$(id_state_get "$n" .title)
   if grep -q '<!-- detent-intake:' "$RUN_DIR/body-$n.md"; then sig="detent-intake fingerprint"
-  elif printf '%s\n' "$title" | cat - "$RUN_DIR/body-$n.md" | grep -qE '(^|/|[[:space:]]|`)(\.next|dist|build|out|node_modules|_generated)/'; then
+  elif printf '%s\n' "$title" | cat - "$RUN_DIR/body-$n.md" | grep -E '(^|/|[[:space:]]|`)(\.next|dist|build|out|node_modules|_generated)/' >/dev/null; then
     sig="path under build output / node_modules / _generated"; fi
   id_state_set "$n" noise_signal '$v' --arg v "$sig"
 }

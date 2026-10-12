@@ -145,13 +145,39 @@ else
 fi
 ```
 
-## Persist Arguments Block
+## Restore resume context
 
-Runs immediately after bootstrap so subsequent re-entries see the original
-mode and PR number.
+Runs after bootstrap. On resume, hydrate saved inputs before writing them.
+Refresh metadata in the restored target; do not reuse ambient-checkout metadata.
 
 ```bash
 initialize_workflow_state "$STATE_FILE" "$WORKFLOW_STATE_PATH"
+if [ -n "${EXISTING_PHASE:-}" ]; then
+  MODE=$(get_loop_field "$STATE_FILE" "mode" "$WORKFLOW_STATE_PATH")
+  PR_NUM=$(get_loop_field "$STATE_FILE" "pr_number" "$WORKFLOW_STATE_PATH")
+  BUILD_RESULT=$(get_loop_field "$STATE_FILE" "build_result" "$WORKFLOW_STATE_PATH")
+  E2E_RESULT=$(get_loop_field "$STATE_FILE" "e2e_result" "$WORKFLOW_STATE_PATH")
+  PAGES_TESTED=$(get_loop_field "$STATE_FILE" "pages_tested" "$WORKFLOW_STATE_PATH")
+  BASE_BRANCH=$(get_loop_field "$STATE_FILE" "base_branch" "$WORKFLOW_STATE_PATH")
+  case "$MODE" in verify|fix-and-verify|investigate|ship-prep|ship|fix-and-ship) ;;
+    *) WORKFLOW_RESULT=INCOMPLETE; WORKFLOW_REASON=e2e-resume-mode-invalid ;;
+  esac
+  case "$PR_NUM" in ''|*[!0-9]*) WORKFLOW_RESULT=INCOMPLETE; WORKFLOW_REASON=e2e-resume-pr-invalid ;; esac
+  if [ "${WORKFLOW_RESULT:-}" != "INCOMPLETE" ]; then
+    PR_JSON=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM") || {
+      WORKFLOW_RESULT=INCOMPLETE
+      WORKFLOW_REASON=pr-metadata-api-failure
+    }
+  fi
+fi
+```
+
+If `WORKFLOW_RESULT=INCOMPLETE`, execute **Hard Invariant Failure** and stop
+before writing arguments or routing. Otherwise continue:
+
+## Persist Arguments Block
+
+```bash
 if [ -z "$(get_loop_field "$STATE_FILE" "original_repo_root" '[]')" ]; then
   set_loop_field "$STATE_FILE" "original_repo_root" "$ORIGINAL_REPO_ROOT" '[]'
 fi

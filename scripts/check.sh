@@ -3,6 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 node "$SCRIPT_DIR/sync-versions.mjs" --check
+node "$SCRIPT_DIR/sync-workflow-libs.mjs" --check
 if command -v claude >/dev/null 2>&1; then
   claude plugin validate "$SCRIPT_DIR/.." --strict
 else

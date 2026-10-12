@@ -305,7 +305,7 @@ if [ -z "${WORKFLOW_REASON:-}" ]; then
     WORKFLOW_REASON=invalid-pr-head-metadata
   }
 fi
-if [ -z "${WORKFLOW_REASON:-}" ]; then
+if [ -z "${WORKFLOW_REASON:-}" ] && [ "${VALIDATION_MODE:-auto}" != "local" ]; then
   CHECK_STATUS=0
   CHECKS_JSON=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$PR_HEAD_SHA") || CHECK_STATUS=$?
   case "$CHECK_STATUS" in
@@ -323,7 +323,7 @@ For PR metadata failures, statuses 2-4, or an unknown status, follow the
 top-level **Hard Invariant Failure** procedure. Registration timeout, API
 failure, and head shift are non-success outcomes. If CI fails, analyze, fix,
 commit, push, update the exact head SHA, and re-watch. **Do not proceed until
-CI is green for the freshly resolved `PR_HEAD_SHA`.**
+validation satisfies current policy for the freshly resolved `PR_HEAD_SHA`.**
 
 ---
 
@@ -339,7 +339,7 @@ Keep replies brief and professional.
 
 ## Step 9: Resolve Review Threads (Group A only)
 
-**Only resolve after CI passes and fixes are pushed.** Only for line-specific threads (Group A).
+**Only resolve after current-head validation satisfies the shared policy and fixes are pushed.** Only for line-specific threads (Group A).
 
 ```bash
 (cd "$WORKTREE_PATH" && gh api graphql -f query='

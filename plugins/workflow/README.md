@@ -21,6 +21,9 @@ Add the marketplace, then install the plugin:
 
 | Claude Code invocation | Description |
 |------------------------|-------------|
+| `/workflow:plan-work [issue or task]` | Plan admitted work with task routing, reproduction, selective design alternatives, safety assumptions, effective repository gates, and acceptance checks. Works with Go, TypeScript, or another toolchain; does not implement or change tracker state. |
+| `/workflow:safety-proof [change or invariant]` | Trace consumers beyond the diff and execute the checks for assumptions that make a risky change safe. Report unproven behavior as a gap. |
+| `/workflow:verify-feature [feature] [create\|maintain\|run]` | Create, maintain, or run real UI, CLI, or service verification recipes with safe fixtures, current-head evidence, and owned cleanup. |
 | `/workflow:visual-review [PR or worktree] [feedback.json]` | Build a local UI review package with inspected screenshots, change coverage, zoom, pins/rectangles, optional video timestamps, and capture-bound feedback export/import; backend-only PRs get a one-line "no UI changes" verdict instead; no hosting or workflow approval |
 | `/workflow:pr-details [PR]` | Read-only situation report for one PR: CI against the base branch's real required checks, reviews, threads, mergeability, board state, whether the linked issue's problem still exists (checked against recently shipped and backlog work, so a superseded PR is named for closing), whether its plan is right, which review skill is still needed at this head — and the ordered execution plan to merge-readiness, approvable at the closing prompt for local execution or a Detent handoff, with a by-hand recipe per step and preview-deploy screenshots for UI changes |
 | `/workflow:issue-details <n> [...] \| --since <n>d` | Read-only triage evaluation for one or more issues: class (bug / goal / idea / question / noise), an advisory duplicate verdict from a closed vocabulary (open issues, open PRs, PRs merged into the base branch since filing — at most one canonical, no invented numbers), goal alignment via `goal:*` labels and epic references, proposed board Priority and Detent effort tier (never `max`), the author-decides social rule — then one marker-backed comment per issue, edited in place on re-run, posted only past the closing approval |
@@ -42,6 +45,14 @@ and `resolve-conflicts` are also reachable in Codex as `$workflow:commit`,
 skill names are not resolver aliases.
 
 ## The Flow
+
+Use `plan-work` before implementation when an issue needs a concrete handoff.
+The shared method covers reproduction, consequential design alternatives,
+safety proof, and criterion-specific evidence. Runtime commands come from the
+target repository. The TypeScript adapters receive packaged copies of this
+same method; Go fixers receive it in their briefs. See
+[Detent adoption](docs/detent-adoption.md) for wiring it into a repository's
+workflow without replacing its existing coordinator or language tools.
 
 The main loop for driving one PR to merge: run `pr-details`, run the one skill
 it names, run `pr-details` again — until the answer is a terminal or
