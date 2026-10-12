@@ -51,10 +51,13 @@ Read `<PLUGIN_ROOT>/skills/address-review/setup-and-discovery.md` completely.
 Gather REST PR context, detect review bots from REST reviews and GraphQL threads,
 and preserve matched logins in `DETECTED_BOTS`.
 
+Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against the discovered target
+before its rebase, CI calls, and completion checks. Local mode uses required
+local evidence and published-head equality; pr-ci/auto retain applicable CI.
 Read `<PLUGIN_ROOT>/skills/address-review/checkout-rebase.md` completely and
 execute Step 1. Use the REST-declared PR head, preserve fork/base metadata,
 rebase only when behind, push with lease when required, and re-check current-head
-CI. An unresolved rebase conflict is incomplete.
+validation. An unresolved rebase conflict is incomplete.
 
 ## Step 2: Fetch Feedback
 
@@ -68,7 +71,7 @@ the full categorize/fix/test/verify/commit/CI/reply/resolve cycle.
 
 A clean review sets and persists `REVIEW_CLEAN=true`, skips only mutation,
 reply, resolution, and re-review actions, but still performs local verification,
-exact-head CI, and Step 11. For feedback, make minimal fixes, add tests for
+policy-required validation, and Step 11. For feedback, make minimal fixes, add tests for
 observable behavior, stage only owned files, push, reply with durable behavior
 descriptions, and resolve only Group A threads after verification.
 
@@ -100,7 +103,7 @@ marker. Ship or E2E remains the top-level owner of later CI, bot watch, posting,
 merge, and completion gates.
 
 Standalone `--no-watch` completes after rebase, local verification, exact-head
-CI, Step 11, and all applicable feedback replies/resolutions/re-review requests.
+policy-required validation, Step 11, and all applicable feedback replies/resolutions/re-review requests.
 Default watch mode additionally requires every detected review bot to signal
 approval according to `bot-registry.md`.
 

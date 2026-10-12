@@ -365,7 +365,7 @@ fi
 - **Coverage (changed files):** <COV_LINE>
 - **Tests generated:** <TESTS_GEN>
 - **E2E tests:** <E2E_LINE>
-- **CI:** green
+- **CI:** <green for exact head or not applicable with policy/skip reason>
 - **Bot approvals:** <list or "none required">
 - **Merge strategy:** <merge|squash|rebase>
 - **Merged:** yes (or "skipped — --no-merge")

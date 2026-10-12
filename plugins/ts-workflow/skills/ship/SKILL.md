@@ -128,7 +128,8 @@ checks, and merge queue only when required.
 
 Return shipped only after fresh evidence proves: local review is clean/maxed or
 durably recorded as `void`/`skipped` for an allowed session or backend-unavailable reason and the exact
-current head passes CI; applicable coverage and E2E passed; changes are pushed;
+current head satisfies the effective validation policy, with CI not applicable
+under local policy or green when required; applicable coverage and E2E passed; changes are pushed;
 a non-draft PR exists; detected bots approve or none apply; no unresolved or
 human-requested changes remain; and the PR merged (or `--no-merge` was supplied).
 An unrecorded timeout, error, or early exit never satisfies review completion.

@@ -462,7 +462,7 @@ EXPECTED_REVIEW_HEAD="$FINAL_REVIEW_HEAD"
 If this block sets `WORKFLOW_REASON`, follow **Hard Invariant Failure** and stop.
 Otherwise, read `<PLUGIN_ROOT>/skills/address-review/SKILL.md` and
 repeat **Step 11 only** before proceeding to E2E testing. Do not proceed until
-CI is green and the unresolved-thread count is zero for the exact local and
+validation satisfies the effective policy and the unresolved-thread count is zero for the exact local and
 published final head. Step 11 must retain `EXPECTED_REVIEW_HEAD` and reject any
 PR head change observed by its fresh metadata read.
 

@@ -157,9 +157,11 @@ procedure.
 
 ## 1d. Wait for CI after rebase
 
-Only after a rebase, watch checks pinned to the exact pushed head:
+Only after a rebase, watch checks pinned to the exact pushed head when CI is
+applicable. Local mode skips this watcher and refreshes required local proof.
 
 ```bash
+if [ "${VALIDATION_MODE:-auto}" != "local" ]; then
 CHECK_STATUS=0
 CHECKS_JSON=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$PR_HEAD_SHA") || CHECK_STATUS=$?
 case "$CHECK_STATUS" in
@@ -170,8 +172,10 @@ case "$CHECK_STATUS" in
   4) WORKFLOW_RESULT=INCOMPLETE; WORKFLOW_REASON=pr-head-shift ;;
   *) WORKFLOW_RESULT=INCOMPLETE; WORKFLOW_REASON=checks-unknown-failure ;;
 esac
+fi
 ```
 
 For statuses 2-4 or an unknown status, follow the top-level **Hard Invariant
 Failure** procedure. Registration timeout, API failure, and head shift are
-non-success outcomes. Do not proceed until CI passes for `PR_HEAD_SHA`.
+non-success outcomes. Do not proceed until validation satisfies current policy
+for `PR_HEAD_SHA`.

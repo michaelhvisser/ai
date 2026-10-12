@@ -94,7 +94,7 @@ is delegation, not another skill invocation.
 
 Both flows preserve this order: explore/design, TDD red before implementation,
 minimal green, build/test/lint, coverage, security review, scoped commit/push,
-non-draft PR creation, and current-head CI. Bugs also perform duplicate
+non-draft PR creation, and validation under the effective policy. Bugs also perform duplicate
 detection. Features resolve approach from requirements, repository patterns,
 reversibility, and risk.
 
@@ -120,7 +120,9 @@ incomplete state without a marker; standalone runs persist then emit only
 
 Complete only when implementation addresses the issue, tests and build pass,
 coverage is verified or source-free, configured lint passes, changes are
-committed and pushed, a non-draft PR exists, and exact-head CI is green.
+committed and pushed, a non-draft PR exists, and validation satisfies the
+effective policy: required local evidence and a matching published head in
+local mode, or green exact-head CI when applicable in pr-ci/auto mode.
 
 Execute **Successful Result** from `loop-state.md` only after all criteria
 hold. Embedded success returns structured state without a marker; standalone

@@ -24,6 +24,13 @@ an invented bypass flag. Missing remote checks cannot select local mode.
 Local mode never changes repository rulesets or substitutes for an actual
 server-required check.
 
+This policy governs CI instructions in the caller and all of its disclosed or
+embedded helpers, including completion criteria. In local mode, their CI
+conjunct is satisfied by required local evidence plus a matching published
+head, with CI recorded as not applicable. In pr-ci mode, require green
+exact-head checks. In auto mode, preserve the caller's existing applicability
+decision and watcher behavior. Never interpret auto as a local-mode exemption.
+
 Resolve this policy before the caller's resume phase routing, using its
 persisted target repository. Record the resolved validation mode and policy
 sources in its existing state. A saved `has_ci=false` is evidence of a prior

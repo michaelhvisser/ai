@@ -195,9 +195,10 @@ echo "Commits behind ${BASE_REMOTE}/${BASE_BRANCH}: $BEHIND"
 When `<PLUGIN_ROOT>/lib/validation-policy.md` selects `VALIDATION_MODE=local`,
 skip this CI wait and continue to Step 2's required local build and tests.
 Refresh current-head evidence after the rebase; do not claim remote CI passed.
-Only the pr-ci branch executes the watcher below.
+The pr-ci and auto branches retain the watcher below; only local mode skips it.
 
 ```bash
+if [ "${VALIDATION_MODE:-auto}" != "local" ]; then
 HEAD_SHA=$(git -C "$WORKTREE_PATH" rev-parse HEAD)
 CHECKS_STATUS=0
 CHECKS_SNAPSHOT=$(cd "$WORKTREE_PATH" && github_watch_pr_checks "$PR_NUM" "$HEAD_SHA") || CHECKS_STATUS=$?
@@ -215,6 +216,7 @@ if [ "$CHECKS_STATUS" -ne 0 ]; then
   exit 1
 fi
 jq -r '.items[] | "\(.name): \(.state)"' <<< "$CHECKS_SNAPSHOT"
+fi
 ```
 
 Registration timeout, API failure, check failure, or a PR head shift is a
