@@ -34,17 +34,59 @@ function validPluginId(value: unknown): value is string {
   );
 }
 
+function hasCachedRemoteInstall(codexHome: string): boolean {
+  const root = join(codexHome, "plugins", "cache");
+  if (!existsSync(root)) return false;
+  for (const marketplace of readdirSync(root, { withFileTypes: true })) {
+    if (!marketplace.isDirectory() && !marketplace.isSymbolicLink()) continue;
+    const path = join(root, marketplace.name);
+    for (const plugin of readdirSync(path, { withFileTypes: true })) {
+      if (!plugin.isDirectory() && !plugin.isSymbolicLink()) continue;
+      if (
+        existsSync(join(path, plugin.name, ".codex-remote-plugin-install.json"))
+      )
+        return true;
+    }
+  }
+  return false;
+}
+
 export function cli(args: string[]): unknown {
-  const result = spawnSync("codex", args, {
-    encoding: "utf8",
+  const codexHome = resolve(
+    process.env.CODEX_HOME || join(homedir(), ".codex"),
+  );
+  const options = {
+    encoding: "utf8" as const,
     cwd: homedir(),
     env: {
       ...process.env,
-      CODEX_HOME: resolve(process.env.CODEX_HOME || join(homedir(), ".codex")),
+      CODEX_HOME: codexHome,
     },
     timeout: 120_000,
     maxBuffer: 16 * 1024 * 1024,
-  });
+  };
+  const fullInventory =
+    args[0] === "plugin" &&
+    args[1] === "list" &&
+    !args.some(
+      (arg) =>
+        arg === "--marketplace" ||
+        arg.startsWith("--marketplace=") ||
+        arg.startsWith("-m"),
+    );
+  if (fullInventory && hasCachedRemoteInstall(codexHome)) {
+    const auth = spawnSync("codex", ["login", "status"], options);
+    if (auth.error) throw auth.error;
+    if (
+      auth.status !== 0 ||
+      !`${auth.stdout}\n${auth.stderr}`.includes("Logged in using ChatGPT")
+    ) {
+      throw new Error(
+        "Cached account-managed plugins require ChatGPT authentication to verify complete inventory. Run codex login before updating.",
+      );
+    }
+  }
+  const result = spawnSync("codex", args, options);
   if (result.error) throw result.error;
   if (result.status !== 0) {
     throw new Error(result.stderr.trim() || `codex exited ${result.status}`);

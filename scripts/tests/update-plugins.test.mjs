@@ -89,7 +89,9 @@ test("a terminated updater leaves a dead claim that the next run removes", () =>
 test("an incomplete remote inventory warning fails even when Codex exits successfully", () => {
   const root = temporary();
   const savedPath = process.env.PATH;
+  const savedHome = process.env.CODEX_HOME;
   try {
+    process.env.CODEX_HOME = join(root, "home");
     writeFileSync(
       join(root, "codex"),
       `#!${process.execPath}\nconsole.error("Warning: failed to list remote marketplace plugins: authentication unavailable"); console.log('{"installed":[],"available":[]}');`,
@@ -110,6 +112,8 @@ test("an incomplete remote inventory warning fails even when Codex exits success
     });
   } finally {
     process.env.PATH = savedPath;
+    if (savedHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedHome;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -134,6 +138,89 @@ test("recycled PIDs, including a root-owned process, do not keep stale claims al
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+for (const auth of [
+  { name: "signed out", status: 1, message: "Not logged in", allowed: false },
+  {
+    name: "API key",
+    status: 0,
+    message: "Logged in using an API key: test-secret",
+    allowed: false,
+  },
+  {
+    name: "ChatGPT",
+    status: 0,
+    message: "Logged in using ChatGPT",
+    allowed: true,
+  },
+])
+  test(`cached remote installations require complete inventory with ${auth.name} authentication`, () => {
+    const root = temporary();
+    const home = join(root, "home");
+    const calls = join(root, "inventory-calls.txt");
+    const savedPath = process.env.PATH;
+    const savedHome = process.env.CODEX_HOME;
+    try {
+      const metadata = join(
+        home,
+        "plugins",
+        "cache",
+        "account",
+        "remote",
+        ".codex-remote-plugin-install.json",
+      );
+      mkdirSync(join(home, "plugins", "cache", "account", "remote"), {
+        recursive: true,
+      });
+      writeFileSync(
+        metadata,
+        JSON.stringify({
+          schema_version: 1,
+          remote_plugin_id: "remote-fixture",
+        }),
+      );
+      writeFileSync(
+        join(root, "codex"),
+        `#!${process.execPath}\nif(process.argv[2]==='login'){console.error(${JSON.stringify(auth.message)});process.exitCode=${auth.status};}else{require('node:fs').appendFileSync(${JSON.stringify(calls)},'list\\n');console.log('{"installed":[],"available":[]}');}`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${root}:${savedPath}`;
+      process.env.CODEX_HOME = home;
+      if (auth.allowed)
+        assert.deepEqual(cli(["plugin", "list", "--json"]), {
+          installed: [],
+          available: [],
+        });
+      else {
+        assert.throws(
+          () => cli(["plugin", "list", "--json"]),
+          (error) =>
+            String(error).includes("require ChatGPT authentication") &&
+            !String(error).includes("test-secret"),
+        );
+        assert.equal(existsSync(calls), false);
+        // Local recovery stays available even when full remote inventory is blocked.
+        assert.deepEqual(
+          cli(["plugin", "list", "--marketplace", "fixture", "--json"]),
+          { installed: [], available: [] },
+        );
+        assert.deepEqual(
+          cli(["plugin", "list", "--marketplace=-fixture", "--json"]),
+          { installed: [], available: [] },
+        );
+      }
+      rmSync(metadata);
+      assert.deepEqual(cli(["plugin", "list", "--json"]), {
+        installed: [],
+        available: [],
+      });
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = savedHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
 test("recovers a disabled preference after termination inside plugin install", () => {
   const home = temporary();
