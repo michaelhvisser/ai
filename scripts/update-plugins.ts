@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type Plugin = {
@@ -261,6 +261,23 @@ export function restoreDisabled(configPath: string, id: string): void {
   }
 }
 
+function recoverDisabled(
+  codexHome: string,
+  log: (message: string) => void,
+): void {
+  const pendingPath = join(codexHome, ".plugin-update-disabled.json");
+  if (!existsSync(pendingPath)) return;
+  const id: unknown = JSON.parse(readFileSync(pendingPath, "utf8"));
+  if (!validPluginId(id))
+    throw new Error(`Invalid disabled recovery record: ${pendingPath}`);
+  // Catalog membership cannot prove whether a cached plugin is still loaded.
+  // Restore the saved preference directly, before any inventory or auth call.
+  // Missing/unrecognized configuration leaves the marker for operator repair.
+  restoreDisabled(join(codexHome, "config.toml"), id);
+  rmSync(pendingPath);
+  log(`Recovered disabled setting: ${id}`);
+}
+
 export function updatePlugins({
   run = cli,
   dryRun = false,
@@ -273,17 +290,7 @@ export function updatePlugins({
   log?: (message: string) => void;
 } = {}): number {
   const pendingPath = join(codexHome, ".plugin-update-disabled.json");
-  if (!dryRun && existsSync(pendingPath)) {
-    const id: unknown = JSON.parse(readFileSync(pendingPath, "utf8"));
-    if (!validPluginId(id))
-      throw new Error(`Invalid disabled recovery record: ${pendingPath}`);
-    // Catalog membership cannot prove whether a cached plugin is still loaded.
-    // Restore the saved preference directly, before any inventory or auth call.
-    // Missing/unrecognized configuration leaves the marker for operator repair.
-    restoreDisabled(join(codexHome, "config.toml"), id);
-    rmSync(pendingPath);
-    log(`Recovered disabled setting: ${id}`);
-  }
+  if (!dryRun) recoverDisabled(codexHome, log);
   const plugins = inventory(run(["plugin", "list", "--json"]));
   const failures: string[] = [];
   const failedMarketplaces = new Set<string>();
@@ -467,8 +474,42 @@ function schedule(remove: boolean): void {
     "michaelhvisser-ai",
     "update-plugins.log",
   );
-  const release = acquireUpdateLock(codexHome);
+  const releases: (() => void)[] = [];
   try {
+    // The launchd label is shared across profiles. Serialize schedule changes
+    // before reading its saved home, then coordinate every affected updater.
+    releases.push(
+      acquireUpdateLock(
+        join(
+          homedir(),
+          "Library",
+          "Application Support",
+          "michaelhvisser-ai",
+          "schedule",
+        ),
+      ),
+    );
+    const homes = new Set([codexHome]);
+    if (existsSync(agent)) {
+      const saved = spawnSync(
+        "/usr/bin/plutil",
+        ["-convert", "json", "-o", "-", agent],
+        { encoding: "utf8" },
+      );
+      if (saved.error || saved.status !== 0)
+        throw new Error(
+          "Cannot read existing updater schedule; leave the job unchanged.",
+        );
+      const previousHome: unknown = JSON.parse(saved.stdout)
+        .EnvironmentVariables?.CODEX_HOME;
+      if (typeof previousHome !== "string" || !isAbsolute(previousHome))
+        throw new Error(
+          "Cannot read existing updater schedule CODEX_HOME; leave the job unchanged.",
+        );
+      homes.add(previousHome);
+    }
+    for (const home of homes) releases.push(acquireUpdateLock(home));
+    for (const home of homes) recoverDisabled(home, console.log);
     if (!remove) inventory(cli(["plugin", "list", "--json"]));
     launchctl(["bootout", `${domain}/${label}`], true);
     if (remove) {
@@ -489,7 +530,7 @@ function schedule(remove: boolean): void {
       ),
     );
   } finally {
-    release();
+    for (const release of releases.reverse()) release();
   }
   // Bootstrap starts RunAtLoad; that worker acquires its own update claim.
   // Release only after bootout and all schedule writes, before starting it.

@@ -151,7 +151,9 @@ node scripts/update-plugins.ts --install-schedule
 
 It runs immediately and every 24 hours while logged in. Keep this checkout and
 the Node installation at their current paths. The job captures your current
-`PATH` and `CODEX_HOME`; reinstall it if those change. Output and errors go to
+`PATH` and `CODEX_HOME`; reinstall it if those change. Schedule changes lock both
+the current profile and the home saved in the existing job, and restore pending
+disabled preferences before replacing or removing it. Output and errors go to
 `~/Library/Logs/michaelhvisser-ai/update-plugins.log`. On Linux, schedule the
 ordinary updater command with your scheduler and set its `PATH` and `CODEX_HOME`.
 

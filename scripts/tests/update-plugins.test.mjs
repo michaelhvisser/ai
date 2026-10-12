@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
@@ -484,7 +484,14 @@ for (const status of [1, 3])
     );
     try {
       mkdirSync(join(root, "Library", "LaunchAgents"), { recursive: true });
-      writeFileSync(agent, "original job");
+      const original = schedulePlist(
+        script,
+        process.execPath,
+        process.env.PATH,
+        home,
+        join(root, "log"),
+      );
+      writeFileSync(agent, original);
       writeFileSync(
         join(root, "codex"),
         `#!${process.execPath}\nconsole.log('{"installed":[],"available":[]}');`,
@@ -513,7 +520,7 @@ for (const status of [1, 3])
               error.status === 1 &&
               String(error.stderr).includes("Operation not permitted"),
           );
-          assert.equal(readFileSync(agent, "utf8"), "original job");
+          assert.equal(readFileSync(agent, "utf8"), original);
         } else
           execFileSync(process.execPath, [script, flag], {
             env,
@@ -526,6 +533,157 @@ for (const status of [1, 3])
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+test("schedule migration locks the recorded home and restores its interrupted preference", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS scheduling only");
+    return;
+  }
+  const root = temporary();
+  const oldHome = join(root, "old-home");
+  const newHome = join(root, "new-home");
+  const agent = join(
+    root,
+    "Library",
+    "LaunchAgents",
+    "com.michaelhvisser.ai.update-plugins.plist",
+  );
+  const script = fileURLToPath(
+    new URL("../update-plugins.ts", import.meta.url),
+  );
+  const calls = join(root, "calls");
+  const original = schedulePlist(
+    script,
+    process.execPath,
+    process.env.PATH,
+    oldHome,
+    join(root, "log"),
+  );
+  const env = {
+    ...process.env,
+    HOME: root,
+    CODEX_HOME: newHome,
+    PATH: `${root}:${process.env.PATH}`,
+  };
+  let release;
+  try {
+    mkdirSync(dirname(agent), { recursive: true });
+    writeFileSync(agent, original);
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.log('{"installed":[]}');`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(root, "launchctl"),
+      `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(calls)},process.argv[2]+'\\n');`,
+      { mode: 0o755 },
+    );
+    release = acquireUpdateLock(oldHome);
+    for (const flag of ["--install-schedule", "--remove-schedule"]) {
+      assert.throws(
+        () =>
+          execFileSync(process.execPath, [script, flag], {
+            env,
+            stdio: "pipe",
+          }),
+        (error) => String(error.stderr).includes("Another updater"),
+      );
+      assert.equal(readFileSync(agent, "utf8"), original);
+      assert.equal(existsSync(calls), false);
+    }
+    release();
+    release = undefined;
+    writeFileSync(
+      join(oldHome, "config.toml"),
+      '[plugins."off@fixture"]\nenabled = true\n',
+    );
+    writeFileSync(
+      join(oldHome, ".plugin-update-disabled.json"),
+      JSON.stringify("off@fixture"),
+    );
+    execFileSync(process.execPath, [script, "--install-schedule"], {
+      env,
+      stdio: "pipe",
+    });
+    assert.match(
+      readFileSync(join(oldHome, "config.toml"), "utf8"),
+      /enabled = false/,
+    );
+    assert.equal(
+      existsSync(join(oldHome, ".plugin-update-disabled.json")),
+      false,
+    );
+    assert.match(readFileSync(agent, "utf8"), new RegExp(newHome));
+    execFileSync(process.execPath, [script, "--remove-schedule"], {
+      env: { ...env, CODEX_HOME: oldHome },
+      stdio: "pipe",
+    });
+    assert.equal(existsSync(agent), false);
+    assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+      "bootout",
+      "bootstrap",
+      "bootout",
+    ]);
+    for (const home of [oldHome, newHome])
+      assert.deepEqual(readdirSync(join(home, ".plugin-update-lock")), []);
+  } finally {
+    release?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable schedule retains the plist and stops before bootout", (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS scheduling only");
+    return;
+  }
+  const root = temporary();
+  const agent = join(
+    root,
+    "Library",
+    "LaunchAgents",
+    "com.michaelhvisser.ai.update-plugins.plist",
+  );
+  const script = fileURLToPath(
+    new URL("../update-plugins.ts", import.meta.url),
+  );
+  try {
+    mkdirSync(dirname(agent), { recursive: true });
+    writeFileSync(agent, "invalid plist");
+    writeFileSync(
+      join(root, "codex"),
+      `#!${process.execPath}\nconsole.log('{"installed":[]}');`,
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(root, "launchctl"),
+      `#!${process.execPath}\nprocess.exitCode=0;`,
+      { mode: 0o755 },
+    );
+    for (const flag of ["--install-schedule", "--remove-schedule"]) {
+      assert.throws(
+        () =>
+          execFileSync(process.execPath, [script, flag], {
+            env: {
+              ...process.env,
+              HOME: root,
+              CODEX_HOME: join(root, "profile"),
+              PATH: `${root}:${process.env.PATH}`,
+            },
+            stdio: "pipe",
+          }),
+        (error) =>
+          String(error.stderr).includes(
+            "Cannot read existing updater schedule",
+          ),
+      );
+      assert.equal(readFileSync(agent, "utf8"), "invalid plist");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("implicit marketplace plugins delegate to native add without registration metadata", () => {
   const entries = ["local", "git", "git-subdir", "npm"].map((source) => ({
