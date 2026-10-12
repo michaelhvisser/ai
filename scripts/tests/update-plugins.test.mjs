@@ -234,18 +234,22 @@ test("a removed plugin does not block pending recovery or updates of remaining p
   }
 });
 
-test("unknown marketplace sources fail closed without blocking known sources", () => {
-  const entries = [
-    plugin("unknown", "old", true, "future-type"),
-    plugin("known", "local", true, "local"),
-  ];
+test("implicit marketplace plugins delegate to native add without registration metadata", () => {
+  const entries = ["local", "git", "git-subdir", "npm"].map((source) => ({
+    ...plugin(source, "personal", true, "local"),
+    marketplaceSource: undefined,
+    source: { source },
+  }));
   const installed = [];
   const run = (args) =>
     args[1] === "list"
       ? { installed: entries }
       : (installed.push(args[2]), { pluginId: args[2], version: "2.0.0" });
-  assert.equal(updatePlugins({ run, log() {} }), 1);
-  assert.deepEqual(installed, ["known@local"]);
+  assert.equal(updatePlugins({ run, log() {} }), 0);
+  assert.deepEqual(
+    installed,
+    entries.map((entry) => entry.pluginId),
+  );
 });
 
 test("Codex receives the same absolute home when CODEX_HOME is relative", () => {

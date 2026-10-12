@@ -276,15 +276,8 @@ export function updatePlugins({
     const remote =
       plugin.source?.source === "remote" ||
       plugin.marketplaceSource?.sourceType === "remote";
-    if (
-      !remote &&
-      !["git", "local"].includes(plugin.marketplaceSource?.sourceType || "")
-    ) {
-      failures.push(
-        `${id}: unknown marketplace source; refusing a stale reinstall`,
-      );
-      continue;
-    }
+    // Registration metadata is absent for implicit personal marketplaces.
+    // Native add resolves each plugin's local, Git or npm source itself.
     if (!plugin.enabled && remote) {
       log(
         `SKIPPED: ${id}: the CLI install would enable this account-managed plugin; leave it disabled.`,
