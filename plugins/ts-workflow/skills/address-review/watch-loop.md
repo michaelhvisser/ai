@@ -2,7 +2,9 @@
 
 ## Phase Transition
 
-Before entering the watch loop, update the loop state phase so that any stop-hook re-entry resumes at Step 12 instead of restarting the fix cycle:
+Before entering the watch loop, update the loop state phase so that stop-hook re-entry restores its target, resolves current policy, and
+refreshes feedback at Step 2 and validation at Steps 5, 7, and 11 before
+returning to Step 12. Only current actionable feedback requires fix actions:
 
 ```bash
 SAFE_LOOP_NAME=$(echo "address-review-${RESOLVED_PR:-auto}" | sed 's/[^a-zA-Z0-9_-]/-/g')

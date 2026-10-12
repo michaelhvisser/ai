@@ -48,18 +48,17 @@ Read `<PLUGIN_ROOT>/skills/e2e-verify/setup.md` completely and execute its
 argument parsing and PR resolution. It accepts exactly these modes:
 `verify|fix-and-verify|investigate|ship-prep|ship|fix-and-ship`.
 
-Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against that target now,
-before loop-state re-entry routing. Reconcile inherited evidence and current
-delivery authority before jumping to a saved posting or shipping phase.
-
 Read `<PLUGIN_ROOT>/skills/e2e-verify/loop-state.md` completely and execute,
 in order:
 
 1. **Embedded Workflow Contract**
 2. **Bootstrap Block**
-3. **Persist Arguments Block**
-4. **Re-entry Check**
-5. **Terminal Re-entry**
+3. **Restore resume context**, then **Persist Arguments Block**
+4. Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against the validated,
+   restored `WORKTREE_PATH`. Reconcile inherited evidence and current delivery
+   authority before any saved-phase jump.
+5. **Re-entry Check**
+6. **Terminal Re-entry**
 
 If this skill or any supporting file sets `WORKFLOW_RESULT=INCOMPLETE`, execute
 **Hard Invariant Failure** from `loop-state.md` and stop. If browser ownership

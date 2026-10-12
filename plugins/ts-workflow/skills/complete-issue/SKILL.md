@@ -39,13 +39,13 @@ coverage/agent flags. A missing issue number is a missing-intent gate: request
 it and stop before loop initialization or any completion claim.
 
 Read `<PLUGIN_ROOT>/skills/complete-issue/loop-state.md` completely and execute
-its bootstrap, then resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against
-the persisted target before its owner re-entry routing. On a fresh run, resolve
-policy when start-issue establishes the target. This single shared contract
-governs validation in every child, the owner's completion gate, and feedback
-resolution; do not add a second unconditional CI requirement at the owner.
-Execute the remaining argument persistence and re-entry checks from
-`loop-state.md`. Complete-issue owns the
+its **Bootstrap Block**, **Persist Arguments Block**, and **Restore and validate
+target** under **Re-entry Check**, in that order. Resolve
+`<PLUGIN_ROOT>/lib/validation-policy.md` against the restored target before
+**Phase routing**. On a fresh run, resolve policy when start-issue establishes
+the target. This single shared contract governs validation in every child,
+the owner's completion gate, and feedback resolution; do not add a second
+unconditional CI requirement at the owner. Complete-issue owns the
 physical state file and terminal promise. Each component uses a child path in
 that same file and returns structured state without a terminal marker.
 

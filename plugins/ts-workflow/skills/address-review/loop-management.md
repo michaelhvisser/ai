@@ -73,7 +73,10 @@ fi
 
 ## Re-entry Check
 
-Check if resuming from a previous watching phase:
+### Restore and validate target
+
+Restore the target before context discovery or validation-policy resolution.
+Do not dispatch a saved phase from this block:
 
 ```bash
 CURRENT_PHASE=""
@@ -113,9 +116,15 @@ fi
 echo "Current phase: ${CURRENT_PHASE:-<none>}"
 ```
 
-**If `CURRENT_PHASE` is `watching` AND `WATCH_MODE` is `true`:** Fix cycle already completed. Restore `BOT_REVIEW_BASELINE` from state file:
+### Phase routing
+
+Execute only after refreshed target context and current validation policy.
+
+**If `CURRENT_PHASE` is `watching` AND `WATCH_MODE` is `true`:** Fix actions already completed. Restore `BOT_REVIEW_BASELINE` from state file:
 
 ```bash
+# Standalone resume uses Step 11's current-local-head comparison after any fixes.
+unset EXPECTED_REVIEW_HEAD
 BOT_REVIEW_BASELINE=""
 if [ -f "$LOOP_STATE_FILE" ]; then
   BOT_REVIEW_BASELINE=$(get_loop_field "$LOOP_STATE_FILE" "bot_review_baseline" "$WORKFLOW_STATE_PATH")
@@ -131,7 +140,14 @@ else
 fi
 ```
 
-Do NOT re-run the fix cycle. Skip to watch loop (read `watch-loop.md`).
+Clear the session-only head expectation in the block above, then continue at
+Step 2. Step 11 compares the published head with the restored target's current
+local HEAD after any workflow-owned fix commit and push. Fetch current unresolved threads and pending reviews
+before any completion gate. New actionable feedback follows the existing
+Steps 3-11 fix cycle; a clean result skips only inapplicable fix actions and
+still executes Steps 5, 7, and 11 before Step 12. Do not return directly to
+watching or completion from saved validation evidence. A failed gate follows
+its incomplete or fix-cycle outcome.
 
 **If `CURRENT_PHASE` is `watching` AND `WATCH_MODE` is `false`:** Clear stale phase:
 

@@ -56,6 +56,10 @@ fi
 
 ## Re-entry Check
 
+### Restore and validate target
+
+Execute this block before resolving validation policy or routing a saved phase.
+
 ```bash
 source "<PLUGIN_ROOT>/lib/loop-state.sh"
 if [ -f "$STATE_FILE" ]; then
@@ -84,6 +88,10 @@ if [ -n "$PHASE" ] && [ "$PHASE" != "implementing" ] && [ "$PHASE" != "incomplet
   REPO_SLUG="$PERSISTED_REPO_SLUG"
 fi
 ```
+
+### Phase routing
+
+Execute only after target restoration and current-policy resolution.
 
 If `PHASE` is `implementing`, read the start-issue component phase before
 resuming Phase 1. If it is `verifying`, read the E2E component phase before
