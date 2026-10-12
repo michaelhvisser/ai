@@ -190,6 +190,10 @@ for T in 'fix(build): recognize worktree caches' 'perf: the build output is slow
   mkissue 9 "$T" me '[]' 'body'; with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
   [ -z "$(jq -r .noise_signal "$RUN/state-9.json")" ] || fail V5 "prose mention misread as noise: $T"
 done
+LARGE_BODY=$(printf 'ordinary fixture text\n%.0s' {1..4096})
+mkissue 9 'chore: regenerate domain/storage/_generated/queries.go' me '[]' "$LARGE_BODY"
+with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
+[ -n "$(jq -r .noise_signal "$RUN/state-9.json")" ] || fail V5 "a matching title must survive a large body under pipefail"
 mkissue 9 'plain title' me '[]' $'looks fine\n<!-- detent-intake:abc123 -->'; with_script "$run_env; id_fetch 9; id_noise 9" >/dev/null
 [ "$(jq -r .noise_signal "$RUN/state-9.json")" = "detent-intake fingerprint" ] || fail V5 "fingerprint not named"
 [ "$FAILS" = 0 ] && pass V5 "noise only on a fingerprint or a build-output/_generated/node_modules path"
