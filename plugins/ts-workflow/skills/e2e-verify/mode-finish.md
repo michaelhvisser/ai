@@ -77,32 +77,25 @@ alone is not evidence of a trigger.
 | Mode | Action |
 |------|--------|
 | `verify` | Report results, then finish with a verified result |
-| `fix-and-verify` | Add `run-full-ci` label, report results, then finish with a verified result |
+| `fix-and-verify` | Report results, then finish with a verified result |
 | `investigate` | Report findings with no label, then finish with a verified result |
-| `ship-prep` | Add `run-full-ci` label, report results, then finish with a verified result |
+| `ship-prep` | Report results, then finish with a verified result |
 | `ship` | Set phase to `shipping`. Execute the ship workflow |
-| `fix-and-ship` | Add `run-full-ci` label. Set phase to `shipping`. Watch CI → execute the full ship workflow |
+| `fix-and-ship` | Set phase to `shipping`. Satisfy current validation policy, then execute the full ship workflow |
 
-## Add the `run-full-ci` Label
-
-For all modes that include the label step:
-
-```bash
-jq -cn '{labels: ["run-full-ci"]}' |
-  gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
-```
-
-Execute that label recipe only for a repository whose effective policy names
-`run-full-ci` as an authorized trigger. Otherwise omit the label step and use
-the repository's applicable validation path.
+Step 6d owns any explicitly configured repository label handling. Step 7 adds
+no labels and never treats a conventional label name as a trigger.
 
 ## `fix-and-ship` CI Watch Loop
 
-Run after the label add. The watcher waits for check registration, pins every
+Run only when CI is applicable under current policy. Local mode uses required
+local evidence and proceeds to the authorized ship handoff without this watcher.
+The watcher waits for check registration, pins every
 poll to the exact PR head, and rejects API failures or a head shift.
 
 ```bash
 set_loop_phase "$STATE_FILE" "shipping" "$WORKFLOW_STATE_PATH"
+if [ "${VALIDATION_MODE:-auto}" != "local" ]; then
 PR_JSON=$(cd "$WORKTREE_PATH" && github_pr "$PR_NUM") || {
   WORKFLOW_RESULT=INCOMPLETE
   WORKFLOW_REASON=ci-api-failed
@@ -129,6 +122,7 @@ if [ "${WORKFLOW_RESULT:-}" = "INCOMPLETE" ]; then
   exit 1
 fi
 jq -r '.items[] | "\(.name): \(.state)"' <<< "$CHECKS_SNAPSHOT"
+fi
 ```
 
 Every non-success watcher result follows the top-level **Hard Invariant

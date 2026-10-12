@@ -135,11 +135,11 @@ is identical across modes.
 | Mode | Footer |
 |------|--------|
 | `verify` | "Verification complete. Ready for review." |
-| `fix-and-verify` | "Review feedback addressed and verified. `run-full-ci` label added." |
+| `fix-and-verify` | "Review feedback addressed and verified." |
 | `investigate` | "Investigation complete. See findings above." |
-| `ship-prep` | "Ship prep complete. `run-full-ci` label added. Ready for `$ts-workflow:ship`." |
+| `ship-prep` | "Ship prep complete. Ready for `$ts-workflow:ship`." |
 | `ship` | "Verified and shipping via `$ts-workflow:ship`." |
-| `fix-and-ship` | "Review addressed, verified, and shipping. `run-full-ci` label added." |
+| `fix-and-ship` | "Review addressed, verified, and shipping." |
 
 **Fail path** (`E2E_RESULT` is `fail`, `partial`, `skipped-server-failed`,
 `missing-browser-tooling`, or `uninspected-screenshots` on a UI-visible diff)
@@ -149,27 +149,16 @@ is identical across modes.
 > no ship invoked. Address the findings above and re-run
 > `$ts-workflow:e2e-verify`.
 
-## 6d. Add Labels (gated on `E2E_RESULT`)
+## 6d. Repository-owned labels
 
-Labels are added only when the Step 7 gate would pass — i.e. `E2E_RESULT=pass`
-on a UI-visible diff or `E2E_RESULT=skipped` on a non-UI diff. For any fail
-state, **do not add `run-full-ci`** and **do not add `e2e-verified`**.
+This skill does not automatically add CI-trigger or readiness labels. Passing
+E2E produces evidence; it does not authorize state changes. Apply
+`<PLUGIN_ROOT>/lib/validation-policy.md` before any repository-required label
+handling. Use only the repository's explicitly configured, authorized helper
+after the full Step 7.0 E2E gate passes. Local mode skips automatic trigger and
+readiness labels. If no helper or authorization is established, leave labels
+unchanged; a conventional label name is not configuration.
 
-When the gate has passed, for modes that add the `run-full-ci` label
-(`fix-and-verify`, `ship-prep`, `fix-and-ship`):
-
-```bash
-jq -cn '{labels: ["run-full-ci"]}' |
-  gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
-```
-
-When the gate has passed, also add the `e2e-verified` label to mark the PR as
-E2E-clean:
-
-```bash
-jq -cn '{labels: ["e2e-verified"]}' |
-  gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
-```
-
-Both labels must already exist in the repository. A failed REST label request
-is a non-success result; do not report the corresponding label as added.
+The footer reports verification and the authorized next phase. It never claims
+a label mutation in advance. Report a repository-owned mutation separately
+only after its API result confirms success; a failed request is incomplete.

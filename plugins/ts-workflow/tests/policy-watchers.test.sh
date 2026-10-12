@@ -13,6 +13,9 @@ AI_WATCH_LOG="$WORKTREE_PATH/watch.log"
 PR_NUM=7
 PR_HEAD_SHA=$(git -C "$WORKTREE_PATH" rev-parse HEAD)
 WORKFLOW_REASON=''
+STATE_FILE=unused
+WORKFLOW_STATE_PATH='[]'
+set_loop_phase() { :; }
 github_pr() { printf '{"head":{"sha":"%s"}}' "$PR_HEAD_SHA"; }
 github_watch_pr_checks() {
   printf '%s\n' called >> "$AI_WATCH_LOG"
@@ -27,6 +30,7 @@ else
 fi
 SCRIPT
 for DOC in skills/e2e-verify/rebase-and-build.md \
+  skills/e2e-verify/mode-finish.md \
   skills/address-review/checkout-rebase.md \
   skills/address-review/fix-cycle.md \
   skills/address-review/completion-check.md; do
