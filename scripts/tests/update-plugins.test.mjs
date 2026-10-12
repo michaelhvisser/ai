@@ -327,13 +327,15 @@ test("pending recovery is untouched by dry-run and fails closed when restoration
   }
 });
 
-test("a removed plugin does not block pending recovery or updates of remaining plugins", () => {
+test("catalog absence still restores a cached plugin's disabled configuration", () => {
   const home = temporary();
   const pending = join(home, ".plugin-update-disabled.json");
+  const config = join(home, "config.toml");
   const entry = plugin("on", "fixture", true, "local");
   let installs = 0;
   try {
     writeFileSync(pending, JSON.stringify("removed@fixture"));
+    writeFileSync(config, '[plugins."removed@fixture"]\nenabled = true\n');
     const run = (args) =>
       args[1] === "list"
         ? { installed: [entry] }
@@ -341,6 +343,32 @@ test("a removed plugin does not block pending recovery or updates of remaining p
     assert.equal(updatePlugins({ run, codexHome: home, log() {} }), 0);
     assert.equal(installs, 1);
     assert.equal(existsSync(pending), false);
+    assert.match(readFileSync(config, "utf8"), /enabled = false/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("catalog absence cannot discard recovery when configuration is missing", () => {
+  const home = temporary();
+  const pending = join(home, ".plugin-update-disabled.json");
+  let calls = 0;
+  try {
+    writeFileSync(pending, JSON.stringify("removed@fixture"));
+    assert.throws(
+      () =>
+        updatePlugins({
+          codexHome: home,
+          log() {},
+          run() {
+            calls++;
+            return { installed: [] };
+          },
+        }),
+      /Missing config while preserving/,
+    );
+    assert.equal(calls, 0);
+    assert.equal(JSON.parse(readFileSync(pending, "utf8")), "removed@fixture");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -357,17 +385,8 @@ test("pending local state is restored before an unrelated remote inventory failu
     writeFileSync(pending, JSON.stringify(entry.pluginId));
     const run = (args) => {
       calls.push(args);
-      if (!args.includes("--marketplace"))
-        throw Error("Incomplete remote inventory");
-      assert.equal(args[3], "fixture");
-      return {
-        installed: [
-          {
-            ...entry,
-            enabled: readFileSync(config, "utf8").includes("enabled = true"),
-          },
-        ],
-      };
+      assert.match(readFileSync(config, "utf8"), /enabled = false/);
+      throw Error("Incomplete remote inventory");
     };
     assert.throws(
       () => updatePlugins({ run, codexHome: home, log() {} }),

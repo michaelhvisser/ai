@@ -277,35 +277,12 @@ export function updatePlugins({
     const id: unknown = JSON.parse(readFileSync(pendingPath, "utf8"));
     if (!validPluginId(id))
       throw new Error(`Invalid disabled recovery record: ${pendingPath}`);
-    // A scoped local-marketplace list bypasses the unrelated remote catalog.
-    const marketplace = id.split("@")[1];
-    const recoveryArgs = [
-      "plugin",
-      "list",
-      ...(marketplace.startsWith("-")
-        ? [`--marketplace=${marketplace}`]
-        : ["--marketplace", marketplace]),
-      "--json",
-    ];
-    const pending = inventory(run(recoveryArgs)).find(
-      (plugin) => plugin.pluginId === id,
-    );
-    if (pending?.enabled) {
-      restoreDisabled(join(codexHome, "config.toml"), pending.pluginId);
-      if (
-        inventory(run(recoveryArgs)).find((plugin) => plugin.pluginId === id)
-          ?.enabled !== false
-      )
-        throw new Error(
-          `Pending disabled plugin was not restored: ${pendingPath}`,
-        );
-    }
+    // Catalog membership cannot prove whether a cached plugin is still loaded.
+    // Restore the saved preference directly, before any inventory or auth call.
+    // Missing/unrecognized configuration leaves the marker for operator repair.
+    restoreDisabled(join(codexHome, "config.toml"), id);
     rmSync(pendingPath);
-    log(
-      pending
-        ? `Recovered disabled setting: ${pending.pluginId}`
-        : `Discarded recovery for removed plugin: ${id}`,
-    );
+    log(`Recovered disabled setting: ${id}`);
   }
   const plugins = inventory(run(["plugin", "list", "--json"]));
   const failures: string[] = [];

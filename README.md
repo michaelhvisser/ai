@@ -134,6 +134,9 @@ does not pull or switch branches in development checkouts. Remote plugins are
 refreshed through the same CLI and may fail if account access or authentication
 is required. New sessions load the updated versions. The native CLI can remove
 old cache versions; an active session still using those files may need a restart.
+After interruption, the updater restores a saved disabled preference directly
+in the configuration before loading inventory. A missing or unrecognized config
+stops the batch and retains the recovery record for repair.
 Profiles with cached account-managed installations require ChatGPT authentication
 for a complete inventory; signed-out or API-key authentication stops the batch.
 Local-only profiles continue to work without ChatGPT authentication.
