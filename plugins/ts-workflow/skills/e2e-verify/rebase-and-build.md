@@ -192,6 +192,11 @@ echo "Commits behind ${BASE_REMOTE}/${BASE_BRANCH}: $BEHIND"
 
 ### 1d. Wait for CI After Rebase (only if rebased)
 
+When `<PLUGIN_ROOT>/lib/validation-policy.md` selects `VALIDATION_MODE=local`,
+skip this CI wait and continue to Step 2's required local build and tests.
+Refresh current-head evidence after the rebase; do not claim remote CI passed.
+Only the pr-ci branch executes the watcher below.
+
 ```bash
 HEAD_SHA=$(git -C "$WORKTREE_PATH" rev-parse HEAD)
 CHECKS_STATUS=0

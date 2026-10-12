@@ -13,6 +13,9 @@ strategy detection, REST mergeability decision tree, and summary rendering.
 ```bash
 HAS_CI=$(get_loop_field "$STATE_FILE" "has_ci" "$WORKFLOW_STATE_PATH")
 HEAD_SHA=$(get_loop_field "$STATE_FILE" "head_sha" "$WORKFLOW_STATE_PATH")
+if [ "${VALIDATION_MODE:-auto}" = "pr-ci" ] && [ "$HAS_CI" != "true" ]; then
+  WORKFLOW_REASON="required-ci-unverified"
+fi
 if [ "$HAS_CI" = "true" ]; then
   if [ -z "$HEAD_SHA" ]; then
     WORKFLOW_REASON="ci-head-missing"

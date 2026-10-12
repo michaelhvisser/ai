@@ -34,6 +34,13 @@ bootstrap. Standalone ship owns one canonical state file; embedded ship uses the
 caller file and child path, never creates another loop, changes root promises,
 or emits a terminal marker.
 
+Using the target repository persisted by bootstrap, read
+`<PLUGIN_ROOT>/lib/validation-policy.md` and resolve effective policy now,
+before argument restoration or any re-entry phase jump. Reconcile saved
+validation applicability as specified there; a saved `has_ci=false` is not
+authority to omit newly required CI. Read the verification-record section of
+`<PLUGIN_ROOT>/lib/work-method.md` and preserve current-head evidence.
+
 Parse `SKILL_ARGS` into `LLM_CHOICE` (default `codex`), `MAX_PASSES`
 (default `3`), `NO_MERGE`, `SKIP_COVERAGE`, `COVERAGE_THRESHOLD`
 (default `60`), `GEMINI_TIER`, and `LLM_EXPLICIT`. Supported LLMs are
@@ -67,6 +74,11 @@ Read `<PLUGIN_ROOT>/lib/ship/context.md` completely and execute PR, branch, and
 worktree-ownership discovery. Shipping the default branch is a hard invariant.
 Include dirty changes only when ownership and fresh validation are unambiguous;
 otherwise preserve unrelated work or stop incomplete.
+
+Reconcile the discovered repository with bootstrap's target. If it differs,
+resolve validation policy again before continuing. Local mode replaces later
+CI watcher steps with the shared local-validation procedure; it never grants
+merge approval.
 
 Read `<PLUGIN_ROOT>/lib/ship/prerequisites.md` when resolving the review
 backend. An unavailable unpinned default uses external CLIs, then a recorded

@@ -74,6 +74,14 @@ and stop before branch creation or implementation.
 
 ## Implementation Selection
 
+Read `<PLUGIN_ROOT>/lib/work-method.md` and apply its task routing before
+implementation. Record the reproduction, safety assumptions, applicable design
+comparison, and criterion-to-check mapping in the existing plan/workpad. Paste
+the applicable method sections into delegated implementation prompts.
+Read `<PLUGIN_ROOT>/lib/validation-policy.md` after resolving the repository.
+Its effective policy selects local validation or exact-head PR CI and governs
+every later CI label, watcher, and delivery step in either implementation flow.
+
 For `NO_AGENTS=true`, or on Codex without the required native
 `explorer`/`worker`/`default` delegation profiles, read
 `<PLUGIN_ROOT>/lib/start-issue/manual-workflow.md` completely and execute its
@@ -98,9 +106,10 @@ for changed source, and security review is complete. Read
 `<PLUGIN_ROOT>/lib/coverage/coverage-verification.md` for coverage.
 
 After publishing, read
-`<PLUGIN_ROOT>/lib/start-issue/ci-monitoring.md` completely and require
-successful REST monitoring for the exact pushed head. Prior-head or absent
-checks are not passing evidence.
+`<PLUGIN_ROOT>/lib/start-issue/ci-monitoring.md` completely. Follow its local
+validation branch when policy selects local mode; otherwise require successful
+REST monitoring for the exact pushed head. Record local-mode CI as not
+applicable, never passed. Prior-head checks are not passing evidence.
 
 If any supporting file produces an incomplete result, execute **Workflow Result
 Contract** from `loop-state.md` and stop. Embedded runs persist structured

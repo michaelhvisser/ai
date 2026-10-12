@@ -31,6 +31,13 @@ in a language plugin or inline and cannot resolve this plugin's path).
 
 Load the shared GitHub REST helpers before any GitHub operation:
 
+Before a fix pass, read `${CLAUDE_PLUGIN_ROOT}/lib/work-method.md` and paste the
+applicable reproduction, safety-proof, and verification-record sections into
+the fixer prompt, alongside the existing root-fix policy. Resolve
+`${CLAUDE_PLUGIN_ROOT}/lib/validation-policy.md` for the target repository before
+CI or delivery actions. These contracts also apply when the fixer is in a Go
+plugin; it does not need to resolve this plugin's cache path.
+
 ```bash
 source "${CLAUDE_PLUGIN_ROOT}/lib/github-rest.sh"
 ```

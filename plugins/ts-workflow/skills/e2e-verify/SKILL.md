@@ -27,6 +27,13 @@ Run `source "<PLUGIN_ROOT>/lib/github-rest.sh"`.
 
 ## Non-Negotiable Visual Gate
 
+After target discovery, read `<PLUGIN_ROOT>/lib/validation-policy.md` before
+rebasing or triggering CI. Apply its local-mode path to all later watchers and
+label steps. Read the verification-record section of
+`<PLUGIN_ROOT>/lib/work-method.md`; reuse any maintained feature recipes to
+cover actual entry points and outcomes. Select an explicitly known test
+organization rather than the first visible login-picker option.
+
 Every screenshot must be read with vision, compared to the PR/issue spec,
 described, and checked for discrepancies. DOM, console, and network checks
 supplement visual inspection; they never replace it.
@@ -40,6 +47,10 @@ verified result.
 Read `<PLUGIN_ROOT>/skills/e2e-verify/setup.md` completely and execute its
 argument parsing and PR resolution. It accepts exactly these modes:
 `verify|fix-and-verify|investigate|ship-prep|ship|fix-and-ship`.
+
+Resolve `<PLUGIN_ROOT>/lib/validation-policy.md` against that target now,
+before loop-state re-entry routing. Reconcile inherited evidence and current
+delivery authority before jumping to a saved posting or shipping phase.
 
 Read `<PLUGIN_ROOT>/skills/e2e-verify/loop-state.md` completely and execute,
 in order:

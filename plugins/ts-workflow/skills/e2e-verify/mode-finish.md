@@ -66,6 +66,14 @@ Then evaluate `E2E_RESULT`:
 
 ## Step 7.1: Mode → Action Table (only reached when the gate above passed)
 
+Apply `<PLUGIN_ROOT>/lib/validation-policy.md` before the table's labels or
+watchers. In local mode, verification modes report their current-head evidence
+without CI-trigger labels. Ship modes run the local-validation path and proceed
+directly to the authorized Ship Workflow Handoff, skipping the CI Watch Loop.
+In pr-ci mode, add a trigger label only when current repository configuration
+and authorization establish that it is required. The conventional label name
+alone is not evidence of a trigger.
+
 | Mode | Action |
 |------|--------|
 | `verify` | Report results, then finish with a verified result |
@@ -84,8 +92,9 @@ jq -cn '{labels: ["run-full-ci"]}' |
   gh api --method POST "repos/$REPO_SLUG/issues/$PR_NUM/labels" --input -
 ```
 
-The repo's CI is gated on this label so the full test matrix only runs once
-the verifier has signed off — don't add it earlier in the flow.
+Execute that label recipe only for a repository whose effective policy names
+`run-full-ci` as an authorized trigger. Otherwise omit the label step and use
+the repository's applicable validation path.
 
 ## `fix-and-ship` CI Watch Loop
 

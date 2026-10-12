@@ -54,6 +54,11 @@ context size guard and bot-noise filtering.
 
 ## Steps 3-4: Coverage Plan and Static Analysis
 
+Read `<PLUGIN_ROOT>/lib/work-method.md` for the applicable safety-assumption,
+bug-reproduction, and verification-record criteria. Read
+`<PLUGIN_ROOT>/lib/validation-policy.md` to judge evidence against the target
+repository's effective gates. A report-only review does not run mutating checks.
+
 Read `<PLUGIN_ROOT>/skills/review-deep/static-analysis.md` completely and
 execute it. Generate the correct base/uncommitted diff, preserve `SCOPE_HINT`,
 run the shared adaptive planner in

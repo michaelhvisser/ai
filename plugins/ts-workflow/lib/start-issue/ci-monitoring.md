@@ -1,5 +1,10 @@
 # Start-Issue CI Monitoring
 
+First apply `<PLUGIN_ROOT>/lib/validation-policy.md`. When `VALIDATION_MODE=local`,
+execute its local-validation path and record CI as not applicable under the
+cited policy. Return to start-issue's completion flow without executing the
+monitor below. Missing required local evidence remains incomplete.
+
 Run the shared REST monitor in the selected worktree. Capture the published
 local head after pushing; never substitute an unrelated remote head.
 

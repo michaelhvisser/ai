@@ -9,6 +9,13 @@ The plan check judges the **plan**, not the diff. A wrong plan implemented perfe
 wrong; a right plan with a sloppy diff is still the right plan. Diff quality belongs to
 `review-deep` and `antagonist-review`.
 
+Read `${CLAUDE_PLUGIN_ROOT}/lib/work-method.md` and
+`${CLAUDE_PLUGIN_ROOT}/lib/validation-policy.md`. Paste the applicable method
+and effective repository policy into the plan-check prompt. Judge reproduction,
+safety assumptions, consequential design alternatives, and acceptance checks
+against that policy. Pending execution in a plan is not fabricated proof or
+automatically a wrong design. Keep this phase read-only.
+
 ---
 
 ## §1 Prompt template
