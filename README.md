@@ -89,8 +89,8 @@ plugin you want to update, and reload:
 /reload-plugins
 ```
 
-For Codex, close running Codex sessions before refreshing plugins, then run these
-commands in a separate terminal and start a new session:
+For Codex, run these commands in a separate terminal, then start a new session
+to load the refreshed plugin versions:
 
 ```bash
 codex plugin add workflow@michaelhvisser-ai
@@ -107,6 +107,72 @@ For Gopher AI updates and migration from older flat-skill installations, use
 sessions closed). His [universal installer](https://github.com/gopherguides/gopher-ai/blob/main/scripts/install-all.sh)
 also handles Gemini. Our installer targets Claude Code and Codex and handles
 first-time marketplace registration as well as missing plugins.
+
+### Update all installed Codex plugins automatically
+
+Requires Node 22.18+ and a Codex CLI with `codex plugin` support. The updater
+discovers installed plugins with `codex plugin list --json`, refreshes their Git
+marketplaces once each, and loops over every installed plugin. There are no
+hardcoded marketplace or plugin names. Disabled local plugins stay disabled.
+Disabled account-managed plugins are reported and skipped because the CLI's
+install operation enables them on the server and offers no disable command.
+Plugins you have not installed are left alone, and missing release versions
+are treated as unknown rather than blocking the update batch.
+
+From this checkout:
+
+```bash
+node scripts/update-plugins.ts --dry-run
+node scripts/update-plugins.ts
+```
+
+Individual failures do not prevent other plugins from updating. Failures produce
+a nonzero exit status. If the CLI warns that remote inventory is incomplete,
+the entire batch stops before any updates; fix authentication or retry when the
+catalog is available. Local marketplaces use their current files; the updater
+does not pull or switch branches in development checkouts. Remote plugins are
+refreshed through the same CLI and may fail if account access or authentication
+is required. New sessions load the updated versions. The native CLI can remove
+old cache versions; an active session still using those files may need a restart.
+After interruption, the updater restores a saved disabled preference directly
+in the configuration before loading inventory. A missing or unrecognized config
+stops the batch and retains the recovery record for repair.
+Profiles with cached account-managed installations require ChatGPT authentication
+for a complete inventory; signed-out or API-key authentication stops the batch.
+Local-only profiles continue to work without ChatGPT authentication.
+Unset `CODEX_API_KEY` and `OPENAI_API_KEY` for profiles with cached account-managed
+plugins: plugin commands give those variables precedence over stored ChatGPT auth.
+
+On macOS, install a daily LaunchAgent:
+
+```bash
+node scripts/update-plugins.ts --install-schedule
+```
+
+It runs immediately and every 24 hours while logged in. Keep this checkout and
+the Node installation at their current paths. The job captures your current
+`PATH` and `CODEX_HOME`; reinstall it if those change. Schedule changes lock both
+the current profile and the home saved in the existing job, and restore pending
+disabled preferences before replacing or removing it. Output and errors go to
+`~/Library/Logs/michaelhvisser-ai/update-plugins.log`. On Linux, schedule the
+ordinary updater command with your scheduler and set its `PATH` and `CODEX_HOME`.
+
+To remove the macOS job:
+
+```bash
+node scripts/update-plugins.ts --remove-schedule
+```
+
+Overlapping updater runs are refused. Claims under
+`$CODEX_HOME/.plugin-update-lock/` (default home `~/.codex`) identify each run
+by PID and process start time. Interrupted runs leave claims that are removed
+once their owner stops, including after reboot or PID reuse. A pending disabled
+setting is saved before installation and recovered on the next run if restoration
+was interrupted. Recovery failures stop the batch and remain in the log.
+The updater's tests use a disposable `CODEX_HOME` and never change your plugins.
+
+Claude Code has its own automatic updates: `/plugin` → Marketplaces → select a
+marketplace → Enable auto-update.
 
 ## Plugins
 
