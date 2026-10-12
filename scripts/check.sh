@@ -10,6 +10,7 @@ else
   echo "claude CLI not found; skipping plugin validate" >&2
 fi
 bash "$SCRIPT_DIR/tests/install-all.test.sh"
+node --test "$SCRIPT_DIR/tests/update-plugins.test.mjs"
 # Per-plugin shell tests (plugins/*/tests/*.test.sh), plain bash. These carry
 # the scenario corpus from live review rounds — a failing one is a regression
 # into a class Codex already caught once.
