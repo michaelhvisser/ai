@@ -152,15 +152,18 @@ repository_state_file() {
 }
 
 # True when TEXT mentions PATH as a whole path, not as the prefix of a
-# sibling such as PATH-2 or PATH.bak. A mention counts when it's followed by
-# the end of the text, a "/", whitespace, a quote, or a shell operator.
+# sibling such as PATH-2 or PATH.bak. A mention is a sibling only when the
+# next character could continue a directory name; anything else (end of text,
+# "/", whitespace, quotes, ":", shell operators) counts as a reference.
 references_path() {
   local rest="$1" path="$2"
   [ -n "$path" ] || return 1
   while [[ "$rest" == *"$path"* ]]; do
     rest=${rest#*"$path"}
     case "${rest:0:1}" in
-      "" | / | [[:space:]] | \" | \' | ";" | "&" | "|" | "(" | ")" | "<" | ">" | '`' | "$")
+      [[:alnum:]] | . | _ | - | "~" | + | @)
+        ;;
+      *)
         return 0
         ;;
     esac
