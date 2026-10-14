@@ -151,6 +151,23 @@ repository_state_file() {
   printf '%s/ts-workflow/worktree-state.json\n' "${common_dir%/}"
 }
 
+# True when TEXT mentions PATH as a whole path, not as the prefix of a
+# sibling such as PATH-2 or PATH.bak. A mention counts when it's followed by
+# the end of the text, a "/", whitespace, a quote, or a shell operator.
+references_path() {
+  local rest="$1" path="$2"
+  [ -n "$path" ] || return 1
+  while [[ "$rest" == *"$path"* ]]; do
+    rest=${rest#*"$path"}
+    case "${rest:0:1}" in
+      "" | / | [[:space:]] | \" | \' | ";" | "&" | "|" | "(" | ")" | "<" | ">" | '`' | "$")
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 check_worktree_path() {
   local state_file="" legacy_state_file="${HOME}/.claude/worktree-state.json"
   repository_state_file >/dev/null 2>&1 && state_file=$(repository_state_file)
@@ -230,8 +247,8 @@ check_worktree_path() {
       fi
       # Block commands that explicitly reference the original repo path
       # This is the Bash safety net — file path checks handle Read/Edit/Write/Glob/Grep
-      if echo "$cmd_text" | grep -qF "$original_path" 2>/dev/null; then
-        if ! echo "$cmd_text" | grep -qF "$worktree_path" 2>/dev/null; then
+      if references_path "$cmd_text" "$original_path"; then
+        if ! references_path "$cmd_text" "$worktree_path"; then
           printf '{"decision":"block","reason":"WRONG DIRECTORY: Your Bash command references the original repo (%s) instead of the worktree (%s). Replace the path to use the worktree."}\n' "$original_path" "$worktree_path"
           exit 0
         fi
