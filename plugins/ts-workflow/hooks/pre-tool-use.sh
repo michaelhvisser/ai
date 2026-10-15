@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+# Hooks inherit the host environment, not the user's login shell PATH.
+# Desktop apps may start with only system directories, hiding Homebrew tools.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
 HOOK_INPUT=$(cat)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null)
 TOOL_INPUT=$(echo "$HOOK_INPUT" | jq -r '.tool_input // empty' 2>/dev/null)
